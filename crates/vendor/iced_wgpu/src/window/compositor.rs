@@ -166,10 +166,7 @@ impl Compositor {
                     label: Some(
                         "iced_wgpu::window::compositor device descriptor",
                     ),
-                    // GMPUBLISHED PATCH: opt into BC texture compression when the
-                    // adapter has it (universal on desktop; harmless intersection
-                    // elsewhere). See GMPUBLISHED-PATCH.md.
-                    required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
+                    required_features: (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::CLIP_DISTANCES)
                         .intersection(adapter.features()),
                     required_limits: required_limits.clone(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,

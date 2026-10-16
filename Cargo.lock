@@ -1544,6 +1544,7 @@ dependencies = [
  "rodio",
  "serde",
  "serde_json",
+ "sha2",
  "sys-locale",
  "tempfile",
  "thiserror 2.0.19",
@@ -5013,8 +5014,8 @@ name = "vformats"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
- "flate2",
  "lzma-rust2",
+ "miniz_oxide",
 ]
 
 [[package]]

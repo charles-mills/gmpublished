@@ -76,12 +76,11 @@ impl MapAmbientLighting {
         self.source
     }
 
-    /// Compiled samples before nearest-sample evaluation or fallback policy.
+    /// Compiled, unevaluated samples.
     pub fn samples(&self) -> &[MapAmbientSample] {
         &self.samples
     }
 
-    /// Original per-leaf sample grouping, preserving all directional colours.
     pub fn samples_for_leaf(&self, leaf_index: usize) -> &[MapAmbientSample] {
         self.leaf_sample_ranges
             .get(leaf_index)
@@ -96,7 +95,6 @@ impl MapAmbientLighting {
             .flatten()
     }
 
-    /// Original BSP integer bounds, before absolute sample positions are rounded.
     pub fn leaf_bounds(&self, leaf_index: usize) -> Option<([i16; 3], [i16; 3])> {
         self.locator
             .leaves
@@ -104,9 +102,7 @@ impl MapAmbientLighting {
             .map(|leaf| (leaf.mins, leaf.maxs))
     }
 
-    /// Source radiosity-4 leaf interpolation at an already validated sample point.
-    /// Cache-center correction, empty-leaf redirection and static-prop spherical
-    /// sampling belong to the caller's lighting policy.
+    /// Interpolate at the caller-selected radiosity cache sample.
     pub fn interpolate_leaf_at(&self, leaf_index: usize, position: Vec3) -> Option<AmbientCube> {
         if !position.is_finite() {
             return None;
@@ -123,8 +119,7 @@ impl MapAmbientLighting {
         let mut total_weight = 0.0;
         let mut colors = [Vec3::ZERO; 6];
         for sample in samples {
-            // Native computes relative deltas directly. Subtracting the rounded
-            // absolute position loses precision at large world coordinates.
+            // Relative offsets preserve precision far from the origin.
             let delta: [f32; 3] = std::array::from_fn(|axis| {
                 center[axis] - (position[axis] + half_extent[axis])
                     + (half_extent[axis] * (2.0 / 255.0)) * f32::from(sample.encoded_position[axis])
@@ -267,7 +262,31 @@ pub(super) struct PendingLightmapBlock {
     pub(super) face_height: usize,
     pub(super) styles: Vec<u8>,
     pub(super) samples: Vec<ColorRgbExp>,
-    pub(super) basis_count: usize,
+    pub(super) sample_basis: LightmapBasis,
+    pub(super) output_basis: LightmapBasis,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LightmapBasis {
+    Scalar,
+    Directional,
+}
+
+impl LightmapBasis {
+    pub(super) const fn from_bumped(bumped: bool) -> Self {
+        if bumped {
+            Self::Directional
+        } else {
+            Self::Scalar
+        }
+    }
+
+    const fn count(self) -> usize {
+        match self {
+            Self::Scalar => 1,
+            Self::Directional => 4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -420,7 +439,6 @@ pub(super) fn parse_light_environment_direction(entity: &MapEntity) -> Option<Ve
         .and_then(parse_entity_vec3)
         .map(QAngle::from_source_degrees);
     let yaw = angles.map_or(0.0, |angles| angles.yaw);
-    // A separate `pitch` key overrides the one inside `angles`.
     let pitch = entity
         .prop("pitch")
         .and_then(parse_entity_float)
@@ -456,7 +474,6 @@ pub(super) fn parse_entity_rgb_intensity_linear(value: &str) -> Option<Vec3> {
     {
         return None;
     }
-    // VRAD converts RGB to linear with pow 2.2 before applying intensity.
     let scale = intensity / 255.0;
     Some(Vec3::new(
         (red / 255.0).powf(2.2) * scale,
@@ -477,9 +494,7 @@ pub(super) fn selected_lightmap_samples(
     }
 }
 
-/// Bound each face at the next distinct payload offset. Compiler-generated
-/// maps usually include per-style averages before that next payload, but
-/// native Source also accepts maps without these unused prefix records.
+/// Bound payloads at the next offset; average-prefix records are optional.
 pub(super) fn lightmap_sample_ends(
     faces: &[Face],
     sample_count: usize,
@@ -504,49 +519,90 @@ pub(super) fn lightmap_sample_ends(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LightmapExtractionError {
+    InvalidPayload,
+    AtlasLimit,
+}
+
+impl super::MapLightmapStats {
+    pub(super) fn record_extraction(
+        &mut self,
+        result: &Result<Option<PendingLightmapBlock>, LightmapExtractionError>,
+    ) {
+        match result {
+            Ok(Some(_)) => self.valid_payloads = self.valid_payloads.saturating_add(1),
+            Ok(None) => self.missing_payloads = self.missing_payloads.saturating_add(1),
+            Err(LightmapExtractionError::InvalidPayload) => {
+                self.invalid_payloads = self.invalid_payloads.saturating_add(1);
+            }
+            Err(LightmapExtractionError::AtlasLimit) => {
+                self.valid_payloads = self.valid_payloads.saturating_add(1);
+                self.record_atlas_drops(1);
+            }
+        }
+    }
+
+    fn record_atlas_drops(&mut self, count: usize) {
+        self.atlas_dropped_blocks = self
+            .atlas_dropped_blocks
+            .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+    }
+}
+
 pub(super) fn extract_face_lightmap(
     face: &Face,
     samples: &[ColorRgbExp],
-    bumped: bool,
-) -> Option<PendingLightmapBlock> {
-    if face.light_offset < 0 || face.light_offset % 4 != 0 {
-        return None;
+    sample_basis: LightmapBasis,
+    output_basis: LightmapBasis,
+) -> Result<Option<PendingLightmapBlock>, LightmapExtractionError> {
+    if face.light_offset == -1 {
+        return Ok(None);
     }
-    let face_width = lightmap_axis_luxels(face.lightmap_size[0])?;
-    let face_height = lightmap_axis_luxels(face.lightmap_size[1])?;
-    let basis_count = if bumped { 4 } else { 1 };
+    if face.light_offset < -1 || face.light_offset % 4 != 0 {
+        return Err(LightmapExtractionError::InvalidPayload);
+    }
     let styles = face
         .styles
         .into_iter()
         .take_while(|style| *style != 255)
         .collect::<Vec<_>>();
     if styles.is_empty() {
-        return None;
+        return Err(LightmapExtractionError::InvalidPayload);
     }
-    let count = face_width
-        .checked_mul(face_height)?
-        .checked_mul(basis_count)?
-        .checked_mul(styles.len())?;
-    let start = usize::try_from(face.light_offset).ok()? / 4;
-    let end = start.checked_add(count)?;
-    let width = face_width.checked_add(2)?.checked_mul(basis_count)?;
-    let height = face_height.checked_add(2)?;
-    // Reject impossible faces before allocating their padded atlas block.
+    let (face_width, face_height, width, height, start, end) = (|| {
+        let face_width = lightmap_axis_luxels(face.lightmap_size[0])?;
+        let face_height = lightmap_axis_luxels(face.lightmap_size[1])?;
+        let count = face_width
+            .checked_mul(face_height)?
+            .checked_mul(sample_basis.count())?
+            .checked_mul(styles.len())?;
+        let start = usize::try_from(face.light_offset).ok()? / 4;
+        let end = start.checked_add(count)?;
+        let width = face_width
+            .checked_add(2)?
+            .checked_mul(output_basis.count())?;
+        let height = face_height.checked_add(2)?;
+        Some((face_width, face_height, width, height, start, end))
+    })()
+    .ok_or(LightmapExtractionError::InvalidPayload)?;
+    let samples = samples
+        .get(start..end)
+        .ok_or(LightmapExtractionError::InvalidPayload)?;
     if width > LIGHTMAP_ATLAS_LIMIT || height > LIGHTMAP_ATLAS_LIMIT {
-        return None;
+        return Err(LightmapExtractionError::AtlasLimit);
     }
-    let samples = samples.get(start..end)?.to_vec();
-    let block = PendingLightmapBlock {
+    Ok(Some(PendingLightmapBlock {
         rgba: Vec::new(),
         width,
         height,
         face_width,
         face_height,
         styles,
-        samples,
-        basis_count,
-    };
-    Some(block)
+        samples: samples.to_vec(),
+        sample_basis,
+        output_basis,
+    }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -682,37 +738,50 @@ impl PendingLightmapBlock {
         let mut rgba = vec![0; self.width * self.height * 4];
         for luxel in 0..luxels {
             let mut linear = [Vec3::ZERO; 4];
+            if self.sample_basis == LightmapBasis::Scalar
+                && self.output_basis == LightmapBasis::Directional
+            {
+                linear[1..].fill(Vec3::new(1.0, 1.0, 1.0));
+            }
             for (style_index, style) in self.styles.iter().enumerate() {
                 let weight = values[usize::from(*style)];
-                for (basis, color) in linear.iter_mut().enumerate().take(self.basis_count) {
+                for (basis, color) in linear
+                    .iter_mut()
+                    .enumerate()
+                    .take(self.sample_basis.count())
+                {
                     *color += decode_light_sample_linear(
-                        self.samples[(style_index * self.basis_count + basis) * luxels + luxel],
+                        self.samples
+                            [(style_index * self.sample_basis.count() + basis) * luxels + luxel],
                     ) * weight;
                 }
             }
             let colors = match source {
-                LightmapSource::Ldr => convert_lightmap_luxel(linear, self.basis_count),
-                // Explicit display fallback until floating-point HDR targets,
-                // tonemapping and exposure are supported together.
-                LightmapSource::Hdr => linear.map(|color| {
-                    [
-                        linear_to_srgb_byte(color[0]),
-                        linear_to_srgb_byte(color[1]),
-                        linear_to_srgb_byte(color[2]),
-                        255,
-                    ]
-                }),
+                LightmapSource::Ldr => convert_lightmap_luxel(linear, self.output_basis),
+                LightmapSource::Hdr => {
+                    if self.output_basis == LightmapBasis::Directional {
+                        let directions = normalized_lightmap_directions(linear, linear[0]);
+                        linear[1..].copy_from_slice(&directions);
+                    }
+                    linear.map(|color| {
+                        [
+                            linear_to_srgb_byte(color[0]),
+                            linear_to_srgb_byte(color[1]),
+                            linear_to_srgb_byte(color[2]),
+                            255,
+                        ]
+                    })
+                }
             };
             let x = luxel % self.face_width;
             let y = luxel / self.face_width;
-            for (basis, color) in colors.iter().enumerate().take(self.basis_count) {
+            for (basis, color) in colors.iter().enumerate().take(self.output_basis.count()) {
                 let index = ((y + 1) * self.width + basis * (self.face_width + 2) + x + 1) * 4;
                 rgba[index..index + 4].copy_from_slice(color);
             }
         }
-        // Every plane has its own repeated edge texels, preventing filtering
-        // between neighboring faces and between directional lightmap planes.
-        for basis in 0..self.basis_count {
+        // Pad directional planes separately to prevent filtering across blocks.
+        for basis in 0..self.output_basis.count() {
             let left = basis * (self.face_width + 2);
             for y in 1..=self.face_height {
                 for (dst, src) in [
@@ -751,24 +820,12 @@ fn lightmap_bytes(value: Vec3) -> [u8; 4] {
     ]
 }
 
-fn convert_lightmap_luxel(linear: [Vec3; 4], basis_count: usize) -> [[u8; 4]; 4] {
+fn convert_lightmap_luxel(linear: [Vec3; 4], output_basis: LightmapBasis) -> [[u8; 4]; 4] {
     let goal = Vec3::from(linear[0].to_array().map(lightmap_gamma_goal));
     let mut colors = [[0, 0, 0, 255]; 4];
     colors[0] = lightmap_bytes(goal);
-    if basis_count == 4 {
-        let average = (linear[1] + linear[2] + linear[3]) / 3.0;
-        let correction = Vec3::from(std::array::from_fn(|channel| {
-            if average[channel] != 0.0 {
-                goal[channel] / average[channel]
-            } else {
-                0.0
-            }
-        }));
-        let mut directions = [linear[1], linear[2], linear[3]].map(|color| {
-            Vec3::from(std::array::from_fn(|channel| {
-                color[channel] * correction[channel]
-            }))
-        });
+    if output_basis == LightmapBasis::Directional {
+        let mut directions = normalized_lightmap_directions(linear, goal);
         let maxima = directions.map(|color| color[0].max(color[1]).max(color[2]));
         // SDK resolves equal brightness in the last matching permutation.
         let mut order = [0, 1, 2];
@@ -805,13 +862,32 @@ fn convert_lightmap_luxel(linear: [Vec3; 4], basis_count: usize) -> [[u8; 4]; 4]
     colors
 }
 
+fn normalized_lightmap_directions(linear: [Vec3; 4], goal: Vec3) -> [Vec3; 3] {
+    let average = (linear[1] + linear[2] + linear[3]) / 3.0;
+    let correction = Vec3::from(std::array::from_fn(|channel| {
+        if average[channel] != 0.0 {
+            goal[channel] / average[channel]
+        } else {
+            0.0
+        }
+    }));
+    [linear[1], linear[2], linear[3]].map(|color| {
+        Vec3::from(std::array::from_fn(|channel| {
+            color[channel] * correction[channel]
+        }))
+    })
+}
+
 pub(super) fn lightmap_axis_luxels(size: i32) -> Option<usize> {
     usize::try_from(size).ok()?.checked_add(1)
 }
 
 #[cfg(test)]
 pub(super) fn decode_light_sample(sample: ColorRgbExp) -> [u8; 4] {
-    convert_lightmap_luxel([decode_light_sample_linear(sample); 4], 1)[0]
+    convert_lightmap_luxel(
+        [decode_light_sample_linear(sample); 4],
+        LightmapBasis::Scalar,
+    )[0]
 }
 
 pub(super) fn decode_light_sample_linear(sample: ColorRgbExp) -> Vec3 {
@@ -880,8 +956,7 @@ pub(super) fn displacement_lightmap_uv(
     face: &Face,
 ) -> [f32; 2] {
     let steps = steps.max(1) as f32;
-    // Source's rotated base corners are (0,0), (0,V), (U,V), (U,0).
-    // The outer grid index follows corner 0 -> 1, so it advances V.
+    // Grid columns advance V along rotated corner 0 -> 1.
     [
         displacement_lightmap_axis_uv(row as f32 / steps, face.lightmap_size[0]),
         displacement_lightmap_axis_uv(column as f32 / steps, face.lightmap_size[1]),
@@ -898,21 +973,32 @@ pub(super) fn bake_lightmap_atlas<'a>(
     blocks: &[PendingLightmapBlock],
     source: Option<LightmapSource>,
     entities: &[MapEntity],
+    stats: &mut super::MapLightmapStats,
 ) -> Option<LightmapAtlas> {
     let mut meshes = meshes.into_iter().collect::<Vec<_>>();
-    let source = source?;
+    let Some(source) = source else {
+        stats.record_atlas_drops(blocks.len());
+        clear_lightmap_uvs(&mut meshes);
+        return None;
+    };
     if blocks.is_empty() {
         clear_lightmap_uvs(&mut meshes);
         return None;
     }
 
-    let (width, height, placements) = pack_lightmap_blocks(blocks)?;
+    let Some((width, height, placements)) = pack_lightmap_blocks(blocks) else {
+        stats.record_atlas_drops(blocks.len());
+        clear_lightmap_uvs(&mut meshes);
+        return None;
+    };
     let overflow = placements
         .iter()
         .filter(|placement| placement.is_none())
         .count();
-    if overflow > 0 {
-        log::debug!("map lightmap atlas overflow: dropped {overflow} faces");
+    stats.record_atlas_drops(overflow);
+    if overflow == blocks.len() {
+        clear_lightmap_uvs(&mut meshes);
+        return None;
     }
 
     let mut rgba = vec![128; width * height * 4];
@@ -960,11 +1046,15 @@ pub(super) fn bake_lightmap_atlas<'a>(
 
 pub(super) fn clear_lightmap_uvs(meshes: &mut [&mut BuildMesh]) {
     for vertex in meshes.iter_mut().flat_map(|mesh| &mut mesh.vertices) {
-        vertex.vertex.lightmap_uv = [0.0; 2];
-        vertex.vertex.has_lightmap = false;
-        vertex.vertex.lightmap_bump_step = 0.0;
-        vertex.lightmap_block = None;
+        clear_lightmap_vertex(vertex);
     }
+}
+
+fn clear_lightmap_vertex(vertex: &mut super::mesh::BuildVertex) {
+    vertex.vertex.lightmap_uv = [0.0; 2];
+    vertex.vertex.has_lightmap = false;
+    vertex.vertex.lightmap_bump_step = 0.0;
+    vertex.lightmap_block = None;
 }
 
 pub(super) fn rewrite_lightmap_uvs(
@@ -975,26 +1065,15 @@ pub(super) fn rewrite_lightmap_uvs(
     atlas_height: usize,
 ) {
     for vertex in meshes.iter_mut().flat_map(|mesh| &mut mesh.vertices) {
-        let Some(block_index) = vertex.lightmap_block else {
-            vertex.vertex.lightmap_uv = [0.0; 2];
-            vertex.vertex.has_lightmap = false;
-            vertex.vertex.lightmap_bump_step = 0.0;
-            continue;
-        };
-        let Some(block) = blocks.get(block_index) else {
-            vertex.vertex.lightmap_uv = [0.0; 2];
-            vertex.vertex.has_lightmap = false;
-            vertex.vertex.lightmap_bump_step = 0.0;
-            continue;
-        };
-        let Some(Some(rect)) = placements.get(block_index) else {
-            vertex.vertex.lightmap_uv = [0.0; 2];
-            vertex.vertex.has_lightmap = false;
-            vertex.vertex.lightmap_bump_step = 0.0;
+        let binding = vertex
+            .lightmap_block
+            .and_then(|index| Some((blocks.get(index)?, placements.get(index)?.as_ref()?)));
+        let Some((block, rect)) = binding else {
+            clear_lightmap_vertex(vertex);
             continue;
         };
         vertex.vertex.has_lightmap = true;
-        vertex.vertex.lightmap_bump_step = if block.basis_count == 4 {
+        vertex.vertex.lightmap_bump_step = if block.output_basis == LightmapBasis::Directional {
             (block.face_width + 2) as f32 / atlas_width.max(1) as f32
         } else {
             0.0
@@ -1134,8 +1213,6 @@ mod lightmap_tests {
     fn displacement_lightmap_follows_rotated_base_corners_on_rectangular_atlas() {
         let mut face = face([0, 255, 255, 255]);
         face.lightmap_size = [8, 4];
-        // Grid order is 0 -> 1 along columns, then 0 -> 3 along rows.
-        // Distinct extents and an off-diagonal interior point catch transposes.
         for (column, row, expected) in [
             (0, 0, [0.5 / 9.0, 0.5 / 5.0]),
             (4, 0, [0.5 / 9.0, 4.5 / 5.0]),
@@ -1153,11 +1230,19 @@ mod lightmap_tests {
         use super::super::mesh::{BuildMeshVisibility, BuildVertex, GeometryPartition};
         let mut face = face([0, 255, 255, 255]);
         face.lightmap_size = [1, 1];
-        let block = extract_face_lightmap(&face, &[sample(128, 128, 128); 16], true).unwrap();
+        let block = extract_face_lightmap(
+            &face,
+            &[sample(128, 128, 128); 16],
+            LightmapBasis::Directional,
+            LightmapBasis::Directional,
+        )
+        .unwrap()
+        .unwrap();
         let mut mesh = BuildMesh {
             vertices: vec![BuildVertex {
                 vertex: MapVertex {
                     position: Vec3::ZERO,
+                    base_position: Vec3::ZERO,
                     tangent_s: Vec3::ZERO,
                     tangent_t: Vec3::ZERO,
                     normal: Vec3::new(0.0, 0.0, 1.0),
@@ -1207,8 +1292,24 @@ mod lightmap_tests {
         assert_eq!(ends[&0], 1);
         assert_eq!(ends[&4], 3);
         let samples = [sample(255, 0, 0); 3];
-        assert!(extract_face_lightmap(&first, &samples[..ends[&0]], false).is_none());
-        assert!(extract_face_lightmap(&second, &samples[..ends[&4]], false).is_some());
+        assert!(
+            extract_face_lightmap(
+                &first,
+                &samples[..ends[&0]],
+                LightmapBasis::Scalar,
+                LightmapBasis::Scalar
+            )
+            .is_err()
+        );
+        assert!(
+            extract_face_lightmap(
+                &second,
+                &samples[..ends[&4]],
+                LightmapBasis::Scalar,
+                LightmapBasis::Scalar
+            )
+            .is_ok_and(|block| block.is_some())
+        );
     }
 
     #[test]
@@ -1218,8 +1319,22 @@ mod lightmap_tests {
         second.light_offset = 8;
         let samples = [sample(255, 0, 0), sample(0, 255, 0), sample(0, 0, 255)];
         let ends = lightmap_sample_ends(&[first, second], samples.len());
-        let first_block = extract_face_lightmap(&first, &samples[..ends[&0]], false).unwrap();
-        let second_block = extract_face_lightmap(&second, &samples[..ends[&8]], false).unwrap();
+        let first_block = extract_face_lightmap(
+            &first,
+            &samples[..ends[&0]],
+            LightmapBasis::Scalar,
+            LightmapBasis::Scalar,
+        )
+        .unwrap()
+        .unwrap();
+        let second_block = extract_face_lightmap(
+            &second,
+            &samples[..ends[&8]],
+            LightmapBasis::Scalar,
+            LightmapBasis::Scalar,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(first_block.samples, samples[..2]);
         assert_eq!(second_block.samples, samples[2..]);
         assert_eq!(first_block.styles, [0, 32]);
@@ -1228,14 +1343,15 @@ mod lightmap_tests {
 
     #[test]
     fn source_ldr_conversion_preserves_overbright_before_gamma_and_clamp() {
-        let flat = |value| convert_lightmap_luxel([Vec3::new(value, value, value); 4], 1)[0];
+        let flat = |value| {
+            convert_lightmap_luxel([Vec3::new(value, value, value); 4], LightmapBasis::Scalar)[0]
+        };
         assert_eq!(flat(0.0), [0, 0, 0, 255]);
         assert_eq!(flat(0.25), [68, 68, 68, 255]);
         assert_eq!(flat(1.0), [128, 128, 128, 255]);
         assert_eq!(flat(2.0), [175, 175, 175, 255]);
         assert_eq!(flat(4.0), [239, 239, 239, 255]);
-        // Unequal directional contributions may exceed1 before conversion;
-        // the engine trades directionality for brightness across the lobes.
+        // Overbright lobes preserve energy while reducing directionality.
         let converted = convert_lightmap_luxel(
             [
                 Vec3::new(1.0, 1.0, 1.0),
@@ -1243,7 +1359,7 @@ mod lightmap_tests {
                 Vec3::new(0.0, 3.0, 0.0),
                 Vec3::new(0.0, 0.0, 3.0),
             ],
-            4,
+            LightmapBasis::Directional,
         );
         assert!(converted[1][0] > converted[1][1]);
         assert!(converted[1][1] > 0);
@@ -1255,15 +1371,55 @@ mod lightmap_tests {
     fn complete_style_bundles_are_validated_before_reading() {
         let mut face = face([0, 32, 255, 7]);
         let samples = [sample(255, 0, 0); 8];
-        assert!(extract_face_lightmap(&face, &samples[..7], true).is_none());
-        assert!(extract_face_lightmap(&face, &samples, true).is_some());
+        assert!(
+            extract_face_lightmap(
+                &face,
+                &samples[..7],
+                LightmapBasis::Directional,
+                LightmapBasis::Directional
+            )
+            .is_err()
+        );
+        assert!(
+            extract_face_lightmap(
+                &face,
+                &samples,
+                LightmapBasis::Directional,
+                LightmapBasis::Directional
+            )
+            .is_ok_and(|block| block.is_some())
+        );
         face.light_offset = 1;
-        assert!(extract_face_lightmap(&face, &samples, false).is_none());
+        assert!(
+            extract_face_lightmap(
+                &face,
+                &samples,
+                LightmapBasis::Scalar,
+                LightmapBasis::Scalar
+            )
+            .is_err()
+        );
         face.light_offset = i32::MAX - 3;
-        assert!(extract_face_lightmap(&face, &samples, false).is_none());
+        assert!(
+            extract_face_lightmap(
+                &face,
+                &samples,
+                LightmapBasis::Scalar,
+                LightmapBasis::Scalar
+            )
+            .is_err()
+        );
         face.light_offset = 0;
         face.styles = [255, 0, 0, 0];
-        assert!(extract_face_lightmap(&face, &samples, false).is_none());
+        assert!(
+            extract_face_lightmap(
+                &face,
+                &samples,
+                LightmapBasis::Scalar,
+                LightmapBasis::Scalar
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1278,7 +1434,14 @@ mod lightmap_tests {
             sample(0, 128, 0),
             sample(0, 0, 0),
         ];
-        let block = extract_face_lightmap(&face([0, 32, 255, 255]), &samples, true).unwrap();
+        let block = extract_face_lightmap(
+            &face([0, 32, 255, 255]),
+            &samples,
+            LightmapBasis::Directional,
+            LightmapBasis::Directional,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!((block.width, block.height), (12, 3));
         let mut values = [0.0; 256];
         values[0] = 1.0;
@@ -1303,7 +1466,14 @@ mod lightmap_tests {
         let samples = (0..16)
             .map(|index| sample((index + 1) * 10, 0, 0))
             .collect::<Vec<_>>();
-        let block = extract_face_lightmap(&face, &samples, true).unwrap();
+        let block = extract_face_lightmap(
+            &face,
+            &samples,
+            LightmapBasis::Directional,
+            LightmapBasis::Directional,
+        )
+        .unwrap()
+        .unwrap();
         let pixels = block.render(&[1.0; 256], LightmapSource::Ldr);
         let pixel = |x: usize, y: usize| {
             <[u8; 4]>::try_from(&pixels[(y * block.width + x) * 4..][..4]).unwrap()
@@ -1319,10 +1489,22 @@ mod lightmap_tests {
 
     #[test]
     fn style_updates_only_regenerate_affected_patches() {
-        let block0 =
-            extract_face_lightmap(&face([0, 255, 255, 255]), &[sample(255, 0, 0)], false).unwrap();
-        let block32 =
-            extract_face_lightmap(&face([32, 255, 255, 255]), &[sample(0, 255, 0)], false).unwrap();
+        let block0 = extract_face_lightmap(
+            &face([0, 255, 255, 255]),
+            &[sample(255, 0, 0)],
+            LightmapBasis::Scalar,
+            LightmapBasis::Scalar,
+        )
+        .unwrap()
+        .unwrap();
+        let block32 = extract_face_lightmap(
+            &face([32, 255, 255, 255]),
+            &[sample(0, 255, 0)],
+            LightmapBasis::Scalar,
+            LightmapBasis::Scalar,
+        )
+        .unwrap()
+        .unwrap();
         let atlas = LightmapAtlas {
             rgba: Vec::new(),
             width: 8,
@@ -1352,5 +1534,132 @@ mod lightmap_tests {
                 .chunks_exact(4)
                 .all(|pixel| pixel == [0, 0, 0, 255])
         );
+    }
+
+    #[test]
+    fn scalar_samples_fill_effective_directional_planes_after_style_and_gamma_conversion() {
+        let block = extract_face_lightmap(
+            &face([0, 32, 255, 255]),
+            &[sample(128, 0, 0), sample(0, 128, 0)],
+            LightmapBasis::Scalar,
+            LightmapBasis::Directional,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((block.width, block.height), (12, 3));
+        let mut values = [0.0; 256];
+        values[0] = 1.0;
+        values[32] = 1.0;
+        let combined = block.render(&values, LightmapSource::Ldr);
+        for basis in 0..4 {
+            let interior = (block.width + basis * 3 + 1) * 4;
+            assert_eq!(&combined[interior..interior + 4], &[93, 93, 0, 255]);
+            let gutter = basis * 3 * 4;
+            assert_eq!(&combined[gutter..gutter + 4], &[93, 93, 0, 255]);
+        }
+        values[32] = 0.0;
+        let red = block.render(&values, LightmapSource::Ldr);
+        for basis in 0..4 {
+            let interior = (block.width + basis * 3 + 1) * 4;
+            assert_eq!(&red[interior..interior + 4], &[93, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn scalar_output_keeps_directional_input_style_stride_and_payload_validation() {
+        let samples = [
+            sample(128, 0, 0),
+            sample(255, 255, 255),
+            sample(255, 255, 255),
+            sample(255, 255, 255),
+            sample(0, 128, 0),
+            sample(255, 255, 255),
+            sample(255, 255, 255),
+            sample(255, 255, 255),
+        ];
+        let face = face([0, 32, 255, 255]);
+        assert_eq!(
+            extract_face_lightmap(
+                &face,
+                &samples[..2],
+                LightmapBasis::Directional,
+                LightmapBasis::Scalar,
+            ),
+            Err(LightmapExtractionError::InvalidPayload)
+        );
+        let block = extract_face_lightmap(
+            &face,
+            &samples,
+            LightmapBasis::Directional,
+            LightmapBasis::Scalar,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((block.width, block.height), (3, 3));
+        let pixels = block.render(&[1.0; 256], LightmapSource::Ldr);
+        assert_eq!(&pixels[(block.width + 1) * 4..][..4], &[93, 93, 0, 255]);
+    }
+
+    #[test]
+    fn atlas_limit_uses_effective_plane_count_after_raw_payload_validation() {
+        let mut face = face([0, 255, 255, 255]);
+        face.lightmap_size = [1022, 0];
+        let samples = vec![sample(128, 128, 128); 1023];
+        assert!(
+            extract_face_lightmap(
+                &face,
+                &samples,
+                LightmapBasis::Scalar,
+                LightmapBasis::Scalar
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            extract_face_lightmap(
+                &face,
+                &samples,
+                LightmapBasis::Scalar,
+                LightmapBasis::Directional,
+            ),
+            Err(LightmapExtractionError::AtlasLimit)
+        );
+    }
+
+    #[test]
+    fn hdr_directional_normalization_targets_linear_scalar_without_ldr_gamma() {
+        let block = extract_face_lightmap(
+            &face([0, 255, 255, 255]),
+            &[
+                sample(64, 0, 0),
+                sample(128, 0, 0),
+                sample(0, 0, 0),
+                sample(0, 0, 0),
+            ],
+            LightmapBasis::Directional,
+            LightmapBasis::Directional,
+        )
+        .unwrap()
+        .unwrap();
+        let pixels = block.render(&[1.0; 256], LightmapSource::Hdr);
+        let pixel = |basis: usize| {
+            <[u8; 4]>::try_from(&pixels[(block.width + basis * 3 + 1) * 4..][..4]).unwrap()
+        };
+        assert_eq!(pixel(0), [137, 0, 0, 255]);
+        assert_eq!(pixel(1), [225, 0, 0, 255]);
+        assert_eq!(pixel(2), [0, 0, 0, 255]);
+        assert_eq!(pixel(3), [0, 0, 0, 255]);
+        let scalar = extract_face_lightmap(
+            &face([0, 255, 255, 255]),
+            &[sample(128, 73, 97)],
+            LightmapBasis::Scalar,
+            LightmapBasis::Directional,
+        )
+        .unwrap()
+        .unwrap();
+        let pixels = scalar.render(&[1.0; 256], LightmapSource::Hdr);
+        let base = &pixels[(scalar.width + 1) * 4..][..4];
+        for basis in 1..4 {
+            assert_eq!(&pixels[(scalar.width + basis * 3 + 1) * 4..][..4], base);
+        }
     }
 }

@@ -1,18 +1,36 @@
 use super::map_preview::{MaterialTable, parallel_collect};
 use super::{
     Arc, DetailSprite, HashMap, HashSet, MAP_DETAIL_SPRITE_PLACEMENT_CAP, MapDetailSprite,
-    MapOverlay, MaterialResolver, MaterialSlot, OverlayPrimitive, RenderMode,
+    MapOverlay, MaterialResolution, MaterialResolver, MaterialSlot, OverlayPrimitive, RenderMode,
     ResolvedMaterialTextures, SKYBOX_FACE_DIMENSION_CAP, Skybox, SkyboxFace,
 };
 use gmpublished_domain::scene::map::{
     MapDecal, MapReceiverMesh, MapSurfaceMarkSource, MapSurfaceProjector,
 };
 
+pub(super) fn resolve_texture_jobs<T: Sync + Send, R: Send>(
+    jobs: &[T],
+    resolver: &MaterialResolver,
+    resolve: impl Fn(&T, &MaterialResolver) -> R + Sync,
+) -> Vec<R> {
+    let mut requests = crate::bridge::materials::TextureRequestPlan::default();
+    for job in jobs {
+        let (_, plan) = resolver.plan_texture_requests(|planning| resolve(job, planning));
+        requests.append(plan);
+    }
+    let cost = requests.cost();
+    let admissions = resolver.admit_texture_requests(requests);
+    debug_assert_eq!(cost, admissions.cost());
+    log::debug!("texture request plan: {cost:?}");
+    let admitted = resolver.with_texture_admissions(admissions);
+    parallel_collect(jobs, |job| resolve(job, &admitted))
+}
+
 pub(super) fn resolve_map_material_slots_parallel(
     material_names: &[String],
     resolver: &MaterialResolver,
 ) -> MaterialTable {
-    let resolved = parallel_collect(material_names, |name| {
+    let resolved = resolve_texture_jobs(material_names, resolver, |name, resolver| {
         resolver.resolve_with_base2(&[], name)
     });
     map_material_resolution_from_results(material_names, resolved)
@@ -32,24 +50,26 @@ pub(super) fn resolve_map_material_slots_serial(
 
 pub(super) fn map_material_resolution_from_results(
     material_names: &[String],
-    resolved_materials: Vec<Option<ResolvedMaterialTextures>>,
+    resolved_materials: Vec<MaterialResolution<ResolvedMaterialTextures>>,
 ) -> MaterialTable {
     let mut table = MaterialTable::default();
     for (name, resolved) in material_names.iter().zip(resolved_materials) {
         let texture = resolved
-            .as_ref()
+            .material()
             .and_then(|material| material.texture.as_ref().map(Arc::clone));
         let texture2 = resolved
-            .as_ref()
+            .material()
             .and_then(|material| material.texture2.as_ref().map(Arc::clone));
         let render_mode = resolved
-            .as_ref()
+            .material()
             .map_or(RenderMode::Opaque, |material| material.render_mode);
         table.push(
             name,
             MaterialSlot {
+                resolution: resolved.outcome(),
+                canonical_name: resolved.canonical_name().map(str::to_owned),
                 shader: resolved
-                    .as_ref()
+                    .material()
                     .map_or_else(Default::default, |material| material.shader.clone()),
                 name: name.clone(),
                 texture,
@@ -93,12 +113,8 @@ pub(super) fn resolve_detail_sprites(
         );
     }
     let resolved = resolver.resolve_with_base2(&[], detail_material_name);
-    let material_index = push_map_material_slot(
-        detail_material_name,
-        resolved.as_ref(),
-        RenderMode::Cutout,
-        table,
-    );
+    let material_index =
+        push_map_material_slot(detail_material_name, &resolved, RenderMode::Cutout, table);
 
     let visible = sprites
         .iter()
@@ -118,6 +134,8 @@ pub(super) fn map_detail_sprite_to_preview(
     material_index: usize,
 ) -> DetailSprite {
     DetailSprite {
+        fast_eligible: sprite.fast_eligible,
+        leaf_index: sprite.leaf_index,
         origin: sprite.origin,
         angles: sprite.angles,
         orientation: sprite.orientation,
@@ -164,7 +182,10 @@ pub(super) fn resolve_map_decals(
     receiver_allowed: &[bool],
     resolver: &MaterialResolver,
     table: &mut MaterialTable,
+    lightmaps: Option<&gmpublished_domain::scene::map::SourceLightmapLayout>,
 ) -> (OverlayBakeResult, OverlayBakeResult) {
+    let mut registry = super::map_preview::StaticDecalRegistry::default();
+    let mut material_groups = HashMap::new();
     let pre_resolved = pre_resolve_surface_mark_materials(
         decals.iter().map(|decal| decal.material_name.as_str()),
         table,
@@ -181,6 +202,7 @@ pub(super) fn resolve_map_decals(
     for decal in decals {
         let source = MapSurfaceMarkSource::Decal {
             entity_index: decal.id,
+            permanence: decal.permanence,
         };
         let Some(material_index) = surface_mark_material_index(
             source,
@@ -195,10 +217,26 @@ pub(super) fn resolve_map_decals(
         let Some(slot) = table.get(material_index) else {
             continue;
         };
+        let Some(surface) = slot.shader.surface() else {
+            log::debug!(
+                "map preview surface mark {source:?} skipped: unsupported decal vertex format"
+            );
+            world.skipped_count = world.skipped_count.saturating_add(1);
+            continue;
+        };
+        let next_group = material_groups.len();
+        let material_group = *material_groups
+            .entry(
+                slot.canonical_name
+                    .as_deref()
+                    .unwrap_or(&slot.name)
+                    .to_owned(),
+            )
+            .or_insert(next_group);
         let Some(size) = slot.shader.surface().and_then(|surface| {
             surface
                 .decal_parameters
-                .mapping_extent(slot.texture.as_ref()?.original_dimensions())
+                .projection_dimensions(slot.shader.mapping_dimensions(slot.texture.as_deref())?)
         }) else {
             log::debug!("map preview surface mark {source:?} skipped: invalid mapping dimensions");
             world.skipped_count = world.skipped_count.saturating_add(1);
@@ -213,7 +251,15 @@ pub(super) fn resolve_map_decals(
             }
         };
         for fragment in fragments {
-            let primitive = overlay_primitive(&fragment, material_index);
+            let mut primitive = overlay_primitive(&fragment, material_index);
+            let page = lightmaps
+                .and_then(|layout| layout.surfaces.get(fragment.receiver_range.face as usize))
+                .map_or(
+                    gmpublished_domain::scene::map::SourceLightmapPage::White,
+                    |allocation| allocation.page,
+                );
+            primitive.decal_sort =
+                Some(registry.register(material_group, surface, page, decal.permanence));
             if matches!(fragment.receiver_mesh, MapReceiverMesh::Skybox(_)) {
                 sky.overlays.push(primitive);
             } else {
@@ -239,7 +285,7 @@ pub(super) fn pre_resolve_overlay_materials(
     overlays: &[MapOverlay],
     table: &MaterialTable,
     resolver: &MaterialResolver,
-) -> HashMap<String, Option<ResolvedMaterialTextures>> {
+) -> HashMap<String, MaterialResolution<ResolvedMaterialTextures>> {
     pre_resolve_surface_mark_materials(
         overlays
             .iter()
@@ -253,7 +299,7 @@ fn pre_resolve_surface_mark_materials<'a>(
     material_names: impl Iterator<Item = &'a str>,
     table: &MaterialTable,
     resolver: &MaterialResolver,
-) -> HashMap<String, Option<ResolvedMaterialTextures>> {
+) -> HashMap<String, MaterialResolution<ResolvedMaterialTextures>> {
     let mut names = Vec::new();
     let mut seen = HashSet::new();
     for name in material_names {
@@ -261,7 +307,7 @@ fn pre_resolve_surface_mark_materials<'a>(
             names.push(name.to_owned());
         }
     }
-    parallel_collect(&names, |name| {
+    resolve_texture_jobs(&names, resolver, |name, resolver| {
         (name.clone(), resolver.resolve_with_base2(&[], name))
     })
     .into_iter()
@@ -271,7 +317,7 @@ fn pre_resolve_surface_mark_materials<'a>(
 pub(super) fn overlay_material_index(
     overlay: &MapOverlay,
     resolver: &MaterialResolver,
-    pre_resolved: &HashMap<String, Option<ResolvedMaterialTextures>>,
+    pre_resolved: &HashMap<String, MaterialResolution<ResolvedMaterialTextures>>,
     table: &mut MaterialTable,
 ) -> Option<usize> {
     surface_mark_material_index(
@@ -287,7 +333,7 @@ fn surface_mark_material_index(
     source: MapSurfaceMarkSource,
     material_name: &str,
     resolver: &MaterialResolver,
-    pre_resolved: &HashMap<String, Option<ResolvedMaterialTextures>>,
+    pre_resolved: &HashMap<String, MaterialResolution<ResolvedMaterialTextures>>,
     table: &mut MaterialTable,
 ) -> Option<usize> {
     if let Some(index) = table.index_of(material_name) {
@@ -304,32 +350,35 @@ fn surface_mark_material_index(
         || resolver.resolve_with_base2(&[], material_name),
         Clone::clone,
     );
-    let Some(resolved) = resolved else {
+    let Some(material) = resolved.material() else {
         log::debug!(
             "map preview surface mark {source:?} skipped: material {material_name} missing"
         );
         return None;
     };
-    if resolved.texture.is_none() {
+    if material.texture.is_none() {
         log::debug!(
             "map preview surface mark {source:?} skipped: material {material_name} has no base texture"
         );
         return None;
     }
-    let index = push_map_material_slot(material_name, Some(&resolved), resolved.render_mode, table);
+    let index = push_map_material_slot(material_name, &resolved, material.render_mode, table);
     table.index_by_name(material_name, index);
     Some(index)
 }
 
 pub(super) fn push_map_material_slot(
     name: &str,
-    resolved: Option<&ResolvedMaterialTextures>,
+    resolution: &MaterialResolution<ResolvedMaterialTextures>,
     render_mode: RenderMode,
     table: &mut MaterialTable,
 ) -> usize {
+    let resolved = resolution.material();
     let texture = resolved.and_then(|material| material.texture.as_ref().map(Arc::clone));
     let texture2 = resolved.and_then(|material| material.texture2.as_ref().map(Arc::clone));
     table.push_unindexed(MaterialSlot {
+        resolution: resolution.outcome(),
+        canonical_name: resolution.canonical_name().map(str::to_owned),
         shader: resolved.map_or_else(Default::default, |material| material.shader.clone()),
         name: name.to_owned(),
         texture,
@@ -343,6 +392,7 @@ pub(super) fn overlay_primitive(overlay: &MapOverlay, material_index: usize) -> 
     use crate::media::preview_model::{ModelVertex, vertex_lighting};
     OverlayPrimitive {
         source: overlay.source,
+        decal_sort: None,
         vertices: overlay
             .vertices
             .iter()
@@ -358,8 +408,15 @@ pub(super) fn overlay_primitive(overlay: &MapOverlay, material_index: usize) -> 
                     blend_alpha: 0.0,
                     opacity: 1.0,
                     illumination: super::Vec3::splat(1.0),
-                    lighting_mode: if surface.has_lightmap {
-                        vertex_lighting::LIGHTMAP
+                    lighting_mode: (if surface.has_lightmap {
+                        vertex_lighting::RECEIVER_LIGHTMAP
+                    } else {
+                        vertex_lighting::RECEIVER_CONSTANT
+                    }) | if matches!(
+                        overlay.source,
+                        gmpublished_domain::scene::map::MapSurfaceMarkSource::Decal { .. }
+                    ) {
+                        vertex_lighting::BATCHED_STATIC_DECAL
                     } else {
                         0
                     },
@@ -379,7 +436,6 @@ pub(super) fn overlay_primitive(overlay: &MapOverlay, material_index: usize) -> 
         material_index,
         visibility: overlay.visibility.clone(),
         owner: overlay.owner,
-        receiver_face: overlay.receiver_face,
         receiver_mesh: overlay.receiver_mesh,
         receiver_range: overlay.receiver_range,
         receiver_material_index: overlay.receiver_material_index,
@@ -409,17 +465,19 @@ pub(super) fn resolve_skybox(
         let Some(texture) = material.texture else {
             continue;
         };
-        if texture.width > SKYBOX_FACE_DIMENSION_CAP || texture.height > SKYBOX_FACE_DIMENSION_CAP {
+        if texture.width() > SKYBOX_FACE_DIMENSION_CAP
+            || texture.height() > SKYBOX_FACE_DIMENSION_CAP
+        {
             log::debug!(
                 "map skybox {skyname}: dropped {} face {}x{} over {} cap",
                 face.suffix(),
-                texture.width,
-                texture.height,
+                texture.width(),
+                texture.height(),
                 SKYBOX_FACE_DIMENSION_CAP
             );
             continue;
         }
-        faces[face.index()] = Some(Arc::new(texture.without_mip_chain()));
+        faces[face.index()] = Some(texture);
     }
 
     if materials.iter().any(Option::is_some) {
@@ -446,21 +504,23 @@ pub(super) fn resolve_sun_materials(
                     table.push(
                         name,
                         MaterialSlot {
+                            resolution: material.outcome(),
+                            canonical_name: material.canonical_name().map(str::to_owned),
                             name: name.clone(),
                             shader: material
-                                .as_ref()
+                                .material()
                                 .map_or_else(Default::default, |material| material.shader.clone()),
                             texture: material
-                                .as_ref()
+                                .material()
                                 .and_then(|material| material.texture.as_ref().map(Arc::clone)),
                             texture2: material
-                                .as_ref()
+                                .material()
                                 .and_then(|material| material.texture2.as_ref().map(Arc::clone)),
                             render_mode: material
-                                .as_ref()
+                                .material()
                                 .map_or(RenderMode::Additive, |material| material.render_mode),
                             alpha_policy: material
-                                .as_ref()
+                                .material()
                                 .map_or(RenderMode::Additive, |material| material.render_mode)
                                 .texture_alpha_policy(),
                         },

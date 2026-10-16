@@ -150,6 +150,28 @@ impl VpkFile {
         &self.entries
     }
 
+    pub fn read_entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VpkError> {
+        let entry = self.entries.get(path).ok_or(VpkError::EntryNotFound)?;
+        let expected =
+            usize::try_from(entry.size.min(max_bytes as u64)).map_err(|_| VpkError::FormatError)?;
+        let preload = entry.preload.len().min(expected);
+        let mut bytes = vec![0; expected];
+        bytes[..preload].copy_from_slice(&entry.preload[..preload]);
+        if preload < expected {
+            let (mut archive, offset) = match entry.location {
+                vformats::vpk::VpkLocation::InDirectory { offset, .. } => {
+                    (File::open(&self.path)?, offset)
+                }
+                vformats::vpk::VpkLocation::InArchive {
+                    archive, offset, ..
+                } => (self.open_sibling_archive(archive)?, offset),
+            };
+            archive.seek(SeekFrom::Start(offset))?;
+            archive.read_exact(&mut bytes[preload..])?;
+        }
+        Ok(bytes)
+    }
+
     pub fn read_entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, VpkError> {
         main_thread_forbidden!();
 
@@ -255,6 +277,14 @@ fn discover_game_vpks_inner(dir: &Path, depth: usize, vpks: &mut Vec<PathBuf>) {
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
+        };
+        let file_type = if file_type.is_symlink() {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            metadata.file_type()
+        } else {
+            file_type
         };
 
         if file_type.is_dir() {

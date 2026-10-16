@@ -1,28 +1,14 @@
-//! VTF texture containers (versions 7.0–7.5).
-//!
-//! [`parse`] validates the header strictly; pixel data stays borrowed
-//! and is bounds-checked per request, so a truncated file still serves
-//! the mips it actually contains.
-//!
-//! Header field layout follows the `vtf` crate (MIT, © icewind1991),
-//! with image addressing corrected to VTFLib semantics — the `vtf`
-//! crate's `get_offset` strides frames and faces interchangeably
-//! (`frame + face`), which mis-addresses cubemap frames; the layout is
-//! `mip (smallest first) → frame → face → z-slice`, and envmaps have 7
-//! faces (spheremap included) when the version is below 7.5 and
-//! `first_frame != 0xFFFF`, else 6.
-//!
-//! Packed 16-bit formats name their channels from the lowest bits up
-//! (`Bgr565`: blue in bits 0–4), matching Valve's byte-order naming for
-//! the 8-bit formats (`Bgra8888`: blue in byte 0).
+//! VTF7.0–7.5; header layout adapted from vtf (MIT, © icewind1991).
+//! Image order is smallest mip first, then frame, then face.
+//! Packed channel names start at the lowest bits/bytes.
 
 use std::fmt;
+use std::ops::Range;
 
 use crate::Limits;
 use crate::math::half_to_f32;
 
-/// Texture flag bits (the [`Vtf::flags`] word carries the full engine
-/// set; these are the commonly consumed ones, per VTFLib).
+/// Common bits in the complete [`Vtf::flags`] word.
 #[allow(missing_docs)]
 pub mod texture_flags {
     pub const POINTSAMPLE: u32 = 0x0000_0001;
@@ -43,10 +29,15 @@ pub mod texture_flags {
     pub const NODEPTHBUFFER: u32 = 0x0080_0000;
 }
 
+mod sheet;
+pub use sheet::{
+    SpriteSheetCost, SpriteSheetDescriptor, SpriteSheetError, SpriteSheetLimits, SpriteSheetMetric,
+};
+
 const SIGNATURE: &[u8; 4] = b"VTF\0";
 /// Fields through `lowres_image_height` (7.0/7.1 layout).
 const BASE_HEADER_BYTES: usize = 63;
-/// A sane bound on the 7.3+ resource directory (VTFLib caps at 32).
+/// Bounds resource-directory parsing.
 const MAX_RESOURCES: u32 = 4096;
 
 /// A parsed VTF: validated header plus borrowed image data.
@@ -56,6 +47,7 @@ pub struct Vtf<'a> {
     height: u32,
     flags: u32,
     frames: u32,
+    first_frame: u16,
     faces: u32,
     mip_count: u8,
     format: VtfFormat,
@@ -63,19 +55,77 @@ pub struct Vtf<'a> {
     reflectivity: [f32; 3],
     bumpmap_scale: f32,
     highres_offset: usize,
+    image_data_min_offset: usize,
     sprite_sheet_offset: Option<usize>,
     bytes: &'a [u8],
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[allow(missing_docs)]
+pub struct VtfHeader {
+    pub dimensions: [u32; 2],
+    pub flags: u32,
+    pub frames: u32,
+    pub first_frame: u16,
+    pub faces: u32,
+    pub mip_count: u8,
+    pub format: VtfFormat,
+    pub version_minor: u32,
+    pub reflectivity: [f32; 3],
+    pub bumpmap_scale: f32,
+}
+
+/// Maximum supported fixed header and resource directory, excluding image data.
+pub const MAX_HEADER_BYTES: usize = 80 + MAX_RESOURCES as usize * 8;
+
+/// Inspects a prefix against the complete container length; no payload is decoded.
+pub fn inspect_header(
+    prefix: &[u8],
+    declared_len: u64,
+    limits: &Limits,
+) -> Result<VtfHeader, VtfError> {
+    let vtf = parse_with_length(prefix, declared_len, limits)?;
+    if vtf.highres_offset < vtf.image_data_min_offset {
+        return Err(VtfError::BadHeader);
+    }
+    let (start, len) = vtf.slice_range(vtf.frames - 1, vtf.faces - 1, 0)?;
+    let end = start.checked_add(len).ok_or(VtfError::BadHeader)? as u64;
+    if end > declared_len {
+        return Err(VtfError::Truncated {
+            needed: end,
+            available: declared_len,
+        });
+    }
+    Ok(vtf.header())
+}
+
 /// One frame/face/mip decoded to tightly-packed RGBA8.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub struct RgbaImage {
-    /// Pixel width.
     pub width: u32,
-    /// Pixel height.
     pub height: u32,
     /// `width * height * 4` bytes, row-major RGBA.
     pub rgba: Vec<u8>,
+}
+
+/// A complete stored image; the range addresses the original container bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct StoredImage {
+    pub frame: u32,
+    pub face: u32,
+    pub source_mip: u8,
+    pub dimensions: [u32; 2],
+    pub byte_range: Range<usize>,
+}
+
+/// Decoded authored mip with its original level number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct DecodedMip {
+    pub source_mip: u8,
+    pub image: RgbaImage,
 }
 
 /// GPU block-compression format of a BC-encoded VTF.
@@ -102,34 +152,29 @@ impl BcFormat {
 
 /// One mip level of a BC texture, as stored (GPU-uploadable).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub struct RawBcMip<'a> {
-    /// Pixel width of this mip.
     pub width: u32,
-    /// Pixel height of this mip.
     pub height: u32,
-    /// The raw BC blocks.
     pub data: &'a [u8],
 }
 
 /// Borrowed BC block data for one frame/face across mip levels.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub struct RawBcTexture<'a> {
-    /// Block-compression format.
     pub format: BcFormat,
-    /// Base (mip 0) width.
     pub width: u32,
-    /// Base (mip 0) height.
     pub height: u32,
-    /// Whether truncation cut mips the header declares: `mips` holds
-    /// fewer levels than [`Vtf::mip_count`].
+    /// Some declared mip levels are incomplete.
     pub truncated: bool,
-    /// VTF stores high-resolution mips smallest-first. These slices
-    /// preserve that file order; upload callers reverse them for wgpu.
+    /// Smallest-first file order.
     pub mips: Vec<RawBcMip<'a>>,
 }
 
 /// One animation frame from a particle sprite sheet resource.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(missing_docs)]
 pub struct SheetFrame {
     /// Duration in sequence-relative time units.
     pub display_time: f32,
@@ -139,21 +184,18 @@ pub struct SheetFrame {
 
 /// One numbered animation sequence from a particle sprite sheet.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(missing_docs)]
 pub struct SheetSequence {
-    /// Sequence number referenced by the particle renderer.
     pub number: u32,
-    /// Whether playback holds the last frame instead of looping.
     pub clamp: bool,
-    /// Sum of the frame durations.
     pub total_time: f32,
-    /// Frames in playback order.
     pub frames: Vec<SheetFrame>,
 }
 
 /// Particle sprite-sheet metadata stored in a VTF 7.3+ resource block.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(missing_docs)]
 pub struct SpriteSheet {
-    /// Animation sequences in file order.
     pub sequences: Vec<SheetSequence>,
 }
 
@@ -279,9 +321,6 @@ impl VtfFormat {
         }
     }
 
-    /// Bytes for one `width x height` slice in this format. Zero
-    /// dimensions yield zero bytes (a real case for absent lowres
-    /// images); mip dimensions are clamped to 1 by the caller.
     fn slice_bytes(self, width: u32, height: u32) -> u64 {
         if let Some(bc) = self.bc() {
             let blocks = u64::from(width.div_ceil(4)) * u64::from(height.div_ceil(4));
@@ -315,39 +354,25 @@ impl VtfFormat {
 /// VTF parse or decode failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[allow(missing_docs)]
 pub enum VtfError {
     /// Input exceeds [`Limits::max_input_bytes`].
-    InputTooLarge {
-        /// Input length in bytes.
-        len: u64,
-        /// The configured cap.
-        max: u64,
-    },
+    InputTooLarge { len: u64, max: u64 },
     /// Input ends before a required structure.
-    Truncated {
-        /// Bytes required.
-        needed: u64,
-        /// Bytes available.
-        available: u64,
-    },
+    Truncated { needed: u64, available: u64 },
+    /// An encoded image has trailing bytes beyond its exact dimensions.
+    #[allow(missing_docs)]
+    ImageLengthMismatch { expected: u64, actual: u64 },
     /// The file does not start with `VTF\0`.
     BadMagic,
     /// Not a 7.0–7.5 container.
-    UnsupportedVersion {
-        /// Major version from the header.
-        major: u32,
-        /// Minor version from the header.
-        minor: u32,
-    },
+    UnsupportedVersion { major: u32, minor: u32 },
     /// Unknown pixel-format discriminant.
     UnknownFormat(i32),
     /// The format is recognized but this crate cannot decode it.
     UnsupportedFormat(VtfFormat),
     /// Volume textures (`depth > 1`) are not supported.
-    VolumeTexture {
-        /// Depth from the header.
-        depth: u16,
-    },
+    VolumeTexture { depth: u16 },
     /// Zero width, height, or mip count.
     BadHeader,
     /// The 7.3+ resource directory is implausible or out of bounds.
@@ -355,12 +380,7 @@ pub enum VtfError {
     /// A requested frame/face/mip does not exist in this texture.
     OutOfRange,
     /// The decoded RGBA image would exceed [`Limits::max_entry_bytes`].
-    DecodedTooLarge {
-        /// Would-be decoded size in bytes (`width * height * 4`).
-        size: u64,
-        /// The configured cap.
-        max: u64,
-    },
+    DecodedTooLarge { size: u64, max: u64 },
 }
 
 impl fmt::Display for VtfError {
@@ -371,6 +391,9 @@ impl fmt::Display for VtfError {
             }
             Self::Truncated { needed, available } => {
                 write!(f, "vtf truncated: need {needed} bytes, have {available}")
+            }
+            Self::ImageLengthMismatch { expected, actual } => {
+                write!(f, "vtf image requires {expected} bytes, received {actual}")
             }
             Self::BadMagic => write!(f, "not a vtf file (bad magic)"),
             Self::UnsupportedVersion { major, minor } => {
@@ -397,6 +420,108 @@ impl fmt::Display for VtfError {
 }
 
 impl std::error::Error for VtfError {}
+
+/// Decode one complete BC image; partial blocks and trailing bytes are rejected.
+pub fn decode_bc_rgba(
+    format: BcFormat,
+    width: u32,
+    height: u32,
+    data: &[u8],
+    limits: &Limits,
+) -> Result<RgbaImage, VtfError> {
+    if width == 0 || height == 0 {
+        return Err(VtfError::BadHeader);
+    }
+    let actual = data.len() as u64;
+    if actual > limits.max_input_bytes {
+        return Err(VtfError::InputTooLarge {
+            len: actual,
+            max: limits.max_input_bytes,
+        });
+    }
+    let expected = u64::from(width.div_ceil(4))
+        .checked_mul(u64::from(height.div_ceil(4)))
+        .and_then(|blocks| blocks.checked_mul(u64::from(format.block_bytes())))
+        .ok_or(VtfError::BadHeader)?;
+    if actual < expected {
+        return Err(VtfError::Truncated {
+            needed: expected,
+            available: actual,
+        });
+    }
+    if actual != expected {
+        return Err(VtfError::ImageLengthMismatch { expected, actual });
+    }
+    let format = match format {
+        BcFormat::Bc1 => VtfFormat::Dxt1,
+        BcFormat::Bc2 => VtfFormat::Dxt3,
+        BcFormat::Bc3 => VtfFormat::Dxt5,
+    };
+    Ok(RgbaImage {
+        width,
+        height,
+        rgba: decode_slice(format, data, width, height, limits)?,
+    })
+}
+
+/// Decode a rectangle into caller-owned rows, preserving bytes outside the rectangle.
+/// `region` is `[x, y, width, height]`; `row_stride` includes destination padding.
+pub fn decode_bc_rgba_region_into(
+    format: BcFormat,
+    dimensions: [u32; 2],
+    region: [u32; 4],
+    data: &[u8],
+    output: &mut [u8],
+    row_stride: usize,
+) -> Result<(), VtfError> {
+    let [width, height] = dimensions;
+    let [x, y, count_x, count_y] = region;
+    if width == 0
+        || height == 0
+        || count_x == 0
+        || count_y == 0
+        || x.checked_add(count_x).is_none_or(|end| end > width)
+        || y.checked_add(count_y).is_none_or(|end| end > height)
+    {
+        return Err(VtfError::OutOfRange);
+    }
+    let expected = u64::from(width.div_ceil(4))
+        .checked_mul(u64::from(height.div_ceil(4)))
+        .and_then(|blocks| blocks.checked_mul(u64::from(format.block_bytes())))
+        .ok_or(VtfError::BadHeader)?;
+    if data.len() as u64 != expected {
+        return Err(VtfError::ImageLengthMismatch {
+            expected,
+            actual: data.len() as u64,
+        });
+    }
+    let row_bytes = usize::try_from(u64::from(count_x) * 4).map_err(|_| VtfError::BadHeader)?;
+    let required = usize::try_from(count_y - 1)
+        .ok()
+        .and_then(|rows| rows.checked_mul(row_stride))
+        .and_then(|bytes| bytes.checked_add(row_bytes))
+        .ok_or(VtfError::BadHeader)?;
+    if row_stride < row_bytes || output.len() < required {
+        return Err(VtfError::OutOfRange);
+    }
+    let block_bytes = format.block_bytes() as usize;
+    let blocks_wide = width.div_ceil(4) as usize;
+    let mut texels = [[0_u8; 4]; 16];
+    for by in y / 4..(y + count_y).div_ceil(4) {
+        for bx in x / 4..(x + count_x).div_ceil(4) {
+            let block = (by as usize * blocks_wide + bx as usize) * block_bytes;
+            decode_bc_block(format, &data[block..block + block_bytes], &mut texels);
+            for py in (by * 4).max(y)..(by * 4).saturating_add(4).min(y + count_y) {
+                for px in (bx * 4).max(x)..(bx * 4).saturating_add(4).min(x + count_x) {
+                    let dst = (py - y) as usize * row_stride + (px - x) as usize * 4;
+                    let texel = ((py - by * 4) * 4 + px - bx * 4) as usize;
+                    output[dst..dst + 4].copy_from_slice(&texels[texel]);
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 impl crate::reader::ReadError for VtfError {
     fn truncated(needed: u64, available: u64) -> Self {
@@ -437,9 +562,17 @@ impl Reader<'_> {
 /// Parse and validate a VTF header. Image data is addressed lazily and
 /// bounds-checked per request.
 pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Vtf<'a>, VtfError> {
-    if bytes.len() as u64 > limits.max_input_bytes {
+    parse_with_length(bytes, bytes.len() as u64, limits)
+}
+
+fn parse_with_length<'a>(
+    bytes: &'a [u8],
+    declared_len: u64,
+    limits: &Limits,
+) -> Result<Vtf<'a>, VtfError> {
+    if declared_len > limits.max_input_bytes {
         return Err(VtfError::InputTooLarge {
-            len: bytes.len() as u64,
+            len: declared_len,
             max: limits.max_input_bytes,
         });
     }
@@ -478,7 +611,6 @@ pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Vtf<'a>, VtfError> 
     }
     let format = VtfFormat::from_raw(format_raw).ok_or(VtfError::UnknownFormat(format_raw))?;
 
-    // Data resources (7.3+): the hires/lowres payload locations.
     let mut lowres_resource = None;
     let mut highres_resource = None;
     let mut sprite_sheet_resource = None;
@@ -521,10 +653,10 @@ pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Vtf<'a>, VtfError> 
         |offset| offset as u64,
     );
     let highres_offset = usize::try_from(highres_offset).map_err(|_| VtfError::CorruptResources)?;
-    if highres_offset > bytes.len() {
+    if highres_offset as u64 > declared_len {
         return Err(VtfError::Truncated {
             needed: highres_offset as u64,
-            available: bytes.len() as u64,
+            available: declared_len,
         });
     }
 
@@ -545,6 +677,7 @@ pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Vtf<'a>, VtfError> 
         height,
         flags,
         frames,
+        first_frame,
         faces,
         mip_count,
         format,
@@ -552,6 +685,7 @@ pub fn parse<'a>(bytes: &'a [u8], limits: &Limits) -> Result<Vtf<'a>, VtfError> 
         reflectivity,
         bumpmap_scale,
         highres_offset,
+        image_data_min_offset: header_size.max(r.pos),
         sprite_sheet_offset: sprite_sheet_resource.and_then(|offset| usize::try_from(offset).ok()),
         bytes,
     })
@@ -561,35 +695,54 @@ fn mip_dimension(base: u32, level: u8) -> u32 {
     base.checked_shr(u32::from(level)).unwrap_or(0).max(1)
 }
 
+#[allow(missing_docs)]
 impl<'a> Vtf<'a> {
-    /// Base (mip 0) width in pixels.
+    #[must_use]
+    #[allow(missing_docs)]
+    pub fn header(&self) -> VtfHeader {
+        VtfHeader {
+            dimensions: [self.width, self.height],
+            flags: self.flags,
+            frames: self.frames,
+            first_frame: self.first_frame,
+            faces: self.faces,
+            mip_count: self.mip_count,
+            format: self.format,
+            version_minor: self.version_minor,
+            reflectivity: self.reflectivity,
+            bumpmap_scale: self.bumpmap_scale,
+        }
+    }
+
     #[must_use]
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// Base (mip 0) height in pixels.
     #[must_use]
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// Texture flags word (see [`texture_flags`]).
     #[must_use]
     pub fn flags(&self) -> u32 {
         self.flags
     }
 
-    /// The high-resolution pixel format.
     #[must_use]
     pub fn format(&self) -> VtfFormat {
         self.format
     }
 
-    /// Animation frame count (at least 1).
     #[must_use]
     pub fn frame_count(&self) -> u32 {
         self.frames
+    }
+
+    /// Authored first-frame field, including the legacy cubemap sentinel.
+    #[must_use]
+    pub fn first_frame(&self) -> u16 {
+        self.first_frame
     }
 
     /// 1 for ordinary textures; 6 or 7 for envmap cubemaps.
@@ -604,41 +757,50 @@ impl<'a> Vtf<'a> {
         self.mip_count
     }
 
-    /// Average color, from the header (renderers use it for tinting).
     #[must_use]
     pub fn reflectivity(&self) -> [f32; 3] {
         self.reflectivity
     }
 
-    /// Bump-map scale, from the header.
     #[must_use]
     pub fn bumpmap_scale(&self) -> f32 {
         self.bumpmap_scale
     }
 
-    /// Container minor version (7.`minor`).
     #[must_use]
     pub fn version_minor(&self) -> u32 {
         self.version_minor
     }
 
-    /// Byte offset of one frame/face/mip slice within the file, plus its
-    /// length. Layout: mip (smallest first) → frame → face → slice.
     fn slice_range(&self, frame: u32, face: u32, mip: u8) -> Result<(usize, usize), VtfError> {
         if frame >= self.frames || face >= self.faces || mip >= self.mip_count {
             return Err(VtfError::OutOfRange);
         }
-        let images = u64::from(self.frames) * u64::from(self.faces);
+        let images = u64::from(self.frames)
+            .checked_mul(u64::from(self.faces))
+            .ok_or(VtfError::BadHeader)?;
         let mut offset = 0u64;
         for level in (mip + 1)..self.mip_count {
             let w = mip_dimension(self.width, level);
             let h = mip_dimension(self.height, level);
-            offset += self.format.slice_bytes(w, h) * images;
+            offset = self
+                .format
+                .slice_bytes(w, h)
+                .checked_mul(images)
+                .and_then(|bytes| offset.checked_add(bytes))
+                .ok_or(VtfError::BadHeader)?;
         }
         let w = mip_dimension(self.width, mip);
         let h = mip_dimension(self.height, mip);
         let slice = self.format.slice_bytes(w, h);
-        offset += slice * (u64::from(frame) * u64::from(self.faces) + u64::from(face));
+        let image = u64::from(frame)
+            .checked_mul(u64::from(self.faces))
+            .and_then(|index| index.checked_add(u64::from(face)))
+            .ok_or(VtfError::BadHeader)?;
+        offset = slice
+            .checked_mul(image)
+            .and_then(|bytes| offset.checked_add(bytes))
+            .ok_or(VtfError::BadHeader)?;
         let start = (self.highres_offset as u64)
             .checked_add(offset)
             .ok_or(VtfError::BadHeader)?;
@@ -648,12 +810,81 @@ impl<'a> Vtf<'a> {
     }
 
     fn slice_bytes(&self, frame: u32, face: u32, mip: u8) -> Result<&'a [u8], VtfError> {
+        let image = self.stored_image(frame, face, mip)?;
+        Ok(&self.bytes[image.byte_range])
+    }
+
+    /// Bounds-check one complete image without converting its authored format.
+    pub fn stored_image(&self, frame: u32, face: u32, mip: u8) -> Result<StoredImage, VtfError> {
+        if self.highres_offset < self.image_data_min_offset {
+            return Err(VtfError::BadHeader);
+        }
         let (start, len) = self.slice_range(frame, face, mip)?;
         let end = start.checked_add(len).ok_or(VtfError::BadHeader)?;
-        self.bytes.get(start..end).ok_or(VtfError::Truncated {
-            needed: end as u64,
-            available: self.bytes.len() as u64,
+        if end > self.bytes.len() {
+            return Err(VtfError::Truncated {
+                needed: end as u64,
+                available: self.bytes.len() as u64,
+            });
+        }
+        Ok(StoredImage {
+            frame,
+            face,
+            source_mip: mip,
+            dimensions: [
+                mip_dimension(self.width, mip),
+                mip_dimension(self.height, mip),
+            ],
+            byte_range: start..end,
         })
+    }
+
+    /// Largest-first selected authored levels; any incomplete level fails the chain.
+    pub fn stored_mip_chain(
+        &self,
+        frame: u32,
+        face: u32,
+        first_source_mip: u8,
+    ) -> Result<Vec<StoredImage>, VtfError> {
+        if first_source_mip >= self.mip_count {
+            return Err(VtfError::OutOfRange);
+        }
+        (first_source_mip..self.mip_count)
+            .map(|mip| self.stored_image(frame, face, mip))
+            .collect()
+    }
+
+    /// Decode selected authored levels; max_entry_bytes bounds the entire output chain.
+    pub fn decode_mip_chain(
+        &self,
+        frame: u32,
+        face: u32,
+        first_source_mip: u8,
+        limits: &Limits,
+    ) -> Result<Vec<DecodedMip>, VtfError> {
+        let images = self.stored_mip_chain(frame, face, first_source_mip)?;
+        let size = images.iter().try_fold(0_u64, |total, image| {
+            u64::from(image.dimensions[0])
+                .checked_mul(u64::from(image.dimensions[1]))
+                .and_then(|pixels| pixels.checked_mul(4))
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or(VtfError::BadHeader)
+        })?;
+        if size > limits.max_entry_bytes {
+            return Err(VtfError::DecodedTooLarge {
+                size,
+                max: limits.max_entry_bytes,
+            });
+        }
+        images
+            .into_iter()
+            .map(|image| {
+                Ok(DecodedMip {
+                    source_mip: image.source_mip,
+                    image: self.decode_rgba(frame, face, image.source_mip, limits)?,
+                })
+            })
+            .collect()
     }
 
     /// Raw BC blocks for one frame/face across all mips present in the
@@ -688,23 +919,51 @@ impl<'a> Vtf<'a> {
         })
     }
 
-    /// Decode the optional particle sprite-sheet resource.
-    #[must_use]
-    pub fn sprite_sheet(&self, limits: &Limits) -> Option<SpriteSheet> {
-        let offset = self.sprite_sheet_offset?;
-        let size_bytes = self.bytes.get(offset..offset.checked_add(4)?)?;
-        let size = usize::try_from(u32::from_le_bytes(size_bytes.try_into().ok()?)).ok()?;
-        let payload_start = offset.checked_add(4)?;
+    /// Borrows and checks the complete optional sprite-sheet resource without allocating records.
+    pub fn sprite_sheet_descriptor(
+        &self,
+    ) -> Result<Option<SpriteSheetDescriptor<'_>>, SpriteSheetError> {
+        let Some(offset) = self.sprite_sheet_offset else {
+            return Ok(None);
+        };
+        if offset < self.image_data_min_offset {
+            return Err(SpriteSheetError::InvalidResource);
+        }
+        let size_bytes = self
+            .bytes
+            .get(
+                offset
+                    ..offset
+                        .checked_add(4)
+                        .ok_or(SpriteSheetError::InvalidResource)?,
+            )
+            .ok_or(SpriteSheetError::InvalidResource)?;
+        let size = u32::from_le_bytes(size_bytes.try_into().expect("four-byte slice")) as usize;
+        let start = offset
+            .checked_add(4)
+            .ok_or(SpriteSheetError::InvalidResource)?;
         let payload = self
             .bytes
-            .get(payload_start..payload_start.checked_add(size)?)?;
-        parse_sprite_sheet_payload(payload, limits)
+            .get(
+                start
+                    ..start
+                        .checked_add(size)
+                        .ok_or(SpriteSheetError::InvalidResource)?,
+            )
+            .ok_or(SpriteSheetError::InvalidResource)?;
+        sheet::descriptor(payload).map(Some)
     }
 
-    /// Decode one frame/face/mip to RGBA8. Rejects a decode that would
-    /// exceed [`Limits::max_entry_bytes`] before allocating it — block
-    /// compression amplifies stored bytes up to 8x, so the stored slice
-    /// passing the file's own bounds does not bound the decoded size.
+    #[must_use]
+    #[allow(missing_docs)]
+    pub fn sprite_sheet(&self, limits: &Limits) -> Option<SpriteSheet> {
+        self.sprite_sheet_descriptor()
+            .ok()??
+            .decode(SpriteSheetLimits::from_limits(limits))
+            .ok()
+    }
+
+    /// Decode RGBA8 within [`Limits::max_entry_bytes`] before allocation.
     pub fn decode_rgba(
         &self,
         frame: u32,
@@ -724,72 +983,13 @@ impl<'a> Vtf<'a> {
     }
 }
 
+#[cfg(test)]
 fn parse_sprite_sheet_payload(bytes: &[u8], limits: &Limits) -> Option<SpriteSheet> {
-    // Structural ceilings on top of the caller's `Limits`: real sprite
-    // sheets are small (tens of sequences, dozens of frames), so these
-    // stay the effective cap under the crate's generous defaults while
-    // still honoring a caller who configures a tighter budget.
-    const MAX_SEQUENCES: u32 = 1024;
-    const MAX_FRAMES: u32 = 4096;
-    let max_entries = u32::try_from(limits.max_entries).unwrap_or(u32::MAX);
-    let max_sequences = MAX_SEQUENCES.min(max_entries);
-    let max_frames = MAX_FRAMES.min(max_entries);
-
-    let mut position = 0_usize;
-    let read_u32 = |position: &mut usize| -> Option<u32> {
-        let end = position.checked_add(4)?;
-        let slice = bytes.get(*position..end)?;
-        *position = end;
-        Some(u32::from_le_bytes(slice.try_into().ok()?))
-    };
-    let version = read_u32(&mut position)?;
-    if version > 1 {
-        return None;
-    }
-    let sequence_count = read_u32(&mut position)?;
-    if sequence_count > max_sequences {
-        return None;
-    }
-    let mut sequences = Vec::with_capacity(sequence_count as usize);
-    for _ in 0..sequence_count {
-        let number = read_u32(&mut position)?;
-        let clamp = read_u32(&mut position)? != 0;
-        let frame_count = read_u32(&mut position)?;
-        if frame_count > max_frames {
-            return None;
-        }
-        let total_time = f32::from_bits(read_u32(&mut position)?);
-        let mut frames = Vec::with_capacity(frame_count as usize);
-        for _ in 0..frame_count {
-            let display_time = f32::from_bits(read_u32(&mut position)?);
-            let coordinate_sets = if version == 0 { 1 } else { 4 };
-            let mut uv = [0.0_f32; 4];
-            for set in 0..coordinate_sets {
-                let rect = [
-                    f32::from_bits(read_u32(&mut position)?),
-                    f32::from_bits(read_u32(&mut position)?),
-                    f32::from_bits(read_u32(&mut position)?),
-                    f32::from_bits(read_u32(&mut position)?),
-                ];
-                if set == 0 {
-                    uv = rect;
-                }
-            }
-            frames.push(SheetFrame { display_time, uv });
-        }
-        sequences.push(SheetSequence {
-            number,
-            clamp,
-            total_time,
-            frames,
-        });
-    }
-    Some(SpriteSheet { sequences })
+    sheet::descriptor(bytes)
+        .ok()?
+        .decode(SpriteSheetLimits::from_limits(limits))
+        .ok()
 }
-
-// ---------------------------------------------------------------
-// Pixel decoding
-// ---------------------------------------------------------------
 
 fn decode_slice(
     format: VtfFormat,
@@ -798,9 +998,6 @@ fn decode_slice(
     height: u32,
     limits: &Limits,
 ) -> Result<Vec<u8>, VtfError> {
-    // Checked: 65535×65535×4 overflows 32-bit usize. (Reachable sizes
-    // are file-backed — the slice extent was validated — but the
-    // arithmetic must not wrap on the way to that conclusion.)
     let pixels =
         usize::try_from(u64::from(width) * u64::from(height)).map_err(|_| VtfError::BadHeader)?;
     let rgba_len = pixels.checked_mul(4).ok_or(VtfError::BadHeader)?;
@@ -888,7 +1085,6 @@ fn decode_slice(
                 out.extend_from_slice(&[p[0], p[1], 0, 255]);
             }
         }
-        // Packed 16-bit: channels named from the lowest bits up.
         VtfFormat::Rgb565 => {
             for p in data.chunks_exact(2) {
                 let v = u16::from_le_bytes([p[0], p[1]]);
@@ -983,12 +1179,8 @@ fn expand6(v: u8) -> u8 {
     (v << 2) | (v >> 4)
 }
 
-// ---------------------------------------------------------------
-// BC1/2/3 block decoding
-// ---------------------------------------------------------------
-
 fn decode_bc(format: BcFormat, data: &[u8], width: u32, height: u32) -> Vec<u8> {
-    // decode_slice pre-validates the checked form of this product.
+    // decode_slice bounds the output size.
     let rgba_len = usize::try_from(u64::from(width) * u64::from(height) * 4)
         .expect("output size validated by decode_slice");
     let width = width as usize;
@@ -1004,20 +1196,7 @@ fn decode_bc(format: BcFormat, data: &[u8], width: u32, height: u32) -> Vec<u8> 
             let Some(block) = data.get(offset..offset + block_bytes) else {
                 continue; // truncated tail: leave transparent black
             };
-            match format {
-                BcFormat::Bc1 => decode_color_block(&block[..8], &mut texels, false),
-                BcFormat::Bc2 => {
-                    decode_color_block(&block[8..], &mut texels, true);
-                    for (i, texel) in texels.iter_mut().enumerate() {
-                        let nibble = (block[i / 2] >> ((i % 2) * 4)) & 0xF;
-                        texel[3] = expand4(nibble);
-                    }
-                }
-                BcFormat::Bc3 => {
-                    decode_color_block(&block[8..], &mut texels, true);
-                    decode_bc3_alpha(&block[..8], &mut texels);
-                }
-            }
+            decode_bc_block(format, block, &mut texels);
             for ty in 0..4 {
                 let y = by * 4 + ty;
                 if y >= height {
@@ -1035,6 +1214,23 @@ fn decode_bc(format: BcFormat, data: &[u8], width: u32, height: u32) -> Vec<u8> 
         }
     }
     out
+}
+
+fn decode_bc_block(format: BcFormat, block: &[u8], texels: &mut [[u8; 4]; 16]) {
+    match format {
+        BcFormat::Bc1 => decode_color_block(&block[..8], texels, false),
+        BcFormat::Bc2 => {
+            decode_color_block(&block[8..], texels, true);
+            for (i, texel) in texels.iter_mut().enumerate() {
+                let nibble = (block[i / 2] >> ((i % 2) * 4)) & 0xF;
+                texel[3] = expand4(nibble);
+            }
+        }
+        BcFormat::Bc3 => {
+            decode_color_block(&block[8..], texels, true);
+            decode_bc3_alpha(&block[..8], texels);
+        }
+    }
 }
 
 fn decode_color_block(block: &[u8], texels: &mut [[u8; 4]; 16], opaque: bool) {

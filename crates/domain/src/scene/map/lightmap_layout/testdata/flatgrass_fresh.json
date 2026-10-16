@@ -1,0 +1,18 @@
+{
+  "format": "SLL1",
+  "map": "gm_flatgrass",
+  "face_count": 2922,
+  "physical_page_count": 3,
+  "profile": [
+    512,
+    256
+  ],
+  "bsp_sha256": "4dfd95ecb8f77a093e3079697b04c5be5675e8595c05639aaf57ad1541024d76",
+  "oracle_sha256": "abdd7f9c8217dda79d7e6053ba0e4c590f5ad8889bc1e84841f2edcac980b33a",
+  "fixture_sha256": "c19aad7c5c71f8ccef6fd7cf779ccfbed5467c7bc474e3c59dfd958baa1e2d9c",
+  "engine_sha256": "72528485332ebfb8de4afd5e3a07b09b42e4e44fd659f063d31803a05731fa16",
+  "module_sha256": "e251a9005099ed11700a6add6791ffa178c019d04a650cb9bb61d8ce90792f24",
+  "material_order": "bsp-texdata",
+  "inputs": "Explicit material order, raw BSP face extents/flags/styles; native canonical material and effective lightmap requirements.",
+  "expected": "Native signed lightmap page identity for every BSP face."
+}

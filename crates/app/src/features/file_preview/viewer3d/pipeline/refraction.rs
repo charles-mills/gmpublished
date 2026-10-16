@@ -1,8 +1,7 @@
 use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection, prepare_draw_plans};
-use super::reflections::{PlanarView, Plane, SceneView};
+use super::reflections::{PlanarView, SceneView};
 use super::targets::RenderTargets;
 use super::uniforms::FogUniform;
-use super::visibility::upload_visible_indices;
 use super::{ModelPrimitive, RenderResources, Vec3, ViewerScene, wgpu};
 
 #[derive(Clone, Copy)]
@@ -49,19 +48,26 @@ impl PlanarView {
         uniforms.water_time_sky_tint[1..].copy_from_slice(upload.assets.sky_tint.as_array());
         let plane = source.plane;
         let below_water = shader.water().is_some_and(|water| !water.above_water);
-        // The two-unit refraction clip bias avoids shoreline cracks.
-        let clip_bias = if below_water {
+        let skybox_clip_bias = if below_water {
             0.0
         } else if shader.water().is_some() {
-            2.0
+            super::water_clip::WATER_CLIP_SPREAD
         } else {
             0.1
         };
+        let clip = if shader.water().is_some() {
+            super::water_clip::world_plane(plane, super::water_clip::WorldWaterPass::Refraction)
+        } else {
+            super::reflections::Plane {
+                normal: -plane.normal,
+                distance: -plane.distance - 0.1,
+            }
+        };
         uniforms.clip_plane = [
-            -plane.normal[0],
-            -plane.normal[1],
-            -plane.normal[2],
-            plane.distance + clip_bias,
+            clip.normal[0],
+            clip.normal[1],
+            clip.normal[2],
+            -clip.distance,
         ];
         uniforms.medium_plane = [
             plane.normal[0],
@@ -97,6 +103,7 @@ impl PlanarView {
                 a: 1.0,
             };
         }
+        uniforms = uniforms.with_clip_camera(primitive.view_camera);
         view.world.write(queue, &uniforms);
         if let Some(sky) = primitive.sky_uniforms {
             view.sky.write(
@@ -111,9 +118,15 @@ impl PlanarView {
                 -plane.normal[0],
                 -plane.normal[1],
                 -plane.normal[2],
-                distance + clip_bias / scale,
+                distance + skybox_clip_bias / scale,
             ];
-            skybox.with_raster_offset(size, primitive.raster_offset())
+            skybox
+                .with_clip_camera(
+                    primitive
+                        .view_camera
+                        .map(|camera| camera.skybox(origin, scale)),
+                )
+                .with_raster_offset(size, primitive.raster_offset())
         });
         if let Some(skybox) = skybox {
             view.skybox.write(queue, &skybox);
@@ -135,6 +148,8 @@ impl PlanarView {
         let plans = prepare_draw_plans(
             upload,
             DrawPlanRequest {
+                world_view: Some(&uniforms),
+                skybox_view: skybox.as_ref(),
                 content_id: primitive.content_id,
                 selection: DrawPlanSelection {
                     skin_remap: &primitive.skin_remap,
@@ -148,43 +163,24 @@ impl PlanarView {
                 visibility_plan: view.visibility.plan.as_ref(),
             },
         );
-        // Exclude only this plane from a batched mesh; preserve the PVS source
-        // so its other heights and orientations survive subsequent rebuilds.
-        let generation = view.visibility.tracker.rebuild_count;
-        if view.planar_exclusion_generation != Some(generation) {
-            let scene = primitive.preview.render_scene();
-            for item in &plans.world.planar {
-                let uploaded = &upload.meshes[item.mesh_index];
-                if uploaded.door_index.is_some() {
-                    continue;
-                }
-                let Some(mesh) = scene.meshes.get(uploaded.scene_mesh_index) else {
-                    continue;
-                };
-                let indices =
-                    view.visibility
-                        .plan
-                        .as_ref()
-                        .map_or(mesh.indices.as_slice(), |plan| {
-                            plan.mesh_indices
-                                .get(uploaded.scene_mesh_index)
-                                .map_or(&[], Vec::as_slice)
-                        });
-                let selected = without_plane(&mesh.vertices, indices, plane);
-                view.visibility.mesh_indices.insert(
-                    item.mesh_index,
-                    upload_visible_indices(device, queue, &selected),
-                );
-            }
-            view.planar_exclusion_generation = Some(generation);
-        }
         view.plans = Some(plans);
         super::transparency::prepare(
             view,
             upload,
-            uniforms,
+            &uniforms,
             skybox.as_ref(),
-            shader.water().map(|water| water.above_water),
+            shader
+                .water()
+                .map(|water| super::transparency::WaterSide::from_submerged(water.above_water)),
+            shader.water().is_none(),
+        );
+        super::planar::prepare(
+            view,
+            upload,
+            primitive.preview.render_scene(),
+            device,
+            queue,
+            Some(plane),
         );
         RenderTargets::ensure(
             &mut view.targets,
@@ -195,25 +191,10 @@ impl PlanarView {
     }
 }
 
-fn without_plane(vertices: &[super::ModelVertex], indices: &[u32], plane: Plane) -> Vec<u32> {
-    indices
-        .chunks_exact(3)
-        .filter(|triangle| {
-            Plane::from_triangle(vertices, triangle).is_none_or(|candidate| {
-                !candidate.same(plane)
-                    && !candidate.same(Plane {
-                        normal: -plane.normal,
-                        distance: -plane.distance,
-                    })
-            })
-        })
-        .flatten()
-        .copied()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::planar::without_plane;
+    use super::super::reflections::Plane;
     use super::*;
     #[test]
     fn exclusion_keeps_a_second_water_height_in_the_same_material_mesh() {

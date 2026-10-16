@@ -4,6 +4,9 @@ const SURFACE_TRANSITION:u32=2u;
 const SURFACE_VERTEX_LIT:u32=3u;
 const SURFACE_UNLIT:u32=4u;
 const SURFACE_DECAL_MODULATE:u32=5u;
+const BASE_BLEND_SINGLE:u32=0u;
+const BASE_BLEND_VERTEX_ALPHA:u32=1u;
+const BASE_BLEND_MASKED:u32=2u;
 const EMISSION_NONE:u32=0u;
 const EMISSION_BASE_ALPHA:u32=1u;
 const EMISSION_TEXTURE:u32=2u;
@@ -17,6 +20,13 @@ const ENV_BUMP:u32=1u;
 const ENV_SSBUMP:u32=2u;
 const ENV_SECOND_NORMAL:u32=4u;
 const ENV_VERTEX_MODULATION:u32=8u;
+
+struct SurfaceBlend {
+    base_mode:u32,
+    masked:u32,
+    modulation:u32,
+    padding:u32,
+}
 
 struct Surface {
     flags:vec4<u32>,
@@ -32,6 +42,7 @@ struct Surface {
     emission_fresnel:vec4<f32>,
     blend_s:vec4<f32>,
     blend_t:vec4<f32>,
+    blend:SurfaceBlend,
     state:vec4<u32>,
     misc:vec4<f32>,
     env_flags:vec4<u32>,
@@ -48,6 +59,10 @@ struct Surface {
 @group(1) @binding(12) var surface_environment:texture_cube<f32>;
 @group(1) @binding(13) var surface_envmask:texture_2d_array<f32>;
 @group(1) @binding(14) var surface_env_sampler:sampler;
+@group(1) @binding(24) var surface_detail_sampler:sampler;
+@group(1) @binding(25) var surface_blend_sampler:sampler;
+@group(1) @binding(26) var surface_emission_sampler:sampler;
+@group(1) @binding(27) var surface_envmask_sampler:sampler;
 
 fn surface_uv(uv:vec2<f32>,s:vec4<f32>,t:vec4<f32>)->vec2<f32> {
     let value=vec4<f32>(uv,0.0,1.0);
@@ -76,11 +91,15 @@ fn surface_modulation(model:bool,instance:vec3<f32>,model_draw:bool)->vec4<f32> 
     return value;
 }
 
+fn surface_uses_blend_modulation(height_fog:bool)->bool {
+    return surface.blend.modulation!=0u && !height_fog;
+}
+
 fn surface_weight(uv:vec2<f32>,blend:f32,height_fog:bool)->f32 {
-    let weight=clamp(blend,0.0,1.0);
-    if surface.flags.w==0u || height_fog || surface.flags.z!=EMISSION_NONE {return weight;}
-    let mask=textureSample(surface_blend_texture,base_sampler,surface_uv(uv,surface.blend_s,surface.blend_t),0);
-    if surface.state.y!=0u {return mask.g;}
+    let weight=select(clamp(blend,0.0,1.0),0.5,surface.blend.masked!=0u);
+    if !surface_uses_blend_modulation(height_fog) {return weight;}
+    let mask=textureSample(surface_blend_texture,surface_blend_sampler,surface_uv(uv,surface.blend_s,surface.blend_t),0);
+    if surface.blend.masked!=0u {return mask.g;}
     let low=clamp(mask.g-mask.r,0.0,1.0);
     let high=clamp(mask.g+mask.r,0.0,1.0);
     let t=clamp((weight-low)/max(high-low,0.000001),0.0,1.0);
@@ -90,7 +109,7 @@ fn surface_weight(uv:vec2<f32>,blend:f32,height_fog:bool)->f32 {
 fn surface_detail(uv:vec2<f32>)->vec4<f32> {
     if surface.flags.y==0u {return vec4<f32>(1.0);}
     let layer=i32(u32(max(surface.detail.y,0.0))%max(textureNumLayers(surface_detail_texture),1u));
-    let sample=textureSample(surface_detail_texture,base_sampler,surface_uv(uv,surface.detail_s,surface.detail_t),layer);
+    let sample=textureSample(surface_detail_texture,surface_detail_sampler,surface_uv(uv,surface.detail_s,surface.detail_t),layer);
     return vec4<f32>(sample.rgb*surface.detail_tint.rgb,sample.a);
 }
 
@@ -129,7 +148,7 @@ fn surface_detail_post(lit:vec3<f32>,detail:vec4<f32>)->vec3<f32> {
 fn surface_emission(lit:vec3<f32>,albedo:vec3<f32>,alpha:f32,uv:vec2<f32>,vertex_normal:vec3<f32>,eye:vec3<f32>)->vec3<f32> {
     if surface.flags.z==EMISSION_NONE {return lit;}
     var mask=vec3<f32>(alpha);
-    if surface.flags.z==EMISSION_TEXTURE {mask=textureSample(surface_emission_texture,base_sampler,uv,0).rgb;}
+    if surface.flags.z==EMISSION_TEXTURE {mask=textureSample(surface_emission_texture,surface_emission_sampler,uv,0).rgb;}
     if surface.flags.z==EMISSION_FRESNEL {
         let fresnel=clamp(pow(clamp(dot(normalize(vertex_normal),normalize(eye)),0.0,1.0),surface.emission_fresnel.z)
             *surface.emission_fresnel.x+surface.emission_fresnel.y,0.0,1.0);
@@ -137,7 +156,7 @@ fn surface_emission(lit:vec3<f32>,albedo:vec3<f32>,alpha:f32,uv:vec2<f32>,vertex
     }
     if surface.flags.z==EMISSION_ENVIRONMENT_MASK {
         let layer=i32(surface.env_flags.z%max(textureNumLayers(surface_envmask),1u));
-        let glow=8.0*textureSample(surface_envmask,base_sampler,surface_uv(uv,surface.env_mask_s,surface.env_mask_t),layer).a;
+        let glow=8.0*textureSample(surface_envmask,surface_envmask_sampler,surface_uv(uv,surface.env_mask_s,surface.env_mask_t),layer).a;
         return max(0.0,1.0-glow)*lit+glow*albedo*surface.emission.rgb;
     }
     return mix(lit,albedo*surface.emission.rgb,mask);

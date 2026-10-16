@@ -1,6 +1,6 @@
-use super::projection::{SurfaceProjection, append_surface_polygon, receiver_surfaces};
+use super::projection::{SurfaceProjection, append_surface_polygon};
 use super::{
-    BspError, GeometryPartition, MapBsp, MapMesh, MapPropVisibility, MapSurfaceVertex, Overlay,
+    BspError, GeometryPartition, MapBsp, MapPropVisibility, MapSurfaceVertex, Overlay,
     is_preview_material_visible, normalize_material_name, vector_is_finite_nonzero,
 };
 use crate::math::Vec3;
@@ -9,11 +9,11 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapOverlay {
     pub source: MapSurfaceMarkSource,
+    pub decal_creation_order: Option<usize>,
     pub material_name: String,
     pub render_order: u16,
     pub fade: Option<super::MapOverlayFade>,
     pub fade_origin: Vec3,
-    pub receiver_face: u32,
     pub receiver_mesh: super::MapReceiverMesh,
     pub receiver_range: super::MapMeshIndexRange,
     pub receiver_material_index: usize,
@@ -25,17 +25,20 @@ pub struct MapOverlay {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MapSurfaceMarkSource {
-    Overlay { index: usize, id: i32 },
-    Decal { entity_index: usize },
+    Overlay {
+        index: usize,
+        id: i32,
+    },
+    Decal {
+        entity_index: usize,
+        permanence: super::MapDecalPermanence,
+    },
 }
 
 pub(super) fn partitioned_map_overlays(
     bsp: &MapBsp,
-    world: &[MapMesh],
-    sky: &[MapMesh],
-    doors: &[super::MapDoor],
+    projector: &super::MapSurfaceProjector<'_>,
 ) -> Result<(Vec<MapOverlay>, Vec<MapOverlay>), BspError> {
-    let receivers = receiver_surfaces(world, sky, doors);
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
     for (overlay_index, overlay) in bsp.overlays.iter().enumerate() {
@@ -60,7 +63,7 @@ pub(super) fn partitioned_map_overlays(
             .filter_map(|face| u32::try_from(*face).ok())
             .collect::<BTreeSet<_>>();
         for face in faces {
-            for receiver in receivers.get(&face).into_iter().flatten() {
+            for receiver in projector.receivers_for_face(face) {
                 if receiver.owner != super::MapSurfaceOwner::World {
                     continue;
                 }
@@ -69,6 +72,7 @@ pub(super) fn partitioned_map_overlays(
                         index: overlay_index,
                         id: overlay.id,
                     },
+                    decal_creation_order: None,
                     material_name: material_name.clone(),
                     render_order: overlay.render_order(),
                     fade: bsp
@@ -77,7 +81,6 @@ pub(super) fn partitioned_map_overlays(
                         .copied()
                         .filter(|fade| fade.min_distance_squared >= 0.0),
                     fade_origin: receiver.point_to_local(Vec3::from(overlay.origin)),
-                    receiver_face: face,
                     receiver_mesh: receiver.receiver_mesh,
                     receiver_range: receiver.range,
                     receiver_material_index: receiver.mesh.material_index,
@@ -86,24 +89,24 @@ pub(super) fn partitioned_map_overlays(
                     indices: Vec::new(),
                     visibility: receiver.visibility.clone(),
                 };
-                if receiver.displacement {
-                    for triangle in receiver.triangles() {
-                        append_surface_polygon(
-                            &mut mapped.vertices,
-                            &mut mapped.indices,
-                            projection.clip_triangle(&triangle),
-                        )?;
+                if let Some(displacement) = &receiver.displacement {
+                    for polygon in
+                        projection.project_displacement(displacement, receiver.triangles())
+                    {
+                        append_surface_polygon(&mut mapped.vertices, &mut mapped.indices, polygon)?;
                     }
                 } else {
-                    let polygon = projection
-                        .clip_quad_to_receiver(receiver)
-                        .into_iter()
-                        .map(|mut vertex| {
-                            vertex.surface.position += receiver.plane_normal * 0.1;
-                            vertex
-                        })
-                        .collect();
-                    append_surface_polygon(&mut mapped.vertices, &mut mapped.indices, polygon)?;
+                    for triangle in receiver.triangles() {
+                        let polygon = projection
+                            .clip_quad_to_triangle(&triangle)
+                            .into_iter()
+                            .map(|mut vertex| {
+                                vertex.surface.position += receiver.plane_normal * 0.1;
+                                vertex
+                            })
+                            .collect();
+                        append_surface_polygon(&mut mapped.vertices, &mut mapped.indices, polygon)?;
+                    }
                 }
                 if mapped.indices.is_empty() {
                     continue;

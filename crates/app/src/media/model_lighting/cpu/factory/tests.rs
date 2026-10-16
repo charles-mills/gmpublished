@@ -345,7 +345,7 @@ fn static_seed_keeps_exact_point_and_separates_spherical_from_dynamic_leaf_polic
     let cube = AmbientCube {
         colors: [Vec3::new(0.1, 0.2, 0.3); 6],
     };
-    let static_seed = factory.seed_static(point, bounds, cube).unwrap();
+    let static_seed = factory.seed_static_runtime(point, bounds, cube).unwrap();
     let dynamic_seed = factory.seed_dynamic(point).unwrap();
     assert_eq!(static_seed.sample_point, point);
     assert_ne!(dynamic_seed.sample_point, point);
@@ -359,7 +359,7 @@ fn static_seed_keeps_exact_point_and_separates_spherical_from_dynamic_leaf_polic
             .iter()
             .map(|selected| selected.light.original_index)
             .collect::<Vec<_>>(),
-        [0]
+        [0, 1]
     );
     assert_eq!(
         dynamic_seed
@@ -603,5 +603,184 @@ fn missing_inputs_and_unsupported_emitters_remain_explicit() {
     assert_eq!(
         factory.seed_dynamic(Vec3::splat(f32::NAN)),
         Err(ModelLightingFailure::MissingLeaf)
+    );
+}
+
+#[test]
+fn full_runtime_and_compiled_supplement_select_distinct_light_classes() {
+    let mut unstyled = point(0, Vec3::new(64.0, 0.0, 0.0));
+    unstyled.flags = WORLD_LIGHT_IN_AMBIENT_CUBE;
+    let mut styled = point(1, Vec3::new(0.0, 64.0, 0.0));
+    styled.style = 33;
+    styled.flags = WORLD_LIGHT_IN_AMBIENT_CUBE;
+    let map = map(&[unstyled, styled]);
+    let factory = ModelLightingFactory::new(
+        &map.ambient,
+        &map.world_lighting,
+        map.lighting_collision.as_ref().unwrap(),
+        None,
+    )
+    .unwrap();
+    let bounds = MapBounds {
+        min: Vec3::splat(-8.0),
+        max: Vec3::splat(8.0),
+    };
+    let ambient = AmbientCube {
+        colors: [Vec3::splat(0.25); 6],
+    };
+    let full = factory
+        .seed_static_runtime(Vec3::ZERO, bounds, ambient)
+        .unwrap();
+    let supplement = factory
+        .seed_compiled_supplement(Vec3::ZERO, bounds)
+        .unwrap();
+    let mut styles = [1.0; 128];
+    styles[33] = 0.5;
+    let full = full.evaluate(&styles, 4, MODEL_MINIMUM).unwrap();
+    let supplement = supplement.evaluate(&styles, 4, MODEL_MINIMUM).unwrap();
+    let ids = |evaluation: &ModelLightingEvaluation| {
+        evaluation
+            .selected
+            .iter()
+            .map(|light| light.light.original_index)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&full), [0, 1]);
+    assert_eq!(ids(&supplement), [1]);
+    assert_eq!(full.ambient_cube, ambient);
+    assert_eq!(supplement.ambient_cube.colors, [Vec3::ZERO; 6]);
+    assert_eq!(supplement.selected[0].style_weight, 0.5);
+    styles[33] = 0.0;
+    let dark = factory
+        .seed_compiled_supplement(Vec3::ZERO, bounds)
+        .unwrap()
+        .evaluate(&styles, 4, MODEL_MINIMUM)
+        .unwrap();
+    assert!(dark.selected.is_empty());
+    assert_eq!(dark.ambient_cube.colors, [Vec3::ZERO; 6]);
+}
+
+const MODEL_MINIMUM: f32 = super::super::super::MODEL_LIGHT_MINIMUM;
+
+#[test]
+fn compiled_supplement_retains_only_styled_overflow_as_modulated_ambient() {
+    let lights = (0..6)
+        .map(|index| {
+            let mut light = point(index, Vec3::new(64.0, 0.0, 0.0));
+            light.style = if index == 0 { 0 } else { 33 };
+            light
+        })
+        .collect::<Vec<_>>();
+    let map = map(&lights);
+    let factory = ModelLightingFactory::new(
+        &map.ambient,
+        &map.world_lighting,
+        map.lighting_collision.as_ref().unwrap(),
+        None,
+    )
+    .unwrap();
+    let seed = factory
+        .seed_compiled_supplement(
+            Vec3::ZERO,
+            MapBounds {
+                min: Vec3::splat(-8.0),
+                max: Vec3::splat(8.0),
+            },
+        )
+        .unwrap();
+    let bright = seed.evaluate(&[1.0; 128], 4, MODEL_MINIMUM).unwrap();
+    assert_eq!(
+        bright
+            .selected
+            .iter()
+            .map(|light| light.light.original_index)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
+    assert_eq!(bright.folded_ids, [5]);
+    assert!(bright.ambient_cube.colors[0].x() > 0.0);
+    assert_eq!(&bright.ambient_cube.colors[1..], &[Vec3::ZERO; 5]);
+    let mut styles = [1.0; 128];
+    styles[33] = 0.25;
+    let dim = seed.evaluate(&styles, 4, MODEL_MINIMUM).unwrap();
+    assert_eq!(
+        dim.ambient_cube.colors,
+        bright.ambient_cube.colors.map(|value| value * 0.25)
+    );
+    assert!(dim.selected.iter().all(|light| light.style_weight == 0.25));
+    let mut context = super::super::super::ModelLightingContext::ambient_fixture(1.0);
+    context.entity = false;
+    context.compiled_lighting = true;
+    context.compiled_supplement = Some(Ok(seed));
+    let snapshot = context.evaluate_compiled_supplement(&styles).unwrap();
+    assert_eq!(snapshot.ambient_cube, dim.ambient_cube);
+    assert_eq!(snapshot.lights.len(), 4);
+    assert!(
+        snapshot
+            .lights
+            .iter()
+            .all(|light| { light.radiance == Vec3::from(lights[1].intensity) * 0.25 })
+    );
+}
+
+#[test]
+fn compiled_supplement_survives_independent_full_ambient_preparation_failure() {
+    use super::super::super::{
+        ModelLightingContext, ModelLightingFallbackReason, ModelLightingSceneInputs,
+        ModelLightingSource,
+    };
+    let mut styled = point(0, Vec3::new(64.0, 0.0, 0.0));
+    styled.style = 33;
+    let map = map(&[styled]);
+    let inputs = ModelLightingSceneInputs::new(
+        map.ambient,
+        map.world_lighting,
+        map.visibility,
+        map.lighting_collision,
+        map.radiosity_surfaces,
+        Vec::new(),
+    );
+    let mut compiled = ModelLightingContext::ambient_fixture(0.25);
+    compiled.entity = false;
+    compiled.compiled_lighting = true;
+    compiled.static_world_bounds = Some(MapBounds {
+        min: Vec3::splat(-8.0),
+        max: Vec3::splat(8.0),
+    });
+    let mut ordinary = compiled.clone();
+    ordinary.compiled_lighting = false;
+    let mut contexts = [compiled, ordinary];
+    inputs.seed_static_with(&mut contexts, |_| {
+        Err(ModelLightingFailure::MissingRadiositySurfaces)
+    });
+    assert!(matches!(
+        contexts[0].source,
+        ModelLightingSource::DiagnosedFallback {
+            reason: ModelLightingFallbackReason::Preparation(
+                ModelLightingFailure::MissingRadiositySurfaces
+            ),
+            ..
+        }
+    ));
+    let supplement = contexts[0]
+        .evaluate_compiled_supplement(&[1.0; 128])
+        .unwrap();
+    assert_eq!(supplement.lights.len(), 1);
+    assert_eq!(supplement.ambient_cube.colors, [Vec3::ZERO; 6]);
+    assert!(contexts[1].compiled_supplement.is_none());
+    let ordinary = contexts[1]
+        .evaluate_compiled_supplement(&[1.0; 128])
+        .unwrap();
+    assert!(ordinary.lights.is_empty());
+    assert_eq!(ordinary.ambient_cube.colors, [Vec3::ZERO; 6]);
+    contexts[0].static_world_bounds = None;
+    inputs.seed_static_with(&mut contexts, |_| Ok(AmbientCube::WHITE));
+    assert_eq!(
+        contexts[0].compiled_supplement,
+        Some(Err(ModelLightingFailure::InvalidPosition))
+    );
+    assert_eq!(
+        contexts[0].evaluate_compiled_supplement(&[1.0; 128]),
+        Err(ModelLightingFailure::InvalidPosition)
     );
 }

@@ -881,10 +881,6 @@ fn pakfile_paths_are_normalized_and_limited_to_preview_entries() {
     assert!(!is_pakfile_retained_entry("sp_.vhv"));
     assert!(!is_pakfile_retained_entry("sp_hdr_bad.vhv"));
     assert!(!is_pakfile_retained_entry("maps/thumb.png"));
-    assert!(!is_pakfile_entry_oversized(MAX_PAKFILE_ENTRY_BYTES));
-    assert!(is_pakfile_entry_oversized(
-        MAX_PAKFILE_ENTRY_BYTES.saturating_add(1)
-    ));
 }
 
 #[test]
@@ -1344,9 +1340,45 @@ fn load_map_extracts_static_prop_placements_from_game_lump_fixture() {
             skin: 2,
             scale: 1.0,
             solid: MapPropSolid::None,
+            leaf_membership: MapPropLeafMembership::Compiled(vec![0, 1]),
             visibility: MapPropVisibility::Always,
         }]
     );
+}
+
+#[test]
+fn static_prop_render_membership_retains_authored_leaf_order_and_duplicates() {
+    let mut bsp = read_fixture_bsp(&skybox_partition_bsp_fixture(true, true));
+    bsp.leaves[1].cluster = bsp.leaves[0].cluster;
+    let props = bsp.static_props.as_mut().unwrap();
+    props.leaves = vec![1, 0, 1];
+    props.props[0].first_leaf = 0;
+    props.props[0].leaf_count = 3;
+    let (props, skybox) =
+        partitioned_static_prop_placements(&bsp, &SkyboxPartition::inactive(false));
+    assert!(skybox.is_empty());
+    assert_eq!(props.len(), 1);
+    assert_eq!(
+        props[0].leaf_membership,
+        MapPropLeafMembership::Compiled(vec![1, 0, 1])
+    );
+    assert_eq!(props[0].visibility, MapPropVisibility::Clusters(vec![0]));
+}
+
+#[test]
+fn unregistered_static_props_keep_compiled_empty_membership_without_spatial_fallback() {
+    let mut bsp = read_fixture_bsp(&static_prop_bsp_fixture());
+    for (first, count) in [(0, 0), (3, 1), (u16::MAX, u16::MAX)] {
+        let prop = &mut bsp.static_props.as_mut().unwrap().props[0];
+        prop.first_leaf = first;
+        prop.leaf_count = count;
+        let (props, _) =
+            partitioned_static_prop_placements(&bsp, &SkyboxPartition::inactive(false));
+        assert_eq!(
+            props[0].leaf_membership,
+            MapPropLeafMembership::Compiled(Vec::new())
+        );
+    }
 }
 
 #[test]
@@ -1496,6 +1528,11 @@ fn load_map_extracts_supported_entity_prop_classnames() {
         entity_props
             .iter()
             .all(|prop| prop.visibility == MapPropVisibility::Always)
+    );
+    assert!(
+        entity_props
+            .iter()
+            .all(|prop| prop.leaf_membership == MapPropLeafMembership::SpatialBounds)
     );
 }
 
@@ -1995,6 +2032,95 @@ fn brush_collision_follows_entity_ownership_translation_and_rotation() {
 }
 
 #[test]
+fn shared_brush_models_keep_static_and_door_placements_separate() {
+    let map = load_map(&door_bmodel_bsp_fixture(
+        r#"
+        { "classname" "func_brush" "model" "*1" "origin" "300 0 0" }
+        { "classname" "func_door" "model" "*1" "origin" "100 0 0" }
+        { "classname" "func_door_rotating" "model" "*1" "origin" "200 0 0" "angles" "0 35 0" }
+    "#,
+    ))
+    .unwrap();
+    assert_eq!(
+        map.doors
+            .iter()
+            .map(|door| door.entity_index)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+    let mesh = map
+        .meshes
+        .iter()
+        .find(|mesh| {
+            mesh.surface_owners.iter().any(|surface| {
+                matches!(
+                    surface.owner,
+                    MapSurfaceOwner::Brush {
+                        entity_index: 2,
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("static instance sharing a door model must remain visible");
+    assert!(
+        mesh.vertices
+            .iter()
+            .any(|vertex| vertex.position[0] == 332.0)
+    );
+    assert_eq!(
+        map.meshes
+            .iter()
+            .map(|mesh| mesh.indices.len())
+            .sum::<usize>(),
+        9
+    );
+    for door in &map.doors {
+        let MapDoorGeometry::Brush { meshes, .. } = &door.geometry else {
+            panic!("brush door")
+        };
+        assert_eq!(
+            meshes.iter().map(|mesh| mesh.indices.len()).sum::<usize>(),
+            3
+        );
+    }
+}
+
+#[test]
+fn shared_brush_model_collision_uses_each_entity_solidity_and_exclusion() {
+    let bsp = brush_collision_bsp(
+        r#"
+        { "classname" "func_brush" "model" "*1" "origin" "0 0 0" "solidity" "1" }
+        { "classname" "func_door" "model" "*1" "origin" "300 0 0" }
+        { "classname" "func_door_rotating" "model" "*1" "origin" "600 0 0" "spawnflags" "8" }
+        { "classname" "func_brush" "model" "*1" "origin" "900 0 0" }
+    "#,
+    );
+    let instances = brushes::brush_instances(&bsp);
+    let doors = pending_map_doors(&bsp);
+    let excluded = doors
+        .iter()
+        .filter_map(PendingMapDoor::brush_entity_index)
+        .collect();
+    let collision = MapWalkCollision::from_bsp_instances(&bsp, &instances, &excluded).unwrap();
+    for x in [40.0, 340.0, 640.0] {
+        assert!(!collision.aabb_trace_solid(Vec3::new(x, 20.0, 40.0), Vec3::splat(1.0)));
+    }
+    assert!(collision.aabb_trace_solid(Vec3::new(940.0, 20.0, 40.0), Vec3::splat(1.0)));
+    for (door, solid) in doors.iter().zip([true, false]) {
+        let instance = *instances
+            .iter()
+            .find(|instance| instance.entity_index == Some(door.entity_index))
+            .unwrap();
+        let local = MapBrushCollision::from_bsp_instance(&bsp, instance);
+        assert_eq!(
+            local.aabb_trace_solid(Vec3::new(40.0, 20.0, 40.0), Vec3::splat(1.0)),
+            solid
+        );
+    }
+}
+
+#[test]
 fn brush_initial_solidity_and_visibility_follow_entity_semantics() {
     for (keys, visible, solid) in [
         (
@@ -2135,7 +2261,11 @@ fn legacy_wall_spawn_clears_angles_and_rotating_door_passable_flag_removes_colli
     let bsp = brush_collision_bsp(
         r#"{ "classname" "func_door_rotating" "model" "*1" "spawnflags" "8" }"#,
     );
-    let collision = MapBrushCollision::from_bsp_model(&bsp, ModelIndex::new(1));
+    let instance = brushes::brush_instances(&bsp)
+        .into_iter()
+        .find(|instance| instance.model_index == ModelIndex::new(1))
+        .unwrap();
+    let collision = MapBrushCollision::from_bsp_instance(&bsp, instance);
     assert!(!collision.aabb_trace_solid(Vec3::new(40.0, 20.0, 40.0), Vec3::splat(1.0)));
 }
 
@@ -2328,7 +2458,18 @@ fn load_map_with_missing_vis_keeps_output_unpartitioned() {
     assert_eq!(map.skybox_partition.face_count, 0);
     assert_eq!(map.skybox_partition.static_prop_count, 0);
     assert_eq!(map.stats.cluster_count, 0);
-    assert!(map.visibility.is_none());
+    let visibility = map.visibility.as_ref().expect("BSP traversal without PVS");
+    assert_eq!(visibility.cluster_count(), 0);
+    assert!(visibility.visible_clusters(0).is_none());
+    assert!(visibility.cluster_at(Vec3::ZERO).is_none());
+    assert_eq!(
+        visibility.ordered_faces(Vec3::new(-32.0, 0.0, 8.0), |_| true),
+        [0, 1]
+    );
+    assert_eq!(
+        visibility.ordered_faces(Vec3::new(32.0, 0.0, 8.0), |_| true),
+        [1, 0]
+    );
     assert_eq!(map, unpartitioned);
 }
 
@@ -2375,7 +2516,8 @@ fn block(width: usize, height: usize) -> PendingLightmapBlock {
         face_height: height.saturating_sub(2),
         styles: Vec::new(),
         samples: Vec::new(),
-        basis_count: 1,
+        sample_basis: lighting::LightmapBasis::Scalar,
+        output_basis: lighting::LightmapBasis::Scalar,
     }
 }
 
@@ -2933,7 +3075,7 @@ fn read_fixture_bsp(bytes: &[u8]) -> MapBsp {
     MapBsp::parse(bytes, &Limits::default(), None).expect("fixture bsp should parse")
 }
 
-fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
+pub(super) fn door_bmodel_bsp_fixture(extra_entities: &str) -> Vec<u8> {
     let mut bytes = bsp_fixture_header();
 
     let entities = format!(
@@ -3544,6 +3686,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
     let vertex = |position| MapVertex {
         texture_size: [0; 2],
         position,
+        base_position: position,
         tangent_s: Vec3::ZERO,
         tangent_t: Vec3::ZERO,
         normal: Vec3::new(0.0, 0.0, 1.0),
@@ -3675,6 +3818,7 @@ fn baked_lightstyle_entity_start_state_follows_named_light_precedence() {
         &[block(4, 4)],
         Some(LightmapSource::Ldr),
         &entities,
+        &mut MapLightmapStats::default(),
     )
     .unwrap();
     let first = atlas.style_values(0.0);
@@ -3720,4 +3864,180 @@ fn radial_fog_is_preserved_for_world_and_sky_camera() {
     "#)).unwrap();
     assert!(map.fog.unwrap().radial);
     assert!(map.sky_camera.unwrap().fog.unwrap().radial);
+}
+
+pub(super) fn lightmap_stats_fixture(
+    offset: i32,
+    size: [i32; 2],
+    styles: [u8; 4],
+    sample_count: usize,
+) -> Vec<u8> {
+    let mut bytes = door_bmodel_bsp_fixture("");
+    let lump = HEADER_LEN + FACES_LUMP_INDEX * LUMP_ENTRY_LEN;
+    let face = u32::from_le_bytes(bytes[lump..lump + 4].try_into().unwrap()) as usize;
+    bytes[face + 16..face + 20].copy_from_slice(&styles);
+    bytes[face + 20..face + 24].copy_from_slice(&offset.to_le_bytes());
+    bytes[face + 36..face + 40].copy_from_slice(&size[0].to_le_bytes());
+    bytes[face + 40..face + 44].copy_from_slice(&size[1].to_le_bytes());
+    if sample_count > 0 {
+        append_lump(&mut bytes, 8, &[128, 128, 128, 0].repeat(sample_count), 0);
+    }
+    bytes
+}
+
+#[test]
+fn lightmap_stats_distinguish_valid_missing_and_absent_lighting_channels() {
+    for (offset, samples, valid, missing) in [(0, 1, 1, 1), (-1, 1, 0, 2), (0, 0, 0, 2)] {
+        let map = load_map(&lightmap_stats_fixture(
+            offset,
+            [0, 0],
+            [0, 255, 255, 255],
+            samples,
+        ))
+        .unwrap();
+        assert_eq!(
+            map.stats.lightmap,
+            MapLightmapStats {
+                unlightmapped_surfaces: 0,
+                valid_payloads: valid,
+                missing_payloads: missing,
+                invalid_payloads: 0,
+                atlas_dropped_blocks: 0,
+            }
+        );
+        assert_eq!(map.lightmap.is_some(), valid > 0);
+    }
+}
+
+#[test]
+fn lightmap_stats_report_corrupt_offsets_extents_and_style_bundles() {
+    for (offset, size, styles) in [
+        (-2, [0, 0], [0, 255, 255, 255]),
+        (1, [0, 0], [0, 255, 255, 255]),
+        (4, [0, 0], [0, 255, 255, 255]),
+        (0, [-1, 0], [0, 255, 255, 255]),
+        (0, [0, 0], [255; 4]),
+        (0, [0, 0], [0, 32, 255, 255]),
+    ] {
+        let map = load_map(&lightmap_stats_fixture(offset, size, styles, 1)).unwrap();
+        assert_eq!(
+            map.stats.lightmap,
+            MapLightmapStats {
+                unlightmapped_surfaces: 0,
+                valid_payloads: 0,
+                missing_payloads: 1,
+                invalid_payloads: 1,
+                atlas_dropped_blocks: 0,
+            },
+            "offset={offset}, size={size:?}, styles={styles:?}"
+        );
+        assert!(map.lightmap.is_none());
+        assert!(
+            map.meshes
+                .iter()
+                .flat_map(|mesh| &mesh.vertices)
+                .all(|vertex| !vertex.has_lightmap)
+        );
+    }
+}
+
+#[test]
+fn lightmap_stats_separate_valid_payload_atlas_rejection_from_truncation() {
+    for (sample_count, valid, invalid, dropped) in [(4095, 1, 0, 1), (4094, 0, 1, 0)] {
+        let map = load_map(&lightmap_stats_fixture(
+            0,
+            [4094, 0],
+            [0, 255, 255, 255],
+            sample_count,
+        ))
+        .unwrap();
+        assert_eq!(
+            map.stats.lightmap,
+            MapLightmapStats {
+                unlightmapped_surfaces: 0,
+                valid_payloads: valid,
+                missing_payloads: 1,
+                invalid_payloads: invalid,
+                atlas_dropped_blocks: dropped,
+            }
+        );
+        assert!(map.lightmap.is_none());
+    }
+}
+
+#[test]
+fn atlas_partial_overflow_counts_drops_and_clears_only_dropped_receiver_bindings() {
+    let map = load_map(&door_bmodel_bsp_fixture("")).unwrap();
+    let mut meshes = BuildMeshes::default();
+    let mesh = meshes.get_or_insert(0, GeometryPartition::Visible, false);
+    mesh.vertices = map.meshes[0]
+        .vertices
+        .iter()
+        .take(2)
+        .enumerate()
+        .map(|(index, vertex)| {
+            let mut vertex = *vertex;
+            vertex.has_lightmap = true;
+            vertex.lightmap_uv = [0.5; 2];
+            mesh::BuildVertex {
+                vertex,
+                lightmap_block: Some(index),
+            }
+        })
+        .collect();
+    let mut stats = MapLightmapStats {
+        unlightmapped_surfaces: 0,
+        valid_payloads: 2,
+        ..Default::default()
+    };
+    let atlas = bake_lightmap_atlas(
+        meshes.iter_mut(),
+        &[block(4, 4), block(4097, 1)],
+        Some(LightmapSource::Ldr),
+        &[],
+        &mut stats,
+    )
+    .unwrap();
+    assert_eq!(stats.atlas_dropped_blocks, 1);
+    assert_eq!(stats.valid_payloads, 2);
+    assert_eq!(stats.missing_payloads, 0);
+    assert_eq!(stats.invalid_payloads, 0);
+    assert_eq!((atlas.width, atlas.height), (4096, 4096));
+    let mesh = &meshes.meshes[0];
+    assert!(mesh.vertices[0].vertex.has_lightmap);
+    assert!(!mesh.vertices[1].vertex.has_lightmap);
+    assert_eq!(mesh.vertices[1].vertex.lightmap_uv, [0.0; 2]);
+    assert_eq!(mesh.vertices[1].lightmap_block, None);
+}
+
+#[test]
+fn completely_rejected_atlas_clears_receiver_bindings_and_reports_failure() {
+    let map = load_map(&door_bmodel_bsp_fixture("")).unwrap();
+    let mut meshes = BuildMeshes::default();
+    let mesh = meshes.get_or_insert(0, GeometryPartition::Visible, false);
+    let mut vertex = map.meshes[0].vertices[0];
+    vertex.has_lightmap = true;
+    vertex.lightmap_uv = [0.5; 2];
+    mesh.vertices.push(mesh::BuildVertex {
+        vertex,
+        lightmap_block: Some(0),
+    });
+    let mut stats = MapLightmapStats {
+        unlightmapped_surfaces: 0,
+        valid_payloads: 1,
+        ..Default::default()
+    };
+    assert!(
+        bake_lightmap_atlas(
+            meshes.iter_mut(),
+            &[block(4097, 1)],
+            Some(LightmapSource::Ldr),
+            &[],
+            &mut stats
+        )
+        .is_none()
+    );
+    assert_eq!(stats.atlas_dropped_blocks, 1);
+    assert!(!meshes.meshes[0].vertices[0].vertex.has_lightmap);
+    assert_eq!(meshes.meshes[0].vertices[0].lightmap_block, None);
 }

@@ -5,9 +5,6 @@ fn limits() -> Limits {
     Limits::default()
 }
 
-/// Hand-built VTF bytes: exact header layout control, no encoder in the
-/// loop. `minor` selects the 7.0/7.1 (63-byte), 7.2 (+depth), or 7.3+
-/// (+resource directory) layout; payload is appended verbatim.
 struct Fixture {
     minor: u32,
     width: u16,
@@ -76,6 +73,7 @@ impl Fixture {
 
 const RGBA8888: i32 = 0;
 const DXT1: i32 = 13;
+const DXT3: i32 = 14;
 const DXT5: i32 = 15;
 
 #[test]
@@ -134,9 +132,50 @@ fn particle_sprite_sheet_selects_and_loops_frames() {
     assert_eq!(sequence.uv_at(1.2), [0.0, 0.0, 0.5, 1.0]);
 }
 
-// -----------------------------------------------------------------
-// Header validation
-// -----------------------------------------------------------------
+#[test]
+fn sprite_sheet_resource_bounds_exclude_headers_and_truncated_blocks() {
+    let mut fixture = Fixture::new(1, 1, RGBA8888, 1);
+    fixture.minor = 3;
+    fixture.payload = vec![255; 4];
+    let bytes = fixture.bytes();
+    assert!(
+        parse(&bytes, &limits())
+            .unwrap()
+            .sprite_sheet_descriptor()
+            .unwrap()
+            .is_none()
+    );
+    let mut bytes = bytes[..80].to_vec();
+    bytes[12..16].copy_from_slice(&96_u32.to_le_bytes());
+    bytes[68..72].copy_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0x30, 0, 0, 0]);
+    bytes.extend_from_slice(&96_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0x10, 0, 0, 0]);
+    bytes.extend_from_slice(&100_u32.to_le_bytes());
+    bytes.extend_from_slice(&[255; 4]);
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0; 8]);
+    let vtf = parse(&bytes, &limits()).unwrap();
+    assert_eq!(
+        vtf.sprite_sheet_descriptor()
+            .unwrap()
+            .unwrap()
+            .cost()
+            .frames,
+        0
+    );
+    bytes[92..96].copy_from_slice(&80_u32.to_le_bytes());
+    assert!(matches!(
+        parse(&bytes, &limits()).unwrap().sprite_sheet_descriptor(),
+        Err(SpriteSheetError::InvalidResource)
+    ));
+    bytes[92..96].copy_from_slice(&100_u32.to_le_bytes());
+    bytes.pop();
+    assert!(matches!(
+        parse(&bytes, &limits()).unwrap().sprite_sheet_descriptor(),
+        Err(SpriteSheetError::InvalidResource)
+    ));
+}
 
 #[test]
 fn rejects_bad_magic_version_format_and_volume() {
@@ -164,7 +203,6 @@ fn rejects_bad_magic_version_format_and_volume() {
     let mut volume = Fixture::new(4, 4, RGBA8888, 1);
     volume.payload = vec![0; 64];
     let mut bytes = volume.bytes();
-    // depth field lives right after the 63-byte base header on 7.2
     bytes[63..65].copy_from_slice(&4u16.to_le_bytes());
     assert!(matches!(
         parse(&bytes, &limits()),
@@ -206,14 +244,8 @@ fn face_count_follows_the_vtflib_spheremap_rule() {
     assert_eq!(parse(&plain.bytes(), &limits()).unwrap().face_count(), 1);
 }
 
-// -----------------------------------------------------------------
-// Addressing: mips smallest-first, then frame, then face
-// -----------------------------------------------------------------
-
 #[test]
 fn frame_and_mip_addressing_matches_the_wire_layout() {
-    // 2 frames, 2 mips of a 2x1 RGBA8888 texture.
-    // File order: mip1(f0), mip1(f1), mip0(f0), mip0(f1).
     let mut fx = Fixture::new(2, 1, RGBA8888, 2);
     fx.frames = 2;
     let tag = |v: u8| vec![v; 4];
@@ -245,7 +277,6 @@ fn frame_and_mip_addressing_matches_the_wire_layout() {
 
 #[test]
 fn cubemap_faces_address_independently() {
-    // 6-face 1x1 envmap, 1 mip: faces are consecutive slices.
     let mut fx = Fixture::new(1, 1, RGBA8888, 1);
     fx.flags = texture_flags::ENVMAP;
     fx.first_frame = 0xFFFF;
@@ -260,10 +291,6 @@ fn cubemap_faces_address_independently() {
         );
     }
 }
-
-// -----------------------------------------------------------------
-// Raw BC access
-// -----------------------------------------------------------------
 
 #[test]
 fn raw_bc_exposes_dxt1_mips_in_file_order() {
@@ -302,9 +329,6 @@ fn raw_bc_stops_before_truncated_dxt5_mip() {
 
 #[test]
 fn decode_rejects_a_crafted_bc1_header_before_allocating() {
-    // BC1 amplifies stored bytes 8x when decoded: 64x64 stores 2048
-    // bytes but decodes to 16384. A `max_entry_bytes` between the two
-    // must reject the decode without ever building the RGBA buffer.
     let mut fx = Fixture::new(64, 64, DXT1, 1);
     fx.payload = vec![0u8; 2048];
     let bytes = fx.bytes();
@@ -332,9 +356,74 @@ fn raw_bc_with_no_complete_mips_is_none() {
     assert!(vtf.raw_bc(1, 0).is_none(), "out-of-range frame");
 }
 
-// -----------------------------------------------------------------
-// Pixel format decoding
-// -----------------------------------------------------------------
+#[test]
+fn standalone_bc_decode_matches_container_pixels_and_endpoint_expansion() {
+    let colour = [0x00, 0x18, 0x00, 0x00, 0, 0, 0, 0];
+    for (format, encoded_format, alpha, expected_alpha) in [
+        (BcFormat::Bc1, DXT1, Vec::new(), 255),
+        (BcFormat::Bc2, DXT3, vec![0xaa; 8], 170),
+        (BcFormat::Bc3, DXT5, vec![123, 0, 0, 0, 0, 0, 0, 0], 123),
+    ] {
+        let mut payload = alpha;
+        payload.extend_from_slice(&colour);
+        let mut fixture = Fixture::new(3, 2, encoded_format, 1);
+        fixture.payload = payload.clone();
+        let bytes = fixture.bytes();
+        let expected = parse(&bytes, &limits())
+            .unwrap()
+            .decode_rgba(0, 0, 0, &limits())
+            .unwrap();
+        let decoded = decode_bc_rgba(format, 3, 2, &payload, &limits()).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.rgba, [24, 0, 0, expected_alpha].repeat(6));
+    }
+}
+
+#[test]
+fn standalone_bc_decode_requires_exact_block_payload() {
+    assert_eq!(
+        decode_bc_rgba(BcFormat::Bc1, 5, 3, &[0; 8], &limits()),
+        Err(VtfError::Truncated {
+            needed: 16,
+            available: 8,
+        })
+    );
+    assert_eq!(
+        decode_bc_rgba(BcFormat::Bc1, 1, 1, &[0; 9], &limits()),
+        Err(VtfError::ImageLengthMismatch {
+            expected: 8,
+            actual: 9,
+        })
+    );
+    assert_eq!(
+        decode_bc_rgba(BcFormat::Bc3, 0, 1, &[], &limits()),
+        Err(VtfError::BadHeader)
+    );
+    assert_eq!(
+        decode_bc_rgba(BcFormat::Bc3, u32::MAX, u32::MAX, &[], &limits()),
+        Err(VtfError::BadHeader)
+    );
+}
+
+#[test]
+fn standalone_bc_decode_honours_encoded_and_decoded_limits() {
+    let input_limit = Limits {
+        max_input_bytes: 7,
+        ..limits()
+    };
+    assert_eq!(
+        decode_bc_rgba(BcFormat::Bc1, 1, 1, &[0; 8], &input_limit),
+        Err(VtfError::InputTooLarge { len: 8, max: 7 })
+    );
+    let decoded_limit = Limits {
+        max_entry_bytes: 15,
+        ..limits()
+    };
+    assert_eq!(
+        decode_bc_rgba(BcFormat::Bc1, 2, 2, &[0; 8], &decoded_limit),
+        Err(VtfError::DecodedTooLarge { size: 16, max: 15 })
+    );
+}
 
 fn decode_one(format: i32, payload: &[u8]) -> Vec<u8> {
     let mut fx = Fixture::new(1, 1, format, 1);
@@ -348,7 +437,6 @@ fn decode_one(format: i32, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-// Binary literals below group digits by 5-6-5 channel, not nibbles.
 #[allow(clippy::unusual_byte_groupings)]
 fn swizzle_and_packed_formats_decode_single_pixels() {
     assert_eq!(decode_one(0, &[1, 2, 3, 4]), [1, 2, 3, 4]); // RGBA8888
@@ -363,13 +451,10 @@ fn swizzle_and_packed_formats_decode_single_pixels() {
     assert_eq!(decode_one(6, &[7, 9]), [7, 7, 7, 9]); // IA88
     assert_eq!(decode_one(22, &[7, 9]), [7, 9, 0, 255]); // UV88
 
-    // Bluescreen: pure blue is transparent, all else opaque.
     assert_eq!(decode_one(9, &[0, 0, 255]), [0, 0, 255, 0]);
     assert_eq!(decode_one(9, &[1, 0, 255]), [1, 0, 255, 255]);
     assert_eq!(decode_one(10, &[255, 0, 0]), [0, 0, 255, 0]);
 
-    // Packed 16-bit, channels named from the lowest bits up.
-    // RGB565: r=0b00001, g=0b000011, b=0b00111 -> 0b00111_000011_00001
     let rgb565 = 0b00111_000011_00001u16.to_le_bytes();
     assert_eq!(
         decode_one(4, &rgb565),
@@ -380,13 +465,11 @@ fn swizzle_and_packed_formats_decode_single_pixels() {
         decode_one(17, &bgr565),
         [expand5(0b00111), expand6(0b000011), expand5(0b00001), 255]
     );
-    // BGRA4444: b=1, g=2, r=3, a=4 packed low-to-high.
     let bgra4444 = 0x4321u16.to_le_bytes();
     assert_eq!(
         decode_one(19, &bgra4444),
         [expand4(3), expand4(2), expand4(1), expand4(4)]
     );
-    // BGRA5551: alpha is the top bit.
     let opaque = (0x8000u16 | (1 << 10) | (2 << 5) | 3).to_le_bytes();
     assert_eq!(
         decode_one(21, &opaque),
@@ -396,7 +479,6 @@ fn swizzle_and_packed_formats_decode_single_pixels() {
     assert_eq!(decode_one(21, &transparent)[3], 0);
     assert_eq!(decode_one(18, &transparent)[3], 255); // BGRX5551 ignores the bit
 
-    // 16-bit integer and half-float RGBA.
     let deep: Vec<u8> = [0x0100u16, 0x8000, 0xFF00, 0xFFFF]
         .iter()
         .flat_map(|v| v.to_le_bytes())
@@ -408,7 +490,6 @@ fn swizzle_and_packed_formats_decode_single_pixels() {
         .collect();
     assert_eq!(decode_one(24, &halves), [255, 0, 128, 255]);
 
-    // P8 is recognized but not decodable.
     let mut fx = Fixture::new(1, 1, 7, 1);
     fx.payload = vec![0];
     let p8_bytes = fx.bytes();
@@ -422,7 +503,6 @@ fn swizzle_and_packed_formats_decode_single_pixels() {
 
 #[test]
 fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
-    // BC1 4-color mode: c0 > c1, all texels index 0.
     let c0 = 0xF800u16; // pure red
     let c1 = 0x001Fu16; // pure blue
     let mut block = Vec::new();
@@ -432,7 +512,6 @@ fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
     let rgba = decode_bc(BcFormat::Bc1, &block, 4, 4);
     assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
 
-    // BC1 3-color mode: c0 <= c1, index 3 is transparent black.
     let mut block3 = Vec::new();
     block3.extend_from_slice(&c1.to_le_bytes());
     block3.extend_from_slice(&c0.to_le_bytes());
@@ -440,12 +519,10 @@ fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
     let rgba = decode_bc(BcFormat::Bc1, &block3, 4, 4);
     assert_eq!(&rgba[..4], &[0, 0, 0, 0]);
 
-    // A 2x2 image still uses a full block; only the top-left quad lands.
     let rgba = decode_bc(BcFormat::Bc1, &block, 2, 2);
     assert_eq!(rgba.len(), 2 * 2 * 4);
     assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
 
-    // BC2 explicit alpha nibbles, low nibble first.
     let mut bc2 = vec![0x21, 0xF0]; // texels: a=0x2, 0x1, 0x0, 0xF ...
     bc2.resize(8, 0);
     bc2.extend_from_slice(&c0.to_le_bytes());
@@ -457,7 +534,6 @@ fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
     assert_eq!(rgba[11], expand4(0));
     assert_eq!(rgba[15], expand4(0xF));
 
-    // BC3 interpolated alpha: a0 > a1 -> 7-step ramp; indices all 0.
     let mut bc3 = vec![200u8, 40];
     bc3.resize(8, 0);
     bc3.extend_from_slice(&c0.to_le_bytes());
@@ -465,7 +541,6 @@ fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
     bc3.extend_from_slice(&0u32.to_le_bytes());
     let rgba = decode_bc(BcFormat::Bc3, &bc3, 4, 4);
     assert_eq!(rgba[3], 200);
-    // a0 <= a1 -> 5-step ramp with 0 and 255 sentinels at 6 and 7.
     let mut bits = 0u64;
     for i in 0..16 {
         bits |= 0b111 << (i * 3);
@@ -478,15 +553,6 @@ fn bc_blocks_decode_including_edge_clamping_and_alpha_modes() {
     let rgba = decode_bc(BcFormat::Bc3, &bc3s, 4, 4);
     assert_eq!(rgba[3], 255);
 }
-
-// -----------------------------------------------------------------
-// Cross-checks against files written by the `vtf` crate. The
-// gradient_*.vtf fixtures under tests/fixtures/ were generated once
-// by `vtf` v0.4.1 (its `create` encoder over the gradient below) and are
-// committed goldens; gradient_16x8_dxt5.rgba.bin is that crate's
-// decode of the DXT5 file (DXT5 is lossy, so the source gradient is
-// not the expected output).
-// -----------------------------------------------------------------
 
 fn gradient(width: u32, height: u32) -> Vec<u8> {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
@@ -507,8 +573,6 @@ fn gradient(width: u32, height: u32) -> Vec<u8> {
 fn decode_matches_the_vtf_crate_on_its_supported_formats() {
     let dxt5_golden = include_bytes!("../tests/fixtures/gradient_16x8_dxt5.rgba.bin");
     for (bytes, expected, label) in [
-        // Rgba8888 and Rgb888 are lossless: the expected decode is the
-        // gradient itself (verified against the vtf crate at generation).
         (
             &include_bytes!("../tests/fixtures/gradient_16x8_rgba8888.vtf")[..],
             gradient(16, 8),
@@ -537,15 +601,236 @@ fn decode_matches_the_vtf_crate_on_its_supported_formats() {
 
 #[test]
 fn full_mip_chain_matches_the_vtf_crate_frame_size_walk() {
-    // The vtf crate can only decode mip 0, but our raw_bc walk must agree
-    // with the offsets its writer produced for every stored mip.
     let bytes = include_bytes!("../tests/fixtures/gradient_32x16_dxt5.vtf");
     let vtf = parse(bytes, &limits()).expect("parse");
     let texture = vtf.raw_bc(0, 0).expect("bc");
     assert_eq!(texture.mips.len(), usize::from(vtf.mip_count()));
     let largest = texture.mips.last().expect("mips");
     assert_eq!((largest.width, largest.height), (32, 16));
-    // The largest mip must end exactly at the end of the file.
     let end = largest.data.as_ptr() as usize + largest.data.len();
     assert_eq!(end, bytes.as_ptr() as usize + bytes.len());
+}
+
+#[test]
+fn checked_descriptors_preserve_versions_frames_faces_and_authored_levels() {
+    for minor in 0..=5 {
+        for legacy_sphere in [false, true] {
+            let mut fixture = Fixture::new(4, 2, RGBA8888, 3);
+            fixture.minor = minor;
+            fixture.frames = 2;
+            fixture.flags = texture_flags::ENVMAP;
+            fixture.first_frame = if legacy_sphere { 0 } else { u16::MAX };
+            let faces = if minor < 5 && legacy_sphere { 7 } else { 6 };
+            for mip in (0..3).rev() {
+                for frame in 0..2 {
+                    for face in 0..faces {
+                        let tag = [mip, frame, face, 127];
+                        fixture.payload.extend(
+                            tag.repeat(((4_u32 >> mip).max(1) * (2_u32 >> mip).max(1)) as usize),
+                        );
+                    }
+                }
+            }
+            let bytes = fixture.bytes();
+            let parsed = parse(&bytes, &limits()).unwrap();
+            assert_eq!(parsed.first_frame(), fixture.first_frame);
+            for frame in 0..2 {
+                for face in 0..u32::from(faces) {
+                    let images = parsed.stored_mip_chain(frame, face, 1).unwrap();
+                    assert_eq!(
+                        images
+                            .iter()
+                            .map(|image| image.source_mip)
+                            .collect::<Vec<_>>(),
+                        vec![1, 2]
+                    );
+                    for image in images {
+                        assert_eq!(
+                            &bytes[image.byte_range][..4],
+                            &[image.source_mip, frame as u8, face as u8, 127]
+                        );
+                    }
+                    let decoded = parsed.decode_mip_chain(frame, face, 0, &limits()).unwrap();
+                    assert_eq!(
+                        decoded
+                            .iter()
+                            .map(|image| image.source_mip)
+                            .collect::<Vec<_>>(),
+                        vec![0, 1, 2]
+                    );
+                    for mip in decoded {
+                        assert_eq!(
+                            mip.image.rgba[..4],
+                            [mip.source_mip, frame as u8, face as u8, 127]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_chain_rejects_truncation_without_discarding_complete_lower_levels() {
+    let mut fixture = Fixture::new(4, 4, RGBA8888, 3);
+    fixture.payload = vec![42; 4 + 16 + 64 - 1];
+    let bytes = fixture.bytes();
+    let parsed = parse(&bytes, &limits()).unwrap();
+    assert!(matches!(
+        parsed.stored_image(0, 0, 0),
+        Err(VtfError::Truncated {
+            needed: 164,
+            available: 163
+        })
+    ));
+    assert_eq!(parsed.stored_mip_chain(0, 0, 1).unwrap().len(), 2);
+    assert!(matches!(
+        parsed.decode_mip_chain(0, 0, 0, &limits()),
+        Err(VtfError::Truncated { .. })
+    ));
+    assert!(matches!(
+        parsed.stored_mip_chain(0, 0, 3),
+        Err(VtfError::OutOfRange)
+    ));
+    assert!(matches!(
+        parsed.stored_mip_chain(1, 0, 1),
+        Err(VtfError::OutOfRange)
+    ));
+    let small = Limits {
+        max_entry_bytes: 19,
+        ..limits()
+    };
+    assert_eq!(
+        parsed.decode_mip_chain(0, 0, 1, &small),
+        Err(VtfError::DecodedTooLarge { size: 20, max: 19 })
+    );
+}
+
+#[test]
+fn stored_hdr_descriptors_preserve_raw_half_float_payload() {
+    let payload = [0x00, 0x3c, 0x00, 0x40, 0x00, 0x42, 0x00, 0x3c];
+    let mut fixture = Fixture::new(1, 1, 24, 1);
+    fixture.payload = payload.to_vec();
+    let bytes = fixture.bytes();
+    let parsed = parse(&bytes, &limits()).unwrap();
+    assert_eq!(parsed.format(), VtfFormat::Rgba16161616F);
+    let image = parsed.stored_image(0, 0, 0).unwrap();
+    assert_eq!(&bytes[image.byte_range], &payload);
+}
+
+#[test]
+fn stored_images_use_resource_offsets_without_treating_headers_as_pixels() {
+    for minor in 3..=5 {
+        let mut fixture = Fixture::new(2, 1, RGBA8888, 1);
+        fixture.minor = minor;
+        fixture.payload = vec![17; 8];
+        let mut bytes = fixture.bytes();
+        bytes.splice(80..80, [0x30, 0, 0, 0, 104, 0, 0, 0]);
+        bytes.splice(88..88, [0; 16]);
+        bytes[12..16].copy_from_slice(&88_u32.to_le_bytes());
+        bytes[68..72].copy_from_slice(&1_u32.to_le_bytes());
+        let parsed = parse(&bytes, &limits()).unwrap();
+        assert_eq!(parsed.stored_image(0, 0, 0).unwrap().byte_range, 104..112);
+        bytes[84..88].copy_from_slice(&8_u32.to_le_bytes());
+        let parsed = parse(&bytes, &limits()).unwrap();
+        assert_eq!(parsed.stored_image(0, 0, 0), Err(VtfError::BadHeader));
+    }
+}
+
+#[test]
+fn header_inspection_uses_declared_container_bounds_without_payload_allocation() {
+    for minor in 0..=5 {
+        let mut fixture = Fixture::new(8, 4, RGBA8888, 2);
+        fixture.minor = minor;
+        fixture.frames = 2;
+        fixture.payload = vec![1; (8 * 4 + 4 * 2) * 4 * 2];
+        let bytes = fixture.bytes();
+        let header_len = if minor < 2 { 64 } else { 80 };
+        let header = inspect_header(&bytes[..header_len], bytes.len() as u64, &limits()).unwrap();
+        assert_eq!(header, parse(&bytes, &limits()).unwrap().header());
+        assert!(matches!(
+            inspect_header(&bytes[..header_len], bytes.len() as u64 - 1, &limits()),
+            Err(VtfError::Truncated { .. })
+        ));
+        assert!(
+            parse(&bytes[..header_len], &limits())
+                .unwrap()
+                .stored_image(0, 0, 0)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn header_inspection_preserves_hdr_and_legacy_cube_layout_and_resource_offsets() {
+    let mut fixture = Fixture::new(1, 1, 24, 1);
+    fixture.minor = 4;
+    fixture.flags = texture_flags::ENVMAP;
+    fixture.payload = vec![0; 8 * 7];
+    let bytes = fixture.bytes();
+    let header = inspect_header(&bytes[..80], bytes.len() as u64, &limits()).unwrap();
+    assert_eq!(header.format, VtfFormat::Rgba16161616F);
+    assert_eq!(header.faces, 7);
+    let mut fixture = Fixture::new(2, 1, RGBA8888, 1);
+    fixture.minor = 5;
+    fixture.payload = vec![0; 8];
+    let mut bytes = fixture.bytes();
+    bytes.splice(80..80, [0x30, 0, 0, 0, 104, 0, 0, 0]);
+    bytes.splice(88..88, [0; 16]);
+    bytes[12..16].copy_from_slice(&88u32.to_le_bytes());
+    bytes[68..72].copy_from_slice(&1u32.to_le_bytes());
+    assert!(inspect_header(&bytes[..88], 112, &limits()).is_ok());
+    assert!(matches!(
+        inspect_header(&bytes[..88], 111, &limits()),
+        Err(VtfError::Truncated { .. })
+    ));
+}
+
+#[test]
+fn region_decode_matches_full_images_without_touching_padding_or_neighbors() {
+    for format in [BcFormat::Bc1, BcFormat::Bc2, BcFormat::Bc3] {
+        let dimensions = [7, 9];
+        let bytes = (0..2 * 3 * format.block_bytes())
+            .map(|index| index as u8)
+            .collect::<Vec<_>>();
+        let full = decode_bc_rgba(format, dimensions[0], dimensions[1], &bytes, &limits()).unwrap();
+        for region in [[0, 0, 7, 9], [1, 3, 5, 5], [6, 8, 1, 1]] {
+            let stride = region[2] as usize * 4 + 13;
+            let mut output = vec![177; stride * region[3] as usize + 9];
+            decode_bc_rgba_region_into(format, dimensions, region, &bytes, &mut output, stride)
+                .unwrap();
+            for row in 0..region[3] as usize {
+                let source =
+                    ((row + region[1] as usize) * dimensions[0] as usize + region[0] as usize) * 4;
+                let count = region[2] as usize * 4;
+                assert_eq!(
+                    &output[row * stride..row * stride + count],
+                    &full.rgba[source..source + count]
+                );
+                assert!(
+                    output[row * stride + count..(row + 1) * stride]
+                        .iter()
+                        .all(|&byte| byte == 177)
+                );
+            }
+            assert_eq!(&output[stride * region[3] as usize..], &[177; 9]);
+        }
+    }
+}
+
+#[test]
+fn region_decode_validates_all_ranges_before_writing() {
+    for (region, stride, bytes) in [
+        ([0, 0, 1, 1], 3, vec![0; 8]),
+        ([1, 0, 1, 1], 4, vec![0; 8]),
+        ([0, 0, 1, 1], 4, vec![0; 7]),
+        ([u32::MAX, 0, 2, 1], 4, vec![0; 8]),
+    ] {
+        let mut output = [191; 16];
+        assert!(
+            decode_bc_rgba_region_into(BcFormat::Bc1, [1, 1], region, &bytes, &mut output, stride)
+                .is_err()
+        );
+        assert_eq!(output, [191; 16]);
+    }
 }

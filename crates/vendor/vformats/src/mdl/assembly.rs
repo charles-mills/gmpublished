@@ -16,9 +16,7 @@ use std::collections::BTreeMap;
 
 use super::MdlError;
 use super::studio::{FLAG_STATIC_PROP, Mdl, MdlAnimation};
-use super::vertex_compression::{
-    VertexCompression, source_ubyte4_tangent, source_ubyte4_vector,
-};
+use super::vertex_compression::{VertexCompression, source_ubyte4_tangent, source_ubyte4_vector};
 use super::vtx::Vtx;
 use super::vvd::{Vvd, VvdVertex};
 
@@ -51,6 +49,10 @@ pub struct ModelData {
     pub hull_min: [f32; 3],
     /// Authored model-space hull maximum.
     pub hull_max: [f32; 3],
+    /// Authored local render bounds minimum.
+    pub view_min: [f32; 3],
+    /// Authored local render bounds maximum.
+    pub view_max: [f32; 3],
     /// Optional zero-based authored illumination attachment selector.
     pub illumination_attachment_index: Option<usize>,
     /// Selected attachment position after rest bone posing, before entity placement.
@@ -445,6 +447,8 @@ fn assemble_impl(
             illumination_position: mdl.illumination_position,
             hull_min: mdl.hull_min,
             hull_max: mdl.hull_max,
+            view_min: mdl.view_min,
+            view_max: mdl.view_max,
             illumination_attachment_index: mdl.illumination_attachment_index,
             illumination_attachment_position: mdl
                 .illumination_attachment_index
@@ -1164,12 +1168,7 @@ mod tangent_frame_tests {
             uv: [0.0; 2],
         };
         let mut stats = MdlStats::default();
-        let result = model_vertex(
-            &[a, b],
-            &vertex,
-            Some([0.0, 1.0, 0.0, -1.0]),
-            &mut stats,
-        );
+        let result = model_vertex(&[a, b], &vertex, Some([0.0, 1.0, 0.0, -1.0]), &mut stats);
         assert_eq!(result.normal, [0.25, 0.75, 0.0]);
         assert_eq!(result.tangent_s, [-0.75, 0.25, 0.0]);
         assert_eq!(result.tangent_t, [0.0, 0.0, -0.625]);

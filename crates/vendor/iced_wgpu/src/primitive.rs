@@ -44,11 +44,7 @@ pub trait Primitive: Debug + MaybeSend + MaybeSync + 'static {
     /// [`render`](Self::render) by returning `false` here.
     ///
     /// By default, it does nothing and returns `false`.
-    fn draw(
-        &self,
-        _pipeline: &Self::Pipeline,
-        _render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool {
+    fn draw(&self, _pipeline: &Self::Pipeline, _render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         false
     }
 
@@ -73,13 +69,22 @@ pub trait Pipeline: Any + MaybeSend + MaybeSync {
     ///
     /// This will only be called once, when the first [`Primitive`] with this kind
     /// of [`Pipeline`] is encountered.
-    fn new(
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self
+    where
+        Self: Sized;
+
+    /// Creates a pipeline using the rendering adapter's capabilities.
+    fn new_with_capabilities(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
+        _capabilities: &wgpu::DownlevelCapabilities,
     ) -> Self
     where
-        Self: Sized;
+        Self: Sized,
+    {
+        Self::new(device, queue, format)
+    }
 
     /// Trims any cached data in the [`Pipeline`].
     ///
@@ -87,9 +92,7 @@ pub trait Pipeline: Any + MaybeSend + MaybeSync {
     fn trim(&mut self) {}
 }
 
-pub(crate) trait Stored:
-    Debug + MaybeSend + MaybeSync + 'static
-{
+pub(crate) trait Stored: Debug + MaybeSend + MaybeSync + 'static {
     fn prepare(
         &self,
         storage: &mut Storage,
@@ -100,11 +103,7 @@ pub(crate) trait Stored:
         viewport: &Viewport,
     );
 
-    fn draw(
-        &self,
-        storage: &Storage,
-        render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool;
+    fn draw(&self, storage: &Storage, render_pass: &mut wgpu::RenderPass<'_>) -> bool;
 
     fn render(
         &self,
@@ -131,7 +130,13 @@ impl<P: Primitive> Stored for BlackBox<P> {
         viewport: &Viewport,
     ) {
         if !storage.has::<P>() {
-            storage.store::<P, _>(P::Pipeline::new(device, queue, format));
+            let pipeline = match storage.capabilities.as_ref() {
+                Some(capabilities) => {
+                    P::Pipeline::new_with_capabilities(device, queue, format, capabilities)
+                }
+                None => P::Pipeline::new(device, queue, format),
+            };
+            storage.store::<P, _>(pipeline);
         }
 
         let renderer = storage
@@ -144,11 +149,7 @@ impl<P: Primitive> Stored for BlackBox<P> {
             .prepare(renderer, device, queue, bounds, viewport);
     }
 
-    fn draw(
-        &self,
-        storage: &Storage,
-        render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool {
+    fn draw(&self, storage: &Storage, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         let renderer = storage
             .get::<P>()
             .expect("renderer should be initialized")
@@ -205,10 +206,18 @@ pub trait Renderer: core::Renderer {
 /// Stores custom, user-provided types.
 #[derive(Default)]
 pub struct Storage {
+    capabilities: Option<wgpu::DownlevelCapabilities>,
     pipelines: FxHashMap<TypeId, Box<dyn Pipeline>>,
 }
 
 impl Storage {
+    pub(crate) fn with_capabilities(capabilities: wgpu::DownlevelCapabilities) -> Self {
+        Self {
+            capabilities: Some(capabilities),
+            ..Self::default()
+        }
+    }
+
     /// Returns `true` if `Storage` contains a type `T`.
     pub fn has<T: 'static>(&self) -> bool {
         self.pipelines.contains_key(&TypeId::of::<T>())

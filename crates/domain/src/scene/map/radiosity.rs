@@ -1,4 +1,3 @@
-//! Compiled surface-light inputs, independent of render-atlas packing and walking.
 use super::{
     LightmapSource, MapBounds, MapBsp, lighting::selected_lightmap_samples, spatial::BoundsTree,
 };
@@ -7,7 +6,6 @@ use vformats::bsp::{ColorRgbExp, Face, Leaf, Node, Plane, TexData, TexInfo};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapRadiositySurfaces {
-    pub source: LightmapSource,
     pub world_head_node: i32,
     pub world_face_range: std::ops::Range<usize>,
     pub planes: Vec<Plane>,
@@ -19,10 +17,16 @@ pub struct MapRadiositySurfaces {
     pub texinfos: Vec<TexInfo>,
     pub texdatas: Vec<TexData>,
     pub texture_names: Vec<String>,
-    pub samples: Vec<ColorRgbExp>,
+    lighting: Option<MapRadiosityLighting>,
     pub displacements: Vec<MapRadiosityDisplacement>,
     triangles: Vec<RadiosityTriangle>,
     triangle_tree: BoundsTree,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MapRadiosityLighting {
+    source: LightmapSource,
+    samples: Vec<ColorRgbExp>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,7 +121,6 @@ impl MapRadiositySurfaces {
         }
         let triangle_tree = BoundsTree::new(triangles.iter().map(|triangle| triangle.bounds));
         Some(Self {
-            source: source?,
             world_head_node: world.head_node,
             world_face_range: start..end,
             planes: bsp.planes.clone(),
@@ -133,15 +136,23 @@ impl MapRadiositySurfaces {
             texinfos: bsp.texinfos.clone(),
             texdatas: bsp.texdatas.clone(),
             texture_names: bsp.texdata_strings.clone(),
-            samples: samples?.to_vec(),
+            lighting: source
+                .zip(samples)
+                .map(|(source, samples)| MapRadiosityLighting {
+                    source,
+                    samples: samples.to_vec(),
+                }),
             displacements,
             triangles,
             triangle_tree,
         })
     }
 
-    /// Native surface-light queries truncate luxel coordinates and use the
-    /// unbumped base plane of each style, before material reflectivity.
+    pub fn lighting_source(&self) -> Option<LightmapSource> {
+        self.lighting.as_ref().map(|lighting| lighting.source)
+    }
+
+    /// Samples the unbumped plane before material reflectivity.
     pub fn sample_luxel(
         &self,
         face_index: usize,
@@ -149,6 +160,7 @@ impl MapRadiositySurfaces {
         style_values: &[f32; 128],
         styles: MapRadiosityStyles,
     ) -> Option<Vec3> {
+        let lighting = self.lighting.as_ref()?;
         let face = self.faces.get(face_index)?;
         let width = usize::try_from(face.lightmap_size[0])
             .ok()?
@@ -182,7 +194,7 @@ impl MapRadiositySurfaces {
             .take_while(|style| *style != 255)
             .enumerate()
         {
-            let value = *self
+            let value = *lighting
                 .samples
                 .get(sample.checked_add(index.checked_mul(stride)?)?)?;
             let factor = style_values.get(usize::from(style)).copied().unwrap_or(1.0);
@@ -199,15 +211,14 @@ impl MapRadiositySurfaces {
         Some(result)
     }
 
-    /// Compiler-authored style averages precede the first luxel in reverse
-    /// style order. The default engine surface query uses these records for
-    /// ordinary faces; displacement queries still sample their hit luxel.
+    /// Style averages precede the luxel payload in reverse style order.
     pub fn sample_face_average(
         &self,
         face_index: usize,
         style_values: &[f32; 128],
         styles: MapRadiosityStyles,
     ) -> Option<Vec3> {
+        let lighting = self.lighting.as_ref()?;
         let face = self.faces.get(face_index)?;
         let offset = usize::try_from(face.light_offset).ok()?;
         if offset % 4 != 0 {
@@ -226,7 +237,7 @@ impl MapRadiositySurfaces {
             .take_while(|style| *style != 255)
             .enumerate()
         {
-            let value = *self.samples.get(first.checked_sub(index + 1)?)?;
+            let value = *lighting.samples.get(first.checked_sub(index + 1)?)?;
             let factor = style_values.get(usize::from(style)).copied().unwrap_or(1.0);
             if !factor.is_finite() || factor < 0.0 {
                 return None;

@@ -1,17 +1,109 @@
 use super::{
     BoundsBuilder, BspModel, GeometryPartition, MapBounds, MapBsp, MapLeafLocator, MapPlayerStart,
-    MapPropVisibility, MapSkyCamera, MapVisibilityBucket, SKYBOX_COMPLETION_AABB_EXPANSION,
-    SKYBOX_COMPLETION_MAX_WORLD_VOLUME_FRACTION, Visibility, bounds_contains_point, bounds_volume,
-    bsp_world_bounds, expand_bounds, normalize_static_prop_model_path,
+    MapPropVisibility, MapSkyCamera, MapVisibilityBucket, ModelIndex,
+    SKYBOX_COMPLETION_AABB_EXPANSION, SKYBOX_COMPLETION_MAX_WORLD_VOLUME_FRACTION, Visibility,
+    bounds_contains_point, bounds_volume, bsp_world_bounds, expand_bounds,
+    normalize_static_prop_model_path,
 };
 use crate::math::Vec3;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapVisibility {
     pub(super) cluster_count: u32,
-    pub(super) locator: MapLeafLocator,
-    pub(super) vis: Visibility<'static>,
-    ordering: FaceOrdering,
+    pub(super) locator: Arc<MapLeafLocator>,
+    pub(super) vis: Option<Visibility<'static>>,
+    ordering: Arc<FaceOrdering>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapDecalProjection {
+    locator: Arc<MapLeafLocator>,
+    ordering: Arc<FaceOrdering>,
+    root: i32,
+    origin: Vec3,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapBrushModelRendering {
+    locator: Arc<MapLeafLocator>,
+    ordering: Arc<FaceOrdering>,
+    model: order::BrushModel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MapBrushSurfaceGroup {
+    pub faces: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MapWorldSurfaceGroup {
+    pub leaf_index: u32,
+    pub faces: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MapWorldMaterialGroup {
+    AboveWater,
+    Underwater,
+    IntersectsWater,
+    Water,
+}
+
+impl MapWorldMaterialGroup {
+    pub const fn index(self) -> usize {
+        match self {
+            Self::AboveWater => 0,
+            Self::Underwater => 1,
+            Self::IntersectsWater => 2,
+            Self::Water => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapWorldSurfaceRendering {
+    pub material_group: MapWorldMaterialGroup,
+    pub displacement: Option<MapDisplacementRendering>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapDisplacementRendering {
+    pub ordinal: u32,
+    pub full_grid_vertices: u32,
+    pub full_grid_indices: u32,
+}
+
+impl MapBrushModelRendering {
+    /// Model-local compiled bounds, including omitted surfaces.
+    pub const fn bounds(&self) -> MapBounds {
+        self.model.bounds
+    }
+
+    /// Back-to-front node groups; callers select and order their materials.
+    pub fn translucent_groups(&self, model_local_eye: Vec3) -> Vec<MapBrushSurfaceGroup> {
+        self.translucent_groups_with_culling(model_local_eye, |_| false)
+    }
+
+    pub fn translucent_groups_with_culling(
+        &self,
+        model_local_eye: Vec3,
+        two_sided: impl Fn(u32) -> bool,
+    ) -> Vec<MapBrushSurfaceGroup> {
+        self.ordering
+            .brush_surface_groups(&self.locator, &self.model, model_local_eye, two_sided)
+    }
+}
+
+impl MapDecalProjection {
+    pub(super) fn visit<E>(
+        &self,
+        radius: f32,
+        project: impl FnMut(u32) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        self.ordering
+            .visit_decal_faces(&self.locator, self.root, self.origin, radius, project)
+    }
 }
 
 #[path = "visibility_order.rs"]
@@ -23,13 +115,50 @@ pub(super) const PROP_AABB_MAX_LEAVES: usize = 4096;
 pub(super) const PROP_AABB_MAX_DEPTH: usize = 256;
 
 impl MapVisibility {
-    pub(super) fn from_bsp(bsp: &MapBsp) -> Option<Self> {
-        let vis = bsp.visibility.clone()?;
-        (vis.cluster_count() > 0).then(|| Self {
-            cluster_count: vis.cluster_count() as u32,
-            locator: MapLeafLocator::from_bsp(bsp),
-            vis,
-            ordering: FaceOrdering::from_bsp(bsp),
+    pub(super) fn from_bsp(
+        bsp: &MapBsp,
+        displacement_bounds: impl Iterator<Item = (u32, MapBounds)>,
+    ) -> Option<Self> {
+        (!bsp.leaves.is_empty()).then(|| {
+            let locator = Arc::new(MapLeafLocator::from_bsp(bsp));
+            let ordering = Arc::new(FaceOrdering::from_bsp(bsp, &locator, displacement_bounds));
+            Self {
+                cluster_count: bsp.cluster_count(),
+                locator,
+                vis: bsp.visibility.clone(),
+                ordering,
+            }
+        })
+    }
+
+    pub fn leaf_is_underwater(&self, leaf: u32) -> Option<bool> {
+        self.ordering.leaf_is_underwater(leaf)
+    }
+
+    pub fn surface_rendering(&self, face: u32) -> Option<MapWorldSurfaceRendering> {
+        self.ordering.surface_rendering(face)
+    }
+
+    pub fn displacement_surfaces(
+        &self,
+    ) -> impl Iterator<Item = (u32, MapDisplacementRendering)> + '_ {
+        self.ordering.displacement_surfaces()
+    }
+
+    pub(super) fn decal_projection(&self, root: i32, origin: Vec3) -> MapDecalProjection {
+        MapDecalProjection {
+            locator: Arc::clone(&self.locator),
+            ordering: Arc::clone(&self.ordering),
+            root,
+            origin,
+        }
+    }
+
+    pub fn brush_model(&self, model_index: ModelIndex) -> Option<MapBrushModelRendering> {
+        Some(MapBrushModelRendering {
+            locator: Arc::clone(&self.locator),
+            ordering: Arc::clone(&self.ordering),
+            model: self.ordering.brush_model(model_index)?.clone(),
         })
     }
 
@@ -47,7 +176,7 @@ impl MapVisibility {
         if !cluster_in_range(cluster, self.cluster_count) {
             return None;
         }
-        self.vis.pvs(usize::try_from(cluster).ok()?)
+        self.vis.as_ref()?.pvs(usize::try_from(cluster).ok()?)
     }
 
     pub fn clusters_for_aabb(&self, bounds_min: Vec3, bounds_max: Vec3) -> MapPropVisibility {
@@ -55,8 +184,40 @@ impl MapVisibility {
             .clusters_for_aabb(bounds_min, bounds_max, self.cluster_count)
     }
 
+    pub fn leaves_for_aabb(&self, bounds: MapBounds) -> Option<Vec<u32>> {
+        self.ordering.leaves_for_aabb(&self.locator, bounds)
+    }
+
+    pub fn world_surface_groups_in_view(
+        &self,
+        eye: Vec3,
+        visible: impl Fn(u32) -> bool,
+        bounds_visible: impl Fn(MapBounds) -> bool,
+        cluster_visible: impl Fn(i16) -> bool,
+    ) -> Vec<MapWorldSurfaceGroup> {
+        self.ordering.world_surface_groups(
+            &self.locator,
+            eye,
+            visible,
+            bounds_visible,
+            cluster_visible,
+        )
+    }
+
+    pub fn ordered_faces_in_view(
+        &self,
+        eye: Vec3,
+        visible: impl Fn(u32) -> bool,
+        bounds_visible: impl Fn(MapBounds) -> bool,
+        cluster_visible: impl Fn(i16) -> bool,
+    ) -> Vec<u32> {
+        self.ordering
+            .ordered_faces(&self.locator, eye, visible, bounds_visible, cluster_visible)
+    }
+
     pub fn ordered_faces(&self, eye: Vec3, visible: impl Fn(u32) -> bool) -> Vec<u32> {
-        self.ordering.ordered_faces(&self.locator, eye, visible)
+        self.ordering
+            .ordered_faces(&self.locator, eye, visible, |_| true, |_| true)
     }
 }
 
@@ -431,8 +592,7 @@ fn seed_completion_bounds(
     sky_reachable: &[bool],
 ) -> Option<MapBounds> {
     let mut bounds = BoundsBuilder::default();
-    // Skybox seed geometry belongs to model zero. Entity models have local
-    // vertices and cannot contribute raw bounds to this world-space volume.
+    // Entity-model bounds are local; only model zero can seed the world volume.
     for face_index in bsp
         .models
         .first()

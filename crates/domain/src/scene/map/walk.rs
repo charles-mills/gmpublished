@@ -1,11 +1,7 @@
-//! Brushes are expanded by the player's half-extents so traces can use
-//! plane clipping. Displacements and props use triangle and hull tests.
-
 use super::{
     BTreeSet, BrushSide, HashMap, MapBounds, MapBsp, MapLeaf, MapNode, MapPlane, MapPropVisibility,
-    ModelIndex, NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES,
-    cluster_in_range, contents_flags, displacement_vertices, texture_flags,
-    vector_is_finite_nonzero, walk_to_leaf,
+    NodeChild, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT, PROP_AABB_MAX_LEAVES, cluster_in_range,
+    contents_flags, displacement_vertices, texture_flags, vector_is_finite_nonzero, walk_to_leaf,
 };
 use crate::math::Vec3;
 
@@ -19,18 +15,15 @@ pub struct MapWalkCollision {
     pub(super) props: MapWalkPropCollision,
 }
 
-/// Convex brush hulls, kept in model space for moving brush entities.
+/// Model-space brush collision.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapBrushCollision(MapWalkCollision);
 
 impl MapBrushCollision {
-    pub(super) fn from_bsp_model(bsp: &MapBsp, model_index: ModelIndex) -> Self {
-        let Some(mut instance) = super::brushes::brush_instances(bsp)
-            .into_iter()
-            .find(|i| i.model_index == model_index)
-        else {
-            return Self(MapWalkCollision::empty());
-        };
+    pub(super) fn from_bsp_instance(
+        bsp: &MapBsp,
+        mut instance: super::brushes::BrushInstance,
+    ) -> Self {
         instance.transform = super::brushes::BrushTransform::default();
         Self(walk_brushes_from_bsp(bsp, &[instance], &BTreeSet::new()))
     }
@@ -250,9 +243,9 @@ impl MapWalkCollision {
     pub(super) fn from_bsp_instances(
         bsp: &MapBsp,
         instances: &[super::brushes::BrushInstance],
-        excluded_models: &BTreeSet<ModelIndex>,
+        excluded_entities: &BTreeSet<usize>,
     ) -> Option<Self> {
-        let mut collision = walk_brushes_from_bsp(bsp, instances, excluded_models);
+        let mut collision = walk_brushes_from_bsp(bsp, instances, excluded_entities);
         collision.displacements = walk_displacements_from_bsp(bsp);
         (!collision.is_empty()).then_some(collision)
     }
@@ -388,8 +381,7 @@ impl MapWalkCollision {
         };
         let sweep = swept_bounds(start, end, half_extents);
 
-        // Source traces rays against the original brush model, and player
-        // hulls against the model's compiled VPhysics representation.
+        // Rays use BSP planes; hull sweeps use compiled VPhysics.
         let entity_brushes = if half_extents == Vec3::ZERO {
             &self.physics_ray_brushes
         } else {
@@ -448,9 +440,7 @@ impl MapWalkCollision {
             .any(|brush| brush_contains_aabb_center(brush, center, half_extents))
     }
 
-    /// Includes exact brush-boundary contact, which [`Self::aabb_embedded`]
-    /// does not. Unstick must use this check or a hull resting on the floor
-    /// can remain unable to move.
+    /// Includes boundary contact excluded by [`Self::aabb_embedded`].
     pub fn aabb_trace_solid(&self, center: Vec3, half_extents: Vec3) -> bool {
         self.trace_aabb(center, center, half_extents).start_solid
     }
@@ -494,14 +484,18 @@ pub(super) fn merge_trace_candidate(left: TraceCandidate, right: TraceCandidate)
 pub(super) fn walk_brushes_from_bsp(
     bsp: &MapBsp,
     instances: &[super::brushes::BrushInstance],
-    excluded_models: &BTreeSet<ModelIndex>,
+    excluded_entities: &BTreeSet<usize>,
 ) -> MapWalkCollision {
     let mut brushes = Vec::new();
     let mut water_brushes = Vec::new();
     let mut physics_brushes = Vec::new();
     let mut physics_ray_brushes = Vec::new();
     for instance in instances {
-        if !instance.solid || excluded_models.contains(&instance.model_index) {
+        if !instance.solid
+            || instance
+                .entity_index
+                .is_some_and(|index| excluded_entities.contains(&index))
+        {
             continue;
         }
         let mut compiled = Vec::new();
@@ -621,8 +615,7 @@ fn transform_brush(
     brush.bounds_min = bounds.min;
     brush.bounds_max = bounds.max;
     if let Some(vertices) = local_vertices {
-        // Local axial bevels rotate with the model. Swept world-aligned player
-        // hulls also need WORLD axial and edge-cross-axis support planes.
+        // Swept world AABBs need axial and edge-cross-axis bevels after rotation.
         let mut triangles = Vec::new();
         for first in 0..vertices.len() {
             for second in first + 1..vertices.len() {
@@ -757,8 +750,7 @@ pub(super) fn walk_displacements_from_bsp(bsp: &MapBsp) -> Vec<MapWalkDisplaceme
             .chunks_exact(3)
             .filter_map(|chunk| {
                 let mut vertices = [chunk[0].position, chunk[1].position, chunk[2].position];
-                // BSP render winding can oppose the oriented face plane.
-                // Collision backface rejection follows the authored solid side.
+                // Collision follows the authored solid side, independent of render winding.
                 if (vertices[1] - vertices[0])
                     .cross(vertices[2] - vertices[0])
                     .dot(bsp.face_plane_normal(face))
@@ -1038,9 +1030,7 @@ pub(super) fn add_prop_bevel_planes(hull: &ConvexHull, planes: &mut Vec<MapPlane
         );
     }
 
-    // QBSP-style hull expansion needs more than face planes for swept AABBs:
-    // add axial bounds plus edge x axis bevels so a box cannot pass through
-    // a non-axial convex corner between two sampled positions.
+    // Axial and edge-cross-axis bevels prevent swept AABBs crossing convex corners.
     let mut edges = BTreeSet::<(usize, usize)>::new();
     for triangle in &hull.triangles {
         for (left, right) in [
@@ -1214,8 +1204,7 @@ pub(super) fn trace_brush_aabb(
         let end_dist = end.dot(plane.normal) - expanded_dist;
         ends_outside |= end_dist > 0.0;
 
-        // Any positive distance is outside. Resting contact sits at the plane
-        // epsilon; requiring more would mark a standing player as stuck.
+        // Resting contact uses the plane epsilon and must remain outside.
         if start_dist > 0.0 {
             starts_outside = true;
         }
@@ -1255,8 +1244,6 @@ pub(super) fn trace_brush_aabb(
         });
     }
 
-    // Clamp a slightly negative enter fraction to zero or the mover can pass through a
-    // touching face.
     (enter_fraction > -1.0 && enter_fraction <= 1.0).then_some(TraceCandidate {
         fraction: enter_fraction.max(0.0),
         normal: enter_normal,
@@ -1428,8 +1415,7 @@ pub(super) fn trace_triangle_aabb(
         return None;
     }
 
-    // Point rays report the surface itself. Hull sweeps retain the plane's
-    // contact tolerance, measured perpendicular to the separating plane.
+    // Hull sweeps retain perpendicular contact tolerance; point rays use the surface.
     let backoff = if half_extents == Vec3::ZERO {
         0.0
     } else {
@@ -1667,6 +1653,92 @@ impl MapLeafLocator {
                 Some((plane.normal, plane.dist))
             },
         )
+    }
+
+    pub(super) fn leaves_for_aabb(
+        &self,
+        root: i32,
+        bounds: MapBounds,
+        node_bounds: &[MapBounds],
+        leaf_solid: &[bool],
+    ) -> Option<Vec<u32>> {
+        if !bounds.min.is_finite()
+            || !bounds.max.is_finite()
+            || (0..3).any(|axis| bounds.min[axis] > bounds.max[axis])
+        {
+            return None;
+        }
+        let mut stack = vec![root];
+        let mut visited_nodes = vec![false; self.nodes.len()];
+        let mut visited_leaves = vec![false; self.leaves.len()];
+        let mut leaves = Vec::new();
+        let intersects = |candidate: MapBounds| {
+            (0..3).all(|axis| {
+                bounds.min[axis] <= candidate.max[axis] && bounds.max[axis] >= candidate.min[axis]
+            })
+        };
+        while let Some(child) = stack.pop() {
+            match NodeChild::decode(child)? {
+                NodeChild::Leaf(index) => {
+                    let leaf = self.leaves.get(index)?;
+                    if *leaf_solid.get(index)?
+                        || !intersects(MapBounds {
+                            min: Vec3::from(leaf.mins.map(f32::from)),
+                            max: Vec3::from(leaf.maxs.map(f32::from)),
+                        })
+                    {
+                        continue;
+                    }
+                    let visited = visited_leaves.get_mut(index)?;
+                    if !*visited {
+                        *visited = true;
+                        leaves.push(u32::try_from(index).ok()?);
+                    }
+                }
+                NodeChild::Node(index) => {
+                    let visited = visited_nodes.get_mut(index)?;
+                    if *visited {
+                        return None;
+                    }
+                    *visited = true;
+                    if !intersects(*node_bounds.get(index)?) {
+                        continue;
+                    }
+                    let node = self.nodes.get(index)?;
+                    let plane = self.planes.get(usize::try_from(node.plane_index).ok()?)?;
+                    if !plane.normal.is_finite() || !plane.dist.is_finite() {
+                        return None;
+                    }
+                    let mut near = Vec3::ZERO;
+                    let mut far = Vec3::ZERO;
+                    for axis in 0..3 {
+                        (near[axis], far[axis]) = if plane.normal[axis] < 0.0 {
+                            (bounds.max[axis], bounds.min[axis])
+                        } else {
+                            (bounds.min[axis], bounds.max[axis])
+                        };
+                    }
+                    let side = if far.dot(plane.normal) <= plane.dist {
+                        PlaneSide::Back
+                    } else if near.dot(plane.normal) >= plane.dist {
+                        PlaneSide::Front
+                    } else {
+                        PlaneSide::Both
+                    };
+                    match side {
+                        PlaneSide::Front => stack.push(node.children[0]),
+                        PlaneSide::Back => stack.push(node.children[1]),
+                        PlaneSide::Both => {
+                            if node.children[1] != node.children[0] {
+                                stack.push(node.children[1]);
+                            }
+                            stack.push(node.children[0]);
+                        }
+                    }
+                }
+            }
+        }
+        Some(leaves)
     }
 
     pub(super) fn clusters_for_aabb(

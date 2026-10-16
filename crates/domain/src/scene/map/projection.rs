@@ -18,12 +18,76 @@ pub struct MapSurfaceReceiver {
     pub range: MapMeshIndexRange,
     pub material_index: usize,
     pub bounds: super::MapBounds,
-    pub plane_normal: Vec3,
-    pub plane_distance: f32,
     pub visibility: MapPropVisibility,
-    pub displacement: bool,
     pub owner: MapSurfaceOwner,
+    /// Same coordinate space as the receiver vertices.
+    pub plane: MapSurfacePlane,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapSurfacePlane {
+    pub normal: Vec3,
+    pub distance: f32,
+}
+
+impl MapSurfacePlane {
+    pub fn signed_distance(self, point: Vec3) -> f32 {
+        (point[0] * self.normal[0] + point[1] * self.normal[1]) + point[2] * self.normal[2]
+            - self.distance
+    }
+}
+
+impl super::MapSurfaceTextureProjection {
+    pub(super) fn from_points(vectors: [[f32; 4]; 2], points: &[Vec3]) -> Option<Self> {
+        if points.is_empty() {
+            return None;
+        }
+        let mut minimum = [0; 2];
+        let mut extent = [0; 2];
+        for axis in 0..2 {
+            let mut low = SOURCE_TEXTURE_MINIMUM_SEED;
+            let mut high = SOURCE_TEXTURE_MAXIMUM_SEED;
+            for &point in points {
+                let coordinate = compiled_texture_coordinate(point, vectors[axis]);
+                if !coordinate.is_finite() {
+                    return None;
+                }
+                low = low.min(coordinate);
+                high = high.max(coordinate);
+            }
+            minimum[axis] = low as i32;
+            extent[axis] = (high.ceil() as i32).wrapping_sub(minimum[axis]) as i16;
+        }
+        Some(Self {
+            vectors,
+            minimum,
+            extent,
+        })
+    }
+
+    pub(super) fn admits_decal(&self, origin: Vec3, axes: [Vec3; 2], size: [f32; 2]) -> bool {
+        (0..2).all(|axis| {
+            let vector = Vec3::new(
+                self.vectors[axis][0],
+                self.vectors[axis][1],
+                self.vectors[axis][2],
+            );
+            let span =
+                (axes[0].dot(vector) * size[0]).abs() + (axes[1].dot(vector) * size[1]).abs();
+            let coordinate =
+                compiled_texture_coordinate(origin, self.vectors[axis]) - self.minimum[axis] as f32;
+            let start = (f64::from(coordinate) - f64::from(span) * 0.5) as f32;
+            start > -span && start <= f32::from(self.extent[axis]) + span
+        })
+    }
+}
+
+fn compiled_texture_coordinate(point: Vec3, vector: [f32; 4]) -> f32 {
+    (point[0] * vector[0] + point[1] * vector[1] + vector[3]) + point[2] * vector[2]
+}
+
+const SOURCE_TEXTURE_MINIMUM_SEED: f32 = 999_999.0;
+const SOURCE_TEXTURE_MAXIMUM_SEED: f32 = -99_999.0;
 
 pub(super) fn append_surface_polygon(
     vertices: &mut Vec<MapSurfaceVertex>,
@@ -57,6 +121,7 @@ pub(super) fn append_surface_polygon(
 
 pub(super) struct ReceiverSurface<'a> {
     pub(super) mesh: &'a MapMesh,
+    source: Option<&'a super::MapMeshSurfaceOwner>,
     pub(super) receiver_mesh: super::MapReceiverMesh,
     pub(super) range: MapMeshIndexRange,
     pub(super) partition: GeometryPartition,
@@ -66,33 +131,30 @@ pub(super) struct ReceiverSurface<'a> {
     pub(super) allows_decals: bool,
     pub(super) plane_normal: Vec3,
     pub(super) plane_distance: f32,
-    pub(super) displacement: bool,
+    pub(super) displacement: Option<super::MapDisplacementProjection>,
+    pub(super) texture_projection: Option<super::MapSurfaceTextureProjection>,
     pub(super) bounds: super::MapBounds,
     transform: BrushTransform,
 }
 
 impl ReceiverSurface<'_> {
-    fn polygon(&self) -> Option<Vec<MapVertex>> {
-        let start = self.range.start as usize;
-        let end = start.checked_add(self.range.count as usize)?;
-        let mut triangles = self.mesh.indices.get(start..end)?.chunks_exact(3);
-        let first = triangles.next()?;
-        let mut indices = first.to_vec();
-        for triangle in triangles {
-            if triangle[0] != first[0] || Some(&triangle[1]) != indices.last() {
-                return None;
+    pub(super) fn render_plane(&self) -> MapSurfacePlane {
+        if matches!(self.owner, MapSurfaceOwner::Door { .. }) {
+            if let Some(source) = self.source {
+                return MapSurfacePlane {
+                    normal: source.plane_normal,
+                    distance: source.plane_distance,
+                };
             }
-            indices.push(triangle[2]);
+            return MapSurfacePlane {
+                normal: inverse_transform_vector(self.plane_normal, self.transform.angles),
+                distance: self.plane_distance - self.plane_normal.dot(self.transform.origin),
+            };
         }
-        indices
-            .into_iter()
-            .map(|index| {
-                Some(transform_surface(
-                    *self.mesh.vertices.get(index as usize)?,
-                    self.transform,
-                ))
-            })
-            .collect()
+        MapSurfacePlane {
+            normal: self.plane_normal,
+            distance: self.plane_distance,
+        }
     }
 
     pub(super) fn triangles(&self) -> impl Iterator<Item = [MapVertex; 3]> + '_ {
@@ -154,13 +216,17 @@ pub(super) fn receiver_surfaces<'a>(
     ]
     .into_iter()
     .chain(doors.iter().enumerate().filter_map(|(door_index, door)| {
-        let MapDoorGeometry::Brush { meshes, .. } = &door.geometry else {
+        let MapDoorGeometry::Brush {
+            model_index,
+            meshes,
+        } = &door.geometry
+        else {
             return None;
         };
         Some((
             meshes.as_slice(),
             GeometryPartition::Visible,
-            Some((door_index, door)),
+            Some((door_index, *model_index, door)),
         ))
     })) {
         for (mesh_index, mesh) in meshes.iter().enumerate() {
@@ -189,9 +255,12 @@ pub(super) fn receiver_surfaces<'a>(
             }
             for (range, always_visible, mut clusters) in ranges.into_values() {
                 let metadata = ownership.get(&range.start).copied();
-                let (owner, transform) = if let Some((door_index, door)) = door {
+                let (owner, transform) = if let Some((door_index, model_index, door)) = door {
                     (
-                        MapSurfaceOwner::Door { door_index },
+                        MapSurfaceOwner::Door {
+                            door_index,
+                            model_index,
+                        },
                         door_initial_transform(door),
                     )
                 } else {
@@ -226,6 +295,7 @@ pub(super) fn receiver_surfaces<'a>(
                     .or_default()
                     .push(ReceiverSurface {
                         mesh,
+                        source: metadata,
                         receiver_mesh: door.map_or_else(
                             || match partition {
                                 GeometryPartition::Visible => {
@@ -235,7 +305,7 @@ pub(super) fn receiver_surfaces<'a>(
                                     super::MapReceiverMesh::Skybox(mesh_index)
                                 }
                             },
-                            |(door_index, _)| super::MapReceiverMesh::Door {
+                            |(door_index, _, _)| super::MapReceiverMesh::Door {
                                 door_index,
                                 mesh_index,
                             },
@@ -265,7 +335,22 @@ pub(super) fn receiver_surfaces<'a>(
                                     + transform.vector(surface.plane_normal).dot(transform.origin)
                             },
                         ),
-                        displacement: metadata.is_some_and(|surface| surface.displacement),
+                        displacement: metadata
+                            .and_then(|surface| surface.displacement.clone())
+                            .map(|mut displacement| {
+                                displacement.base_corners = displacement
+                                    .base_corners
+                                    .map(|point| transform.point(point));
+                                if transform != BrushTransform::default() {
+                                    displacement.positions = displacement
+                                        .positions
+                                        .iter()
+                                        .map(|point| transform.point(*point))
+                                        .collect();
+                                }
+                                displacement
+                            }),
+                        texture_projection: metadata.and_then(|surface| surface.texture_projection),
                         bounds,
                         transform,
                     });
@@ -295,6 +380,7 @@ pub(super) fn door_initial_transform(door: &MapDoor) -> BrushTransform {
 
 fn transform_surface(mut vertex: MapVertex, transform: BrushTransform) -> MapVertex {
     vertex.position = transform.point(vertex.position);
+    vertex.base_position = transform.point(vertex.base_position);
     vertex.normal = transform.vector(vertex.normal);
     vertex.tangent_s = transform.vector(vertex.tangent_s);
     vertex.tangent_t = transform.vector(vertex.tangent_t);
@@ -312,6 +398,8 @@ pub(super) fn inverse_transform_vector(vector: Vec3, angles: Vec3) -> Vec3 {
 fn inverse_transform_surface(mut vertex: MapVertex, transform: BrushTransform) -> MapVertex {
     vertex.position =
         inverse_transform_vector(vertex.position - transform.origin, transform.angles);
+    vertex.base_position =
+        inverse_transform_vector(vertex.base_position - transform.origin, transform.angles);
     vertex.normal = inverse_transform_vector(vertex.normal, transform.angles);
     vertex.tangent_s = inverse_transform_vector(vertex.tangent_s, transform.angles);
     vertex.tangent_t = inverse_transform_vector(vertex.tangent_t, transform.angles);
@@ -329,10 +417,9 @@ pub(super) struct SurfaceProjection {
 }
 
 #[derive(Clone, Copy)]
-struct ClipVertex {
-    surface: MapVertex,
+struct ClipVertex<T> {
+    attributes: T,
     point: [f32; 2],
-    uv: [f32; 2],
 }
 
 impl SurfaceProjection {
@@ -365,70 +452,172 @@ impl SurfaceProjection {
             .map(|surface| {
                 let delta = surface.position - self.origin;
                 ClipVertex {
-                    surface,
+                    attributes: surface,
                     point: [delta.dot(self.u_axis), delta.dot(self.v_axis)],
-                    uv: [0.0; 2],
                 }
             })
             .collect::<Vec<_>>();
-        let polygon = clip_convex_polygon(polygon, &self.corners);
+        let polygon = clip_convex_polygon(polygon, &self.corners, 0.0, interpolate_surface);
+        self.textured_polygon(polygon)
+    }
+
+    pub(super) fn clip_quad_to_triangle(&self, triangle: &[MapVertex; 3]) -> Vec<MapSurfaceVertex> {
+        if !self.is_valid() || triangle.iter().any(|vertex| !vertex.position.is_finite()) {
+            return Vec::new();
+        }
+        let corners = triangle.map(|vertex| self.project_point(vertex.position));
+        let mut polygon = Vec::with_capacity(4);
+        for point in self.corners {
+            let Some(surface) = self.surface_at_point(triangle, point) else {
+                return Vec::new();
+            };
+            polygon.push(ClipVertex {
+                attributes: surface,
+                point,
+            });
+        }
+        self.textured_polygon(clip_convex_polygon(
+            polygon,
+            &corners,
+            COMPILED_OVERLAY_CLIP_EPSILON,
+            interpolate_surface,
+        ))
+    }
+
+    pub(super) fn project_displacement(
+        &self,
+        displacement: &super::MapDisplacementProjection,
+        triangles: impl Iterator<Item = [MapVertex; 3]>,
+    ) -> Vec<Vec<MapSurfaceVertex>> {
+        if !self.is_valid() || displacement.steps == 0 {
+            return Vec::new();
+        }
+        let [a, b, _, d] = displacement.base_corners;
+        let Some(u_axis) = (d - a).normalize() else {
+            return Vec::new();
+        };
+        let Some(normal) = (d - a).cross(b - a).normalize() else {
+            return Vec::new();
+        };
+        let mut parent = Self {
+            origin: a,
+            u_axis,
+            v_axis: normal.cross(u_axis),
+            corners: [[0.0; 2]; 4],
+            u: [0.0, 1.0],
+            v: [0.0, 1.0],
+        };
+        parent.corners = displacement
+            .base_corners
+            .map(|point| parent.project_point(point));
+        if !parent.is_valid() {
+            return Vec::new();
+        }
+        let corners = displacement
+            .base_corners
+            .map(|point| self.project_point(point));
+        let texture_corners = [
+            [self.u[0], self.v[0]],
+            [self.u[0], self.v[1]],
+            [self.u[1], self.v[1]],
+            [self.u[1], self.v[0]],
+        ];
+        let polygon = self
+            .corners
+            .into_iter()
+            .zip(texture_corners)
+            .map(|(point, attributes)| ClipVertex { attributes, point })
+            .collect();
+        let polygon = clip_convex_polygon(
+            polygon,
+            &corners,
+            COMPILED_OVERLAY_CLIP_EPSILON,
+            interpolate_pair,
+        )
+        .into_iter()
+        .map(|vertex| {
+            let position =
+                self.origin + self.u_axis * vertex.point[0] + self.v_axis * vertex.point[1];
+            Some(ClipVertex {
+                point: parent.inverse_bilinear(parent.project_point(position))?,
+                ..vertex
+            })
+        })
+        .collect::<Option<Vec<_>>>();
+        let Some(polygon) = polygon.filter(|polygon| polygon.len() >= 3) else {
+            return Vec::new();
+        };
+        let mut polygons = vec![polygon];
+        let scale = 1.0 / displacement.steps as f32;
+        for normal in [[1.0, 0.0], [0.0, 1.0]] {
+            for index in 1..displacement.steps {
+                polygons = split_texture_polygons(polygons, normal, index as f32 * scale);
+            }
+        }
+        let diagonal = SOURCE_DISPLACEMENT_DIAGONAL_COMPONENT;
+        for (normal, first, end) in [
+            ([diagonal, diagonal], 2, 2 * displacement.steps as i32 - 1),
+            (
+                [-diagonal, diagonal],
+                2 - displacement.steps as i32,
+                displacement.steps as i32 - 1,
+            ),
+        ] {
+            for index in (first..end).step_by(2) {
+                polygons =
+                    split_texture_polygons(polygons, normal, index as f32 * (diagonal * scale));
+            }
+        }
+        let triangles = triangles
+            .filter_map(|triangle| {
+                let mut corners = [[0.0; 2]; 3];
+                for index in 0..3 {
+                    corners[index] = parent
+                        .inverse_bilinear(parent.project_point(triangle[index].base_position))?;
+                }
+                Some((triangle, corners))
+            })
+            .collect::<Vec<_>>();
+        polygons
+            .into_iter()
+            .filter_map(|polygon| {
+                polygon
+                    .into_iter()
+                    .map(|vertex| {
+                        let point = vertex.point.map(|value| value.clamp(0.0, 1.0));
+                        let mut surface = triangles.iter().find_map(|(triangle, corners)| {
+                            let weights = triangle_weights(corners, point)?;
+                            weights_inside(weights).then(|| affine_surface(triangle, weights))
+                        })?;
+                        surface.position = displacement_position(displacement, point)?;
+                        Some(MapSurfaceVertex {
+                            surface,
+                            uv: vertex.attributes,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect()
+    }
+
+    fn textured_polygon(&self, polygon: Vec<ClipVertex<MapVertex>>) -> Vec<MapSurfaceVertex> {
         if polygon.len() < 3 {
             return Vec::new();
         }
         polygon
             .into_iter()
-            .filter_map(|vertex| {
+            .map(|vertex| {
                 let [u, v] = self.inverse_bilinear(vertex.point)?;
                 Some(MapSurfaceVertex {
-                    surface: vertex.surface,
+                    surface: vertex.attributes,
                     uv: [
                         self.u[0] + (self.u[1] - self.u[0]) * u,
                         self.v[0] + (self.v[1] - self.v[0]) * v,
                     ],
                 })
             })
-            .collect()
-    }
-
-    pub(super) fn clip_quad_to_receiver(
-        &self,
-        receiver: &ReceiverSurface<'_>,
-    ) -> Vec<MapSurfaceVertex> {
-        let Some(boundary) = receiver.polygon() else {
-            return Vec::new();
-        };
-        let corners = boundary
-            .iter()
-            .map(|vertex| self.project_point(vertex.position))
-            .collect::<Vec<_>>();
-        let Some(triangle) = receiver.triangles().find(|triangle| {
-            let a = self.project_point(triangle[0].position);
-            let b = self.project_point(triangle[1].position);
-            let c = self.project_point(triangle[2].position);
-            cross(subtract(b, a), subtract(c, a)).abs() > 1e-12
-        }) else {
-            return Vec::new();
-        };
-        let uvs = [
-            [self.u[0], self.v[0]],
-            [self.u[0], self.v[1]],
-            [self.u[1], self.v[1]],
-            [self.u[1], self.v[0]],
-        ];
-        let mut polygon = Vec::with_capacity(4);
-        for (point, uv) in self.corners.into_iter().zip(uvs) {
-            let Some(surface) = self.surface_at_point(&triangle, point) else {
-                return Vec::new();
-            };
-            polygon.push(ClipVertex { surface, point, uv });
-        }
-        clip_convex_polygon(polygon, &corners)
-            .into_iter()
-            .map(|vertex| MapSurfaceVertex {
-                surface: vertex.surface,
-                uv: vertex.uv,
-            })
-            .collect()
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
     }
 
     fn project_point(&self, position: Vec3) -> [f32; 2] {
@@ -437,16 +626,11 @@ impl SurfaceProjection {
     }
 
     fn surface_at_point(&self, triangle: &[MapVertex; 3], point: [f32; 2]) -> Option<MapVertex> {
-        let a = self.project_point(triangle[0].position);
-        let b = subtract(self.project_point(triangle[1].position), a);
-        let c = subtract(self.project_point(triangle[2].position), a);
-        let delta = subtract(point, a);
-        let determinant = cross(b, c);
-        let weights = [cross(delta, c) / determinant, cross(b, delta) / determinant];
-        weights
-            .iter()
-            .all(|value| value.is_finite())
-            .then(|| affine_surface(triangle, weights))
+        triangle_weights(
+            &triangle.map(|vertex| self.project_point(vertex.position)),
+            point,
+        )
+        .map(|weights| affine_surface(triangle, weights))
     }
 
     fn inverse_bilinear(&self, point: [f32; 2]) -> Option<[f32; 2]> {
@@ -484,41 +668,169 @@ impl SurfaceProjection {
     }
 }
 
-fn clip_convex_polygon(mut polygon: Vec<ClipVertex>, corners: &[[f32; 2]]) -> Vec<ClipVertex> {
-    let orientation = corners
+const COMPILED_OVERLAY_CLIP_EPSILON: f32 = 1e-4;
+const SOURCE_DISPLACEMENT_DIAGONAL_COMPONENT: f32 = 0.707;
+
+fn split_texture_polygons(
+    polygons: Vec<Vec<ClipVertex<[f32; 2]>>>,
+    normal: [f32; 2],
+    distance: f32,
+) -> Vec<Vec<ClipVertex<[f32; 2]>>> {
+    let mut split = Vec::with_capacity(polygons.len() * 2);
+    for polygon in polygons {
+        let distances = polygon
+            .iter()
+            .map(|vertex| normal[0] * vertex.point[0] + normal[1] * vertex.point[1] - distance)
+            .collect::<Vec<_>>();
+        if !distances
+            .iter()
+            .any(|&value| value > COMPILED_OVERLAY_CLIP_EPSILON)
+            || !distances
+                .iter()
+                .any(|&value| value < -COMPILED_OVERLAY_CLIP_EPSILON)
+        {
+            split.push(polygon);
+            continue;
+        }
+        for sign in [1.0, -1.0] {
+            let distances = distances
+                .iter()
+                .map(|value| value * sign)
+                .collect::<Vec<_>>();
+            let polygon = clip_half_plane(
+                &polygon,
+                &distances,
+                COMPILED_OVERLAY_CLIP_EPSILON,
+                interpolate_pair,
+            );
+            if polygon.len() >= 3 {
+                split.push(polygon);
+            }
+        }
+    }
+    split
+}
+
+fn triangle_weights(corners: &[[f32; 2]; 3], point: [f32; 2]) -> Option<[f32; 2]> {
+    let b = subtract(corners[1], corners[0]);
+    let c = subtract(corners[2], corners[0]);
+    let delta = subtract(point, corners[0]);
+    let determinant = cross(b, c);
+    let weights = [cross(delta, c) / determinant, cross(b, delta) / determinant];
+    weights
         .iter()
-        .zip(corners.iter().cycle().skip(1))
-        .map(|(a, b)| cross(*a, *b))
-        .sum::<f32>()
-        .signum();
+        .all(|value| value.is_finite())
+        .then_some(weights)
+}
+
+fn weights_inside([u, v]: [f32; 2]) -> bool {
+    u >= -COMPILED_OVERLAY_CLIP_EPSILON
+        && v >= -COMPILED_OVERLAY_CLIP_EPSILON
+        && u + v <= 1.0 + COMPILED_OVERLAY_CLIP_EPSILON
+}
+
+fn displacement_position(
+    displacement: &super::MapDisplacementProjection,
+    point: [f32; 2],
+) -> Option<Vec3> {
+    let steps = displacement.steps;
+    let row = ((point[0] * steps as f32) as usize).min(steps - 1);
+    let column = ((point[1] * steps as f32) as usize).min(steps - 1);
+    for triangle in super::mesh::displacement_cell_triangles(column, row) {
+        let corners =
+            triangle.map(|(column, row)| [row as f32 / steps as f32, column as f32 / steps as f32]);
+        let [u, v] = triangle_weights(&corners, point)?;
+        if !weights_inside([u, v]) {
+            continue;
+        }
+        let [a, b, c] = triangle.map(|(column, row)| {
+            displacement
+                .positions
+                .get(column * (steps + 1) + row)
+                .copied()
+        });
+        let (a, b, c) = (a?, b?, c?);
+        return Some(a + (b - a) * u + (c - a) * v);
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ClipSide {
+    Outside,
+    On,
+    Inside,
+}
+
+fn clip_convex_polygon<T: Copy>(
+    mut polygon: Vec<ClipVertex<T>>,
+    corners: &[[f32; 2]],
+    epsilon: f32,
+    interpolate: fn(T, T, f32) -> T,
+) -> Vec<ClipVertex<T>> {
+    let orientation = cross(
+        subtract(corners[1], corners[0]),
+        subtract(corners[2], corners[0]),
+    )
+    .signum();
     for edge in 0..corners.len() {
+        if polygon.is_empty() {
+            return polygon;
+        }
         let origin = corners[edge];
         let direction = subtract(corners[(edge + 1) % corners.len()], origin);
-        let mut clipped = Vec::with_capacity(polygon.len() + 1);
-        let Some(mut previous) = polygon.last().copied() else {
-            return Vec::new();
-        };
-        let mut previous_distance =
-            orientation * cross(direction, subtract(previous.point, origin));
-        for current in polygon {
-            let distance = orientation * cross(direction, subtract(current.point, origin));
-            if (distance >= 0.0) != (previous_distance >= 0.0) {
-                let t = previous_distance / (previous_distance - distance);
-                clipped.push(ClipVertex {
-                    surface: interpolate_surface(previous.surface, current.surface, t),
-                    point: interpolate_pair(previous.point, current.point, t),
-                    uv: interpolate_pair(previous.uv, current.uv, t),
-                });
-            }
-            if distance >= 0.0 {
-                clipped.push(current);
-            }
-            previous = current;
-            previous_distance = distance;
+        let length = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
+        if length <= 1e-12 {
+            continue;
         }
-        polygon = clipped;
+        let scale = if epsilon > 0.0 { length.recip() } else { 1.0 };
+        let distances = polygon
+            .iter()
+            .map(|vertex| orientation * cross(direction, subtract(vertex.point, origin)) * scale)
+            .collect::<Vec<_>>();
+        polygon = clip_half_plane(&polygon, &distances, epsilon, interpolate);
     }
     polygon
+}
+
+fn clip_half_plane<T: Copy>(
+    polygon: &[ClipVertex<T>],
+    distances: &[f32],
+    epsilon: f32,
+    interpolate: fn(T, T, f32) -> T,
+) -> Vec<ClipVertex<T>> {
+    let sides = distances
+        .iter()
+        .map(|&distance| {
+            if distance > epsilon {
+                ClipSide::Inside
+            } else if distance < -epsilon {
+                ClipSide::Outside
+            } else {
+                ClipSide::On
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut clipped = Vec::with_capacity(polygon.len() + 1);
+    for index in 0..polygon.len() {
+        let next = (index + 1) % polygon.len();
+        let current = polygon[index];
+        if sides[index] != ClipSide::Outside {
+            clipped.push(current);
+        }
+        if sides[index] == ClipSide::On
+            || sides[next] == ClipSide::On
+            || sides[index] == sides[next]
+        {
+            continue;
+        }
+        let t = distances[index] / (distances[index] - distances[next]);
+        clipped.push(ClipVertex {
+            attributes: interpolate(current.attributes, polygon[next].attributes, t),
+            point: interpolate_pair(current.point, polygon[next].point, t),
+        });
+    }
+    clipped
 }
 
 fn affine_surface(triangle: &[MapVertex; 3], [u, v]: [f32; 2]) -> MapVertex {
@@ -527,6 +839,7 @@ fn affine_surface(triangle: &[MapVertex; 3], [u, v]: [f32; 2]) -> MapVertex {
     let scalar = |a: f32, b: f32, c: f32| a + (b - a) * u + (c - a) * v;
     MapVertex {
         position: vector(a.position, b.position, c.position),
+        base_position: vector(a.base_position, b.base_position, c.base_position),
         normal: vector(a.normal, b.normal, c.normal),
         tangent_s: vector(a.tangent_s, b.tangent_s, c.tangent_s),
         tangent_t: vector(a.tangent_t, b.tangent_t, c.tangent_t),
@@ -550,6 +863,7 @@ fn affine_surface(triangle: &[MapVertex; 3], [u, v]: [f32; 2]) -> MapVertex {
 pub(super) fn interpolate_surface(a: MapVertex, b: MapVertex, t: f32) -> MapVertex {
     MapVertex {
         position: a.position.lerp(b.position, t),
+        base_position: a.base_position.lerp(b.base_position, t),
         normal: a.normal.lerp(b.normal, t),
         tangent_s: a.tangent_s.lerp(b.tangent_s, t),
         tangent_t: a.tangent_t.lerp(b.tangent_t, t),

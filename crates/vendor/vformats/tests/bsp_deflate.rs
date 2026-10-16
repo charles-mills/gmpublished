@@ -207,3 +207,122 @@ fn corrupt_deflate_streams_error_not_panic() {
         );
     }
 }
+
+#[test]
+fn bounded_prefix_does_not_expand_or_validate_the_complete_declared_entry() {
+    let payload = vec![23; 1024 * 1024];
+    let compressed = deflate(&payload, 9);
+    let archive = build_zip(&[("large.vtf", 8, &compressed, u32::MAX, 0)]);
+    let reader = vformats::bsp::ZipReader::parse(&archive).unwrap();
+    assert_eq!(
+        reader.entry_prefix(&reader.entries()[0], 80).unwrap(),
+        &payload[..80]
+    );
+    assert!(matches!(
+        reader.entry_bytes(&reader.entries()[0], &Limits::default()),
+        Err(ZipError::EntryTooLarge { .. })
+    ));
+    let other = vformats::bsp::ZipReader::parse(&archive).unwrap();
+    assert!(matches!(
+        other.entry_prefix(&reader.entries()[0], 80),
+        Err(ZipError::ForeignEntry)
+    ));
+}
+
+#[test]
+fn decoder_workspace_is_checked_before_prefix_or_full_output() {
+    let payload = vec![19; 65536];
+    let compressed = deflate(&payload, 6);
+    let archive = build_zip(&[("a", 8, &compressed, payload.len() as u32, 0)]);
+    let reader = vformats::bsp::ZipReader::parse(&archive).unwrap();
+    let entry = &reader.entries()[0];
+    let required = reader.decoder_working_bytes(entry).unwrap();
+    assert!(required > 0);
+    assert_eq!(
+        reader.entry_prefix_with_decoder_limit(entry, 32, required - 1),
+        Err(ZipError::DecoderTooLarge {
+            required,
+            max: required - 1
+        })
+    );
+    assert_eq!(
+        reader.entry_bytes(
+            entry,
+            &Limits {
+                max_input_bytes: required - 1,
+                ..Limits::default()
+            }
+        ),
+        Err(ZipError::DecoderTooLarge {
+            required,
+            max: required - 1
+        })
+    );
+    assert_eq!(
+        reader
+            .entry_prefix_with_decoder_limit(entry, 32, required)
+            .unwrap(),
+        payload[..32]
+    );
+    assert_eq!(
+        &*reader
+            .entry_bytes(
+                entry,
+                &Limits {
+                    max_input_bytes: required,
+                    ..Limits::default()
+                }
+            )
+            .unwrap(),
+        payload
+    );
+}
+
+#[cfg(feature = "lzma")]
+#[test]
+fn lzma_prefix_and_dictionary_limits_share_checked_properties() {
+    let payload = vec![71; 262144];
+    let options = lzma_rust2::LzmaOptions::with_preset(6);
+    let mut writer =
+        lzma_rust2::LzmaWriter::new_use_header(Vec::new(), &options, Some(payload.len() as u64))
+            .unwrap();
+    writer.write_all(&payload).unwrap();
+    let encoded = writer.finish().unwrap();
+    let mut compressed = vec![9, 4, 5, 0];
+    compressed.extend_from_slice(&encoded[..5]);
+    compressed.extend_from_slice(&encoded[13..]);
+    let archive = build_zip(&[("a", 14, &compressed, payload.len() as u32, 0)]);
+    let reader = vformats::bsp::ZipReader::parse(&archive).unwrap();
+    let entry = &reader.entries()[0];
+    let required = reader.decoder_working_bytes(entry).unwrap();
+    assert_eq!(
+        reader.entry_prefix_with_decoder_limit(entry, 80, required - 1),
+        Err(ZipError::DecoderTooLarge {
+            required,
+            max: required - 1
+        })
+    );
+    assert_eq!(
+        reader
+            .entry_prefix_with_decoder_limit(entry, 80, required)
+            .unwrap(),
+        payload[..80]
+    );
+    assert_eq!(
+        &*reader.entry_bytes(entry, &Limits::default()).unwrap(),
+        payload
+    );
+
+    compressed[5..9].copy_from_slice(&(1_u32 << 30).to_le_bytes());
+    let archive = build_zip(&[("large-dict", 14, &compressed, payload.len() as u32, 0)]);
+    let reader = vformats::bsp::ZipReader::parse(&archive).unwrap();
+    let entry = &reader.entries()[0];
+    assert!(matches!(
+        reader.entry_bytes(entry, &Limits::default()),
+        Err(ZipError::DecoderTooLarge { .. })
+    ));
+    assert!(matches!(
+        reader.entry_prefix(entry, 80),
+        Err(ZipError::DecoderTooLarge { .. })
+    ));
+}

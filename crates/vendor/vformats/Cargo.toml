@@ -135,7 +135,10 @@ path = "tests/vpk.rs"
 version = "1.5"
 default-features = false
 
-[dependencies.flate2]
+[dependencies.miniz_oxide]
+version = "=0.8.9"
+
+[dev-dependencies.flate2]
 version = "1"
 
 [dependencies.lzma-rust2]

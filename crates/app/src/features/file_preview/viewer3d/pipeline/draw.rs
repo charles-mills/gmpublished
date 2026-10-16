@@ -67,23 +67,46 @@ pub fn draw_scene_plan_opaque<'a>(
     view: DrawView<'a>,
 ) {
     pass.set_bind_group(0, view.uniforms, &[]);
-    let ordinary = &resources.opaque_pipeline;
     for item in &plan.opaque {
-        pass.set_pipeline(
-            upload
-                .assets
-                .surface_pipelines
-                .get(
-                    item.material_slot,
-                    resources.kind(),
-                    false,
-                    SurfaceBlend::Opaque,
-                    upload.meshes[item.mesh_index].geometry,
-                )
-                .unwrap_or(ordinary),
-        );
+        bind_opaque_mesh_pipeline(pass, resources, upload, *item);
         draw_model_item(pass, upload, *item, view.visibility);
     }
+}
+
+pub fn draw_opaque_surfaces<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    resources: &'a ViewPipelines,
+    upload: &'a ViewerScene,
+    batch: &super::super::draw_plan::SurfaceBatch,
+    view: DrawView<'a>,
+) {
+    pass.set_bind_group(0, view.uniforms, &[]);
+    for mesh in &batch.meshes {
+        let item = mesh.item;
+        bind_opaque_mesh_pipeline(pass, resources, upload, item);
+        draw_model_range(pass, upload, item, mesh.indices.clone());
+    }
+}
+
+fn bind_opaque_mesh_pipeline<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    resources: &'a ViewPipelines,
+    upload: &'a ViewerScene,
+    item: DrawItem,
+) {
+    pass.set_pipeline(
+        upload
+            .assets
+            .surface_pipelines
+            .get(
+                item.material_slot,
+                resources.kind(),
+                false,
+                SurfaceBlend::Opaque,
+                upload.meshes[item.mesh_index].geometry,
+            )
+            .unwrap_or(&resources.opaque_pipeline),
+    );
 }
 
 pub fn draw_planar_items<'a>(
@@ -134,15 +157,7 @@ pub fn draw_operations<'a>(
                         .unwrap_or(ordinary),
                 );
                 if let Some(range) = range {
-                    let mesh = &upload.meshes[item.mesh_index];
-                    pass.set_bind_group(
-                        1,
-                        &upload.assets.material_bind_groups[item.material_slot],
-                        &[],
-                    );
-                    pass.set_vertex_buffer(0, mesh.vertices().slice(..));
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(range.clone(), 0, 0..1);
+                    draw_model_range(pass, upload, *item, range.clone());
                 } else {
                     draw_model_item(pass, upload, *item, view.visibility);
                 }
@@ -232,6 +247,23 @@ pub fn draw_model_item<'a>(
         bind_group,
         visibility.mesh_indices.get(&item.mesh_index),
     );
+}
+
+fn draw_model_range<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    upload: &'a ViewerScene,
+    item: DrawItem,
+    range: std::ops::Range<u32>,
+) {
+    let mesh = &upload.meshes[item.mesh_index];
+    pass.set_bind_group(
+        1,
+        &upload.assets.material_bind_groups[item.material_slot],
+        &[],
+    );
+    pass.set_vertex_buffer(0, mesh.vertices().slice(..));
+    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(range, 0, 0..1);
 }
 
 pub fn draw_phy_debug_meshes<'a>(

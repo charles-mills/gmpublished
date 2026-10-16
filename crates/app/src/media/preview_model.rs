@@ -7,8 +7,14 @@ use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
+#[path = "geometry_diagnostics.rs"]
+mod geometry_diagnostics;
 #[path = "model_lighting.rs"]
 mod model_lighting;
+pub use geometry_diagnostics::{
+    GeometryComponent, GeometryCounts, GeometryDiagnostic, GeometryError, PropGeometryReport,
+    PropGeometrySummary,
+};
 pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapTrace,
     MapVisibility, MapVisibilityBucket, MapWalkCollision,
@@ -34,6 +40,12 @@ pub mod vertex_lighting {
     pub const LIGHTMAP: u32 = 16;
     pub const PREVIEW: u32 = 32;
     pub const LEGACY_VERTEX_COLOR: u32 = 64;
+    pub const RECEIVER_LIGHTMAP: u32 = 128;
+    pub const RECEIVER_CONSTANT: u32 = 256;
+    pub const WORLD_CONSTANT: u32 = 512;
+    pub const BATCHED_STATIC_DECAL: u32 = 1024;
+    pub const DIRECTIONAL_LIGHTMAP_BLACK: u32 = 2048;
+    pub const COMPILED_VERTEX: u32 = 4096;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +152,8 @@ pub struct ModelData {
     pub illumination_position: Vec3,
     pub hull_min: Vec3,
     pub hull_max: Vec3,
+    pub view_min: Vec3,
+    pub view_max: Vec3,
     pub illumination_attachment_index: Option<usize>,
     pub illumination_attachment_position: Option<Vec3>,
     pub lighting: Option<Arc<ModelLightingData>>,
@@ -176,6 +190,8 @@ impl From<vformats::mdl::ModelData> for ModelData {
             illumination_position: Vec3::from(model.illumination_position),
             hull_min: Vec3::from(model.hull_min),
             hull_max: Vec3::from(model.hull_max),
+            view_min: Vec3::from(model.view_min),
+            view_max: Vec3::from(model.view_max),
             illumination_attachment_index: model.illumination_attachment_index,
             illumination_attachment_position: model
                 .illumination_attachment_position
@@ -287,6 +303,7 @@ pub struct ParticlePreview {
     pub(crate) file: gmpublished_domain::scene::pcf::PcfFile,
     pub(crate) systems: Vec<ParticleSystemInfo>,
     pub(crate) materials: Vec<ParticleMaterialSlot>,
+    pub(crate) sheet_stats: crate::bridge::materials::sprite_sheet::SpriteSheetStats,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,6 +319,7 @@ pub struct ParticleMaterialSlot {
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) additive: bool,
     pub(crate) sheet: Option<Arc<vformats::vtf::SpriteSheet>>,
+    pub(crate) sheet_error: Option<crate::bridge::materials::sprite_sheet::SpriteSheetResolveError>,
 }
 
 /// PCF material references are inconsistent ("effects\\spark.vmt",
@@ -344,9 +362,37 @@ pub struct ModelPreview {
     pub(crate) bodygroups: Vec<usize>,
 }
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ShadingMode {
+    #[default]
+    Scene = 0,
+    Fullbright = 1,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct MapTexturePreparation {
+    pub admitted_source_bytes: u64,
+    pub admitted_sources: usize,
+    pub admitted_resident_bytes: usize,
+    pub admitted_resident_images: usize,
+    pub source_rejections: usize,
+    pub resident_rejections: usize,
+    pub header_only_surface_materials: usize,
+    pub payload_working_peak_bytes: usize,
+    pub source_working_peak_bytes: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapPreview {
+    pub(crate) texture_preparation: MapTexturePreparation,
+    pub(crate) prop_geometry: PropGeometrySummary,
+    pub(crate) renderables: Vec<PreparedMapRenderable>,
+    pub(crate) map_skybox_renderables: Vec<PreparedMapRenderable>,
+    pub(crate) shading_mode: ShadingMode,
     pub(crate) surface_receivers: Vec<gmpublished_domain::scene::map::MapSurfaceReceiver>,
+    pub(crate) surface_lightmaps: Option<gmpublished_domain::scene::map::SourceLightmapLayout>,
+    pub(crate) displacement_batches: std::collections::HashMap<u32, MapDisplacementBatch>,
     pub(crate) water_volumes: Option<gmpublished_domain::scene::map::MapWaterVolumes>,
     pub(crate) entity_meshes: Vec<bool>,
     pub(crate) skybox_entity_meshes: Vec<bool>,
@@ -367,6 +413,51 @@ pub struct MapPreview {
     pub(crate) doors: Vec<DoorInstance>,
     pub(crate) visibility: Option<MapVisibility>,
     pub(crate) walk_collision: Option<MapWalkCollision>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MapRenderableSource {
+    StaticProp { index: usize },
+    EntityProp { placement_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapDisplacementBatch {
+    pub material_bucket: usize,
+    pub mesh_batch: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapRenderableRange {
+    pub mesh_index: usize,
+    pub draw_order: usize,
+    pub start: u32,
+    pub count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedMapRenderableBounds {
+    pub local: gmpublished_domain::scene::map::MapBounds,
+    pub world: gmpublished_domain::scene::map::MapBounds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum MapRenderableBoundsError {
+    #[error("entity render sequence bounds are unavailable")]
+    EntitySequenceUnavailable,
+    #[error("compiled model render bounds are invalid")]
+    InvalidCompiledBounds,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedMapRenderable {
+    pub source: MapRenderableSource,
+    pub leaf_membership: gmpublished_domain::scene::map::MapPropLeafMembership,
+    pub origin: Vec3,
+    pub angles: Vec3,
+    pub scale: f32,
+    pub bounds: Result<PreparedMapRenderableBounds, MapRenderableBoundsError>,
+    pub ranges: Vec<MapRenderableRange>,
 }
 
 impl MapPreview {
@@ -595,7 +686,7 @@ fn push_visible_range(
     indices.extend_from_slice(slice);
 }
 
-fn prop_visible(visibility: &MapPropVisibility, clusters: &[bool]) -> bool {
+pub fn prop_visible(visibility: &MapPropVisibility, clusters: &[bool]) -> bool {
     match visibility {
         MapPropVisibility::Always => true,
         MapPropVisibility::Clusters(indices) => indices
@@ -616,6 +707,8 @@ fn bucket_visible(bucket: MapVisibilityBucket, visible_clusters: &[bool]) -> boo
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialSlot {
+    pub(crate) resolution: crate::bridge::materials::MaterialResolutionOutcome,
+    pub(crate) canonical_name: Option<String>,
     pub(crate) shader: crate::bridge::materials::MaterialShader,
     pub(crate) name: String,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
@@ -628,6 +721,8 @@ pub type LightmapSlot = gmpublished_domain::scene::map::LightmapAtlas;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetailSprite {
+    pub(crate) fast_eligible: bool,
+    pub(crate) leaf_index: u16,
     pub(crate) origin: Vec3,
     pub(crate) angles: Vec3,
     pub(crate) orientation: u8,
@@ -648,13 +743,27 @@ pub struct OverlayPrimitive {
     pub(crate) material_index: usize,
     pub(crate) visibility: MapPropVisibility,
     pub(crate) owner: gmpublished_domain::scene::map::MapSurfaceOwner,
-    pub(crate) receiver_face: u32,
     pub(crate) receiver_mesh: gmpublished_domain::scene::map::MapReceiverMesh,
     pub(crate) receiver_range: MapMeshIndexRange,
     pub(crate) receiver_material_index: usize,
     pub(crate) render_order: u16,
     pub(crate) fade: Option<gmpublished_domain::scene::map::MapOverlayFade>,
     pub(crate) fade_origin: Vec3,
+    pub(crate) decal_sort: Option<StaticDecalSort>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum StaticDecalPass {
+    PermanentLightmapped,
+    NonPermanentLightmapped,
+    Unlit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StaticDecalSort {
+    pub(crate) pass: StaticDecalPass,
+    pub(crate) format_group: usize,
+    pub(crate) material_page_bucket: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -709,6 +818,7 @@ pub struct ModelStats {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MapStats {
+    pub(crate) lightmap: gmpublished_domain::scene::map::MapLightmapStats,
     pub(crate) face_count: u32,
     pub(crate) displacement_count: u32,
     pub(crate) entity_count: u32,
@@ -866,7 +976,14 @@ mod tests {
 
     fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
         MapPreview {
-        surface_receivers: Vec::new(),
+            texture_preparation: MapTexturePreparation::default(),
+            prop_geometry: PropGeometrySummary::default(),
+            renderables: Vec::new(),
+            map_skybox_renderables: Vec::new(),
+            shading_mode: ShadingMode::Scene,
+            surface_receivers: Vec::new(),
+            surface_lightmaps: None,
+            displacement_batches: Default::default(),
             suns: Vec::new(),
             cubemap_probes: Vec::new(),
             sun_material_slots: Vec::new(),
@@ -877,6 +994,8 @@ mod tests {
                 meshes: vec![mesh(0), mesh(1)],
                 materials: vec![
                     MaterialSlot {
+                        resolution: Default::default(),
+                        canonical_name: None,
                         shader: Default::default(),
                         name: "a".to_owned(),
                         texture: None,
@@ -885,6 +1004,8 @@ mod tests {
                         alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
                     },
                     MaterialSlot {
+                        resolution: Default::default(),
+                        canonical_name: None,
                         shader: Default::default(),
                         name: "b".to_owned(),
                         texture: None,
@@ -913,6 +1034,8 @@ mod tests {
             lightmap: None,
             skybox: None,
             detail_sprites: vec![DetailSprite {
+                fast_eligible: true,
+                leaf_index: 0,
                 angles: Vec3::ZERO,
                 orientation: 2,
                 underwater_leaf: false,
@@ -926,6 +1049,7 @@ mod tests {
             }],
             map_skybox_detail_sprites: Vec::new(),
             overlays: vec![OverlayPrimitive {
+                decal_sort: None,
                 source: gmpublished_domain::scene::map::MapSurfaceMarkSource::Overlay {
                     index: 0,
                     id: 0,
@@ -935,7 +1059,6 @@ mod tests {
                 material_index: 0,
                 visibility: MapPropVisibility::Clusters(vec![1]),
                 owner: gmpublished_domain::scene::map::MapSurfaceOwner::World,
-                receiver_face: 0,
                 receiver_mesh: gmpublished_domain::scene::map::MapReceiverMesh::World(0),
                 receiver_range: MapMeshIndexRange {
                     face: 0,

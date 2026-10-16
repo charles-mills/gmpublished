@@ -477,3 +477,72 @@ fn rejects_tree_size_larger_than_the_file() {
 
     assert_eq!(VpkFile::open(&path), Err(VpkError::FormatError));
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_content_directories_and_indexes_preserve_priority_and_payloads() {
+    use std::os::unix::fs::symlink;
+    let source = TempDir::new().unwrap();
+    let mirror = TempDir::new().unwrap();
+    let source_gmod = source.path().join("garrysmod");
+    let mirror_gmod = mirror.path().join("garrysmod");
+    let source_engine = source.path().join("sourceengine");
+    fs::create_dir_all(&source_gmod).unwrap();
+    fs::create_dir_all(&mirror_gmod).unwrap();
+    fs::create_dir_all(&source_engine).unwrap();
+    let own = write_vpk_fixture(
+        &source_gmod.join("garrysmod_dir.vpk"),
+        2,
+        vec![FixtureEntrySpec::external(
+            "materials/test.vmt",
+            b"own".to_vec(),
+            0,
+        )],
+    );
+    let fallback = write_vpk_fixture(
+        &source_gmod.join("fallbacks_dir.vpk"),
+        2,
+        vec![FixtureEntrySpec::embedded(
+            "materials/test.vmt",
+            b"fallback".to_vec(),
+        )],
+    );
+    write_vpk_fixture(
+        &source_engine.join("hl2_misc_dir.vpk"),
+        2,
+        vec![FixtureEntrySpec::embedded(
+            "materials/test.vmt",
+            b"engine".to_vec(),
+        )],
+    );
+    for path in [own, fallback, source_gmod.join("garrysmod_000.vpk")] {
+        symlink(&path, mirror_gmod.join(path.file_name().unwrap())).unwrap();
+    }
+    symlink(&source_engine, mirror.path().join("sourceengine")).unwrap();
+    symlink(
+        source.path().join("absent_dir.vpk"),
+        mirror_gmod.join("broken_dir.vpk"),
+    )
+    .unwrap();
+    let paths = discover_game_vpks(mirror.path());
+    assert_eq!(
+        paths,
+        vec![
+            mirror_gmod.join("garrysmod_dir.vpk"),
+            mirror.path().join("sourceengine/hl2_misc_dir.vpk"),
+            mirror_gmod.join("fallbacks_dir.vpk")
+        ]
+    );
+    for (path, bytes) in paths
+        .iter()
+        .zip([b"own".as_slice(), b"engine", b"fallback"])
+    {
+        assert_eq!(
+            VpkFile::open(path)
+                .unwrap()
+                .read_entry_bytes("materials/test.vmt")
+                .unwrap(),
+            bytes
+        );
+    }
+}

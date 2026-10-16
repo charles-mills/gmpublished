@@ -14,6 +14,69 @@ pub enum SurfaceFamily {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SourceSurfaceBaseBlend {
+    #[default]
+    Single = 0,
+    VertexAlpha = 1,
+    Masked = 2,
+}
+
+impl SourceSurfaceBaseBlend {
+    pub(crate) const fn uses_secondary(self) -> bool {
+        !matches!(self, Self::Single)
+    }
+}
+
+impl SurfaceFamily {
+    pub(super) const fn accepts_secondary_base(self) -> bool {
+        matches!(self, Self::Lightmapped | Self::Transition)
+    }
+
+    pub(super) fn base_blend(
+        self,
+        primary: bool,
+        secondary: bool,
+        masked: bool,
+    ) -> SourceSurfaceBaseBlend {
+        if !self.accepts_secondary_base() || !primary || !secondary {
+            SourceSurfaceBaseBlend::Single
+        } else if masked {
+            SourceSurfaceBaseBlend::Masked
+        } else {
+            SourceSurfaceBaseBlend::VertexAlpha
+        }
+    }
+    pub(super) const fn accepts_primary_bumpmap(self, decal: bool) -> bool {
+        match self {
+            Self::Lightmapped | Self::Transition => !decal,
+            Self::DecalModulate => false,
+            Self::VertexLit | Self::Unlit => true,
+        }
+    }
+
+    pub(super) const fn accepts_secondary_bumpmap(
+        self,
+        decal: bool,
+        primary_defined: bool,
+    ) -> bool {
+        match self {
+            Self::Lightmapped | Self::Transition => !decal && primary_defined,
+            Self::DecalModulate => false,
+            Self::VertexLit | Self::Unlit => true,
+        }
+    }
+
+    pub(super) const fn accepts_envmap_mask(self, decal: bool, primary_defined: bool) -> bool {
+        match self {
+            Self::Lightmapped | Self::Transition => decal || !primary_defined,
+            Self::DecalModulate => false,
+            Self::VertexLit | Self::Unlit => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "resolved independent Source shader permutations"
@@ -82,17 +145,22 @@ impl Default for DecalParameters {
 }
 
 impl DecalParameters {
-    pub(crate) fn mapping_extent(self, dimensions: (u32, u32)) -> Option<[f32; 2]> {
+    pub(crate) fn projection_dimensions(
+        self,
+        dimensions: (u32, u32),
+    ) -> Option<gmpublished_domain::scene::map::MapDecalDimensions> {
         if !self.scale.is_finite() || self.scale <= 0.0 {
             return None;
         }
         let reciprocal = self.scale.recip();
         let extent =
             [dimensions.0, dimensions.1].map(|dimension| (dimension as f32 / reciprocal).trunc());
-        extent
-            .iter()
-            .all(|value| value.is_finite() && *value >= 1.0 && *value < i32::MAX as f32)
-            .then_some(extent)
+        let radius = ((dimensions.0 >> 1).max(dimensions.1 >> 1)) as f32 * self.scale;
+        (radius.is_finite()
+            && extent
+                .iter()
+                .all(|value| value.is_finite() && *value >= 1.0 && *value < i32::MAX as f32))
+        .then_some(gmpublished_domain::scene::map::MapDecalDimensions { extent, radius })
     }
 }
 
@@ -104,6 +172,7 @@ impl DecalParameters {
 pub struct SurfaceMaterial {
     pub shader: String,
     pub family: SurfaceFamily,
+    pub base_blend: SourceSurfaceBaseBlend,
     pub parameters: BTreeMap<String, String>,
     pub color: [f32; 3],
     pub color2: [f32; 3],
@@ -150,6 +219,11 @@ pub struct UnavailableTexture<'a> {
 }
 
 impl SurfaceMaterial {
+    pub(crate) fn uses_blend_modulation(&self, base_has_alpha: bool) -> bool {
+        self.base_blend.uses_secondary()
+            && self.blend_modulation.is_some()
+            && self.effective_emission_mode(base_has_alpha) == 0
+    }
     pub(crate) const fn base_read_transfer(&self) -> super::TextureReadTransfer {
         super::TextureRole::Base {
             family: self.family,
@@ -222,6 +296,22 @@ impl SurfaceMaterial {
         ]
         .into_iter()
         .filter_map(|(parameter, available)| {
+            if parameter == "$bumpmap" && !self.family.accepts_primary_bumpmap(self.decal) {
+                return None;
+            }
+            if parameter == "$blendmodulatetexture" && !self.base_blend.uses_secondary() {
+                return None;
+            }
+            let primary_defined = self.parameters.contains_key("$bumpmap");
+            if (parameter == "$bumpmap2"
+                && !self
+                    .family
+                    .accepts_secondary_bumpmap(self.decal, primary_defined))
+                || (parameter == "$envmapmask"
+                    && !self.family.accepts_envmap_mask(self.decal, primary_defined))
+            {
+                return None;
+            }
             let path = self.parameters.get(parameter)?.as_str();
             (!available && !path.trim().is_empty())
                 .then_some(UnavailableTexture { parameter, path })
@@ -323,7 +413,7 @@ impl SurfaceMaterial {
             if detail
                 .texture
                 .as_ref()
-                .is_some_and(|texture| texture.flags & vformats::vtf::texture_flags::SSBUMP != 0)
+                .is_some_and(|texture| texture.flags() & vformats::vtf::texture_flags::SSBUMP != 0)
             {
                 return Some(if self.normal.is_some() { 10 } else { 11 });
             }
@@ -462,7 +552,7 @@ impl SurfaceMaterial {
                     && detail
                         .texture
                         .as_ref()
-                        .is_some_and(|texture| has_alpha(texture.flags))
+                        .is_some_and(|texture| has_alpha(texture.flags()))
             });
         if self.additive {
             RenderMode::Additive
@@ -481,6 +571,7 @@ impl Default for SurfaceMaterial {
         Self {
             shader: String::new(),
             family: SurfaceFamily::default(),
+            base_blend: SourceSurfaceBaseBlend::Single,
             parameters: BTreeMap::new(),
             color: [1.0; 3],
             color2: [1.0; 3],
@@ -547,6 +638,7 @@ impl MaterialResolver {
         &self,
         material: &EffectiveMaterial,
         family: SurfaceFamily,
+        base_blend: SourceSurfaceBaseBlend,
     ) -> Arc<SurfaceMaterial> {
         let get = |key| material.parameter(key);
         let generic = family != SurfaceFamily::DecalModulate;
@@ -579,6 +671,7 @@ impl MaterialResolver {
         let surface = SurfaceMaterial {
             shader: material.shader.clone(),
             family,
+            base_blend,
             parameters: material.parameters.clone(),
             phong: (family == SurfaceFamily::VertexLit)
                 .then(|| self.resolve_phong(material))
@@ -590,10 +683,15 @@ impl MaterialResolver {
             base2_transform: get("$basetexturetransform2").map(|v| texture_transform(Some(v))),
             base_frame: scalar(get("$frame"), 0.0),
             base2_frame: scalar(get("$frame2"), 0.0),
-            normal: generic.then(|| raw_texture("$bumpmap")).flatten(),
-            normal2: generic.then(|| raw_texture("$bumpmap2")).flatten(),
+            normal: material
+                .effective_bumpmap()
+                .and_then(|name| self.resolve_raw_texture_frames(name)),
+            normal2: generic
+                .then(|| material.effective_bumpmap2())
+                .flatten()
+                .and_then(|name| self.resolve_raw_texture_frames(name)),
             normal_frame: scalar(get("$bumpframe"), 0.0),
-            ssbump: super::vmt_bool(get("$ssbump")),
+            ssbump: material.effective_bumpmap().is_some() && super::vmt_bool(get("$ssbump")),
             diffuse_bump: !super::vmt_bool(get("$nodiffusebumplighting")),
             transform: texture_transform(get("$bumptransform")),
             transform2: get("$bumptransform2").map(|v| texture_transform(Some(v))),
@@ -602,7 +700,8 @@ impl MaterialResolver {
             envmap: generic
                 .then(|| self.resolve_environment_map(material))
                 .flatten(),
-            blend_modulation: generic
+            blend_modulation: base_blend
+                .uses_secondary()
                 .then(|| raw_texture("$blendmodulatetexture"))
                 .flatten(),
             blend_mask_transform: texture_transform(get("$blendmasktransform")),
@@ -653,10 +752,17 @@ mod detail_mode_tests {
     #[test]
     fn native_detail_permutations_keep_texture_capability_separate_from_authored_mode() {
         let frames = |flags| {
-            Arc::new(DecodedTextureFrames {
-                flags,
-                frames: Vec::new(),
-            })
+            Arc::new(
+                DecodedTextureFrames::from_rgba(
+                    flags,
+                    vec![vec![super::super::ResolvedTextureMip {
+                        rgba: vec![255; 4],
+                        width: 1,
+                        height: 1,
+                    }]],
+                )
+                .unwrap(),
+            )
         };
         for family in [
             SurfaceFamily::Lightmapped,
@@ -718,10 +824,17 @@ mod detail_mode_tests {
         }
     }
     fn available_frames() -> Arc<DecodedTextureFrames> {
-        Arc::new(DecodedTextureFrames {
-            flags: 0,
-            frames: Vec::new(),
-        })
+        Arc::new(
+            DecodedTextureFrames::from_rgba(
+                0,
+                vec![vec![super::super::ResolvedTextureMip {
+                    rgba: vec![255; 4],
+                    width: 1,
+                    height: 1,
+                }]],
+            )
+            .unwrap(),
+        )
     }
 
     #[test]

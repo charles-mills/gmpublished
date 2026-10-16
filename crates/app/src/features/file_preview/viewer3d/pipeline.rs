@@ -1,24 +1,28 @@
 use super::camera::ViewId;
+#[cfg(test)]
+use super::look_to;
 use super::{
-    AMBIENT, Arc, BLIT_SHADER_SOURCE, BcFormat, CHECKERBOARD_BYTES, CHECKERBOARD_MIP_1X1_BYTES,
+    AMBIENT, Arc, BLIT_SHADER_SOURCE, CHECKERBOARD_BYTES, CHECKERBOARD_MIP_1X1_BYTES,
     CHECKERBOARD_MIP_2X2_BYTES, CHECKERBOARD_MIP_4X4_BYTES, CHECKERBOARD_MIP_RGBA,
     CHECKERBOARD_SIZE, CHECKERBOARD_SIZE_USIZE, Camera, DETAIL_SHADER_SOURCE,
     DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance,
-    DoorRenderPose, DrawItem, DrawPlan, DrawPlans, FOV_Y, FlyCamera, MATERIAL_ANISOTROPY_CLAMP,
-    MODEL_VERTEX_ATTRIBUTES, MapFog, MapPreview, MapSkyCamera, MapVisibilityBucket, MaterialSlot,
-    MeshData, ModelPreview, ModelVertex, OverlayDrawItem, OverlayPrimitive,
-    PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA, Rectangle, RenderMode, RenderScene, ResolvedBcMip,
-    ResolvedTexture, SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SOURCE_UP, Skybox,
-    SkyboxFace, TextureUploadLevel, Viewport, WATER_SHADER_SOURCE, WorldVisibilityPlan,
-    bc_mip_is_valid, bc_texture_format, decode_bc_texture, half_extent, initial_door_swing,
-    look_at, look_to, mat_mul, mid, perspective, prepare_draw_plans, scene_sample_count, shader,
-    skybox_eye, transform_door_vertices, wgpu, write_bc_texture_level, write_texture_level,
+    DoorRenderPose, DrawItem, DrawPlan, DrawPlans, FOV_Y, FlyCamera, MODEL_VERTEX_ATTRIBUTES,
+    MapFog, MapPreview, MapSkyCamera, MapVisibilityBucket, MaterialSlot, MeshData, ModelPreview,
+    ModelVertex, OverlayDrawItem, OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, PHY_DEBUG_RGBA,
+    Rectangle, RenderMode, RenderScene, ResolvedTexture, SHADER_SOURCE, SKY_SHADER_SOURCE,
+    SKYBOX_FACE_COUNT, SOURCE_UP, Skybox, SkyboxFace, TextureUploadLevel, Viewport,
+    WATER_SHADER_SOURCE, WorldVisibilityPlan, half_extent, initial_door_swing, look_at, mat_mul,
+    mid, perspective, prepare_draw_plans, scene_sample_count, shader, skybox_eye,
+    transform_door_vertices, wgpu,
 };
 use gmpublished_domain::math::Vec3;
 
+mod clipping;
 mod cubemap;
 mod draw;
 mod geometry;
+mod images;
+mod intersection;
 mod lighting;
 mod lightmaps;
 mod marks;
@@ -26,9 +30,12 @@ mod materials;
 mod model_lighting;
 mod model_lighting_visibility;
 mod passes;
+mod planar;
 mod reflections;
 mod refraction;
+mod residency;
 mod resources;
+mod samplers;
 pub(super) mod sampling;
 mod screen_refraction;
 mod sky;
@@ -36,14 +43,23 @@ mod sun;
 mod surface;
 mod surface_pipelines;
 mod targets;
+pub(super) mod texture_upload;
 mod transparency;
 mod uniforms;
 mod upload;
+pub(super) mod view_camera;
 mod visibility;
+mod water_clip;
 
+#[cfg(feature = "map-capture")]
+pub(super) use crate::media::preview_model::ShadingMode;
+#[cfg(feature = "map-capture")]
+pub(super) use materials::capture_bc_upload;
+#[cfg(feature = "map-capture")]
+pub(super) use texture_upload::configured_policy as capture_texture_upload_policy;
 pub use uniforms::Uniforms;
 #[cfg(feature = "map-capture")]
-pub(super) use uniforms::{Diagnostic, DiagnosticMode, ShadingMode};
+pub(super) use uniforms::{Diagnostic, DiagnosticMode};
 
 use super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 pub(super) use geometry::ViewerScene;
@@ -118,6 +134,7 @@ pub struct ModelPrimitive {
     pub(super) visibility_culling: bool,
     pub(super) phy_debug_visible: bool,
     pub(super) uniforms: Uniforms,
+    pub(super) view_camera: Option<view_camera::ViewCamera>,
     pub(super) submerged: bool,
     pub(super) map_skybox_uniforms: Option<Uniforms>,
     pub(super) sky_uniforms: Option<Uniforms>,
@@ -133,10 +150,21 @@ pub struct PreparedFrame {
     marks: marks::Frame,
     pub screen_overlay: Option<screen_refraction::Frame>,
     pub main: SceneView,
+    water_intersection: Option<intersection::IntersectionView>,
     pub planar_views: Vec<PlanarView>,
     pub content_id: u64,
     pub bounds: Rectangle,
     pub live: bool,
+}
+
+#[cfg(feature = "map-capture")]
+fn preparation_diagnostics(view: &SceneView) -> serde_json::Value {
+    serde_json::json!({
+        "world":view.plans.as_ref().map(|plans|&plans.world.world_preparation_issues),
+        "skybox":view.plans.as_ref().and_then(|plans|plans.map_skybox.as_ref()).map(|plan|&plan.world_preparation_issues),
+        "transparency":view.transparency_diagnostics,
+        "skybox_transparency":view.skybox_transparency_diagnostics,
+    })
 }
 
 impl ModelPrimitive {
@@ -180,13 +208,23 @@ impl shader::Primitive for ModelPrimitive {
         let scene = self.preview.render_scene();
         let map = self.preview.map();
         let scene_key = self.preview.key();
-        pipeline.uploads.ensure_upload(
+        if let Err(error) = pipeline.uploads.ensure_upload(
             device,
             queue,
             &pipeline.resources,
             scene_key,
             &self.preview,
-        );
+        ) {
+            #[cfg(feature = "map-capture")]
+            if let Some(diagnostics) = &self.capture_diagnostics {
+                *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({
+                    "upload_error": error.capture_json(),
+                });
+            }
+            #[cfg(not(feature = "map-capture"))]
+            let _ = error;
+            return;
+        }
         pipeline.uploads.touch(scene_key);
         let slot = unclaimed_viewer_frame_slot(
             pipeline
@@ -196,7 +234,7 @@ impl shader::Primitive for ModelPrimitive {
             self.view_id,
         );
         if slot == pipeline.frames.len() {
-            let lighting = lighting::Frame::new(device, queue, map);
+            let lighting = lighting::Frame::new(device, &pipeline.resources.texture_uploader, map);
             let scene = ViewerScene::new(Arc::clone(
                 pipeline.uploads.get(scene_key).expect("uploaded scene"),
             ));
@@ -210,6 +248,7 @@ impl shader::Primitive for ModelPrimitive {
                 marks,
                 lighting,
                 planar_views: Vec::new(),
+                water_intersection: None,
                 content_id: self.content_id,
                 bounds: *bounds,
                 live: false,
@@ -223,8 +262,10 @@ impl shader::Primitive for ModelPrimitive {
                 pipeline.uploads.get(scene_key).expect("uploaded scene"),
             ));
             frame.planar_views.clear();
+            frame.water_intersection = None;
             frame.screen_overlay = None;
-            frame.lighting = lighting::Frame::new(device, queue, map);
+            frame.lighting =
+                lighting::Frame::new(device, &pipeline.resources.texture_uploader, map);
             frame.marks = marks::Frame::new(device, queue, &frame.scene);
             frame.main = SceneView::new(
                 device,
@@ -282,18 +323,21 @@ impl shader::Primitive for ModelPrimitive {
             uniforms.water_time_sky_tint[1..].copy_from_slice(upload.assets.sky_tint.as_array());
             uniforms.with_raster_offset(size, self.raster_offset())
         };
-        frame.main.world.write(queue, &with_time(self.uniforms));
+        let mut main_uniforms = with_time(self.uniforms);
+        let skybox_uniforms = self.map_skybox_uniforms.map(with_time);
         if let Some(sky) = self.sky_uniforms {
             let mut sky_with_metadata = with_time(sky);
             sky_with_metadata.water_time_sky_tint[0] = sky.water_time_sky_tint[0];
             frame.main.sky.write(queue, &sky_with_metadata);
         }
-        if let Some(skybox) = self.map_skybox_uniforms {
-            frame.main.skybox.write(queue, &with_time(skybox));
+        if let Some(skybox) = skybox_uniforms {
+            frame.main.skybox.write(queue, &skybox);
         }
         let plans = prepare_draw_plans(
             upload,
             DrawPlanRequest {
+                world_view: Some(&main_uniforms),
+                skybox_view: skybox_uniforms.as_ref(),
                 content_id: self.content_id,
                 selection: DrawPlanSelection {
                     skin_remap: &self.skin_remap,
@@ -361,6 +405,26 @@ impl shader::Primitive for ModelPrimitive {
                         .any(|item| item.mesh_index == surface.mesh_index)
             })
             .map(|(index, surface)| {
+                if let Some(ranges) = plans.world.planar_world_ranges.get(&surface.mesh_index) {
+                    let uploaded = &upload.meshes[surface.mesh_index];
+                    let selected = scene
+                        .meshes
+                        .get(uploaded.scene_mesh_index)
+                        .and_then(|mesh| {
+                            planar::select_indices(
+                                &mesh.vertices,
+                                &mesh.indices,
+                                Some(ranges),
+                                &[],
+                                transparency::WorldDrawGroups::ALL,
+                                None,
+                            )
+                        });
+                    return (
+                        index,
+                        surface.visible_indices(Some(selected.as_deref().unwrap_or(&[]))),
+                    );
+                }
                 let visible = frame.main.visibility.plan.as_ref().map(|plan| {
                     plan.mesh_indices
                         .get(upload.meshes[surface.mesh_index].scene_mesh_index)
@@ -429,23 +493,6 @@ impl shader::Primitive for ModelPrimitive {
                     surface_marks: &frame.marks.buffer,
                 },
             );
-            let mut uniforms = with_time(self.uniforms);
-            uniforms.water_depth_params[2] = f32::from(surface.reflection.is_some());
-            uniforms.water_depth_params[3] = f32::from(surface.refraction.is_some());
-            if scene.materials[upload.assets.reflectors[surface.surface_index].material_slot]
-                .shader
-                .water()
-                .is_some()
-            {
-                let plane = upload.assets.reflectors[surface.surface_index].plane;
-                uniforms.medium_plane = [
-                    plane.normal[0],
-                    plane.normal[1],
-                    plane.normal[2],
-                    -plane.distance,
-                ];
-            }
-            surface.surface_uniforms.write(queue, &uniforms);
             let refracted = surface
                 .refraction
                 .as_ref()
@@ -479,6 +526,51 @@ impl shader::Primitive for ModelPrimitive {
             self,
         );
         frame.main.plans = Some(plans);
+        let mut water_views = frame.planar_views.iter().filter(|view| {
+            scene.materials[upload.assets.reflectors[view.surface_index].material_slot]
+                .shader
+                .water()
+                .is_some()
+        });
+        let mut water_side = water_views
+            .next()
+            .filter(|view| view.refraction.is_some())
+            .filter(|_| water_views.all(|view| view.refraction.is_some()))
+            .map(|_| transparency::WaterSide::from_submerged(self.submerged));
+        if let Some(plane) =
+            intersection::prepare(frame, self, device, queue, &pipeline.resources, size)
+        {
+            water_side = Some(transparency::WaterSide::Above);
+            main_uniforms.clip_plane = [
+                plane.normal[0],
+                plane.normal[1],
+                plane.normal[2],
+                -plane.distance,
+            ];
+        }
+        main_uniforms = main_uniforms.with_clip_camera(self.view_camera);
+        frame.main.world.write(queue, &main_uniforms);
+        let upload = &frame.scene;
+        for surface in &frame.planar_views {
+            let mut uniforms = main_uniforms;
+            uniforms.water_depth_params[2] = f32::from(surface.reflection.is_some());
+            uniforms.water_depth_params[3] = f32::from(surface.refraction.is_some());
+            if scene.materials[upload.assets.reflectors[surface.surface_index].material_slot]
+                .shader
+                .water()
+                .is_some()
+            {
+                let plane = upload.assets.reflectors[surface.surface_index].plane;
+                uniforms.medium_plane = [
+                    plane.normal[0],
+                    plane.normal[1],
+                    plane.normal[2],
+                    -plane.distance,
+                ];
+            }
+            surface.surface_uniforms.write(queue, &uniforms);
+        }
+        let upload = &frame.scene;
         let mut lighting_contexts = vec![false; map.map_or(0, |map| map.model_lighting.len())];
         model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, &frame.main);
         for planar in &frame.planar_views {
@@ -489,26 +581,31 @@ impl shader::Primitive for ModelPrimitive {
                 model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, view);
             }
         }
+        if let Some(view) = frame
+            .water_intersection
+            .as_ref()
+            .filter(|view| view.selection.is_some())
+        {
+            model_lighting_visibility::gather(
+                &mut lighting_contexts,
+                scene,
+                map,
+                upload,
+                &view.view,
+            );
+        }
         frame
             .lighting
             .update(queue, map, self.model_lighting_time, &lighting_contexts);
-        let detail_water_side = frame
-            .planar_views
-            .iter()
-            .any(|view| {
-                scene.materials[upload.assets.reflectors[view.surface_index].material_slot]
-                    .shader
-                    .water()
-                    .is_some()
-            })
-            .then_some(self.submerged);
         transparency::prepare(
             &mut frame.main,
             upload,
-            with_time(self.uniforms),
-            self.map_skybox_uniforms.map(with_time).as_ref(),
-            detail_water_side,
+            &main_uniforms,
+            skybox_uniforms.as_ref(),
+            water_side,
+            true,
         );
+        planar::prepare(&mut frame.main, upload, scene, device, queue, None);
         #[cfg(feature = "map-capture")]
         if let Some(diagnostics) = &self.capture_diagnostics {
             let records = |refracted: bool| {
@@ -524,11 +621,12 @@ impl shader::Primitive for ModelPrimitive {
                     "reflected_eye":surface.plane.reflect_point(eye).to_array(),
                     "camera_position":if refracted {eye.to_array()} else {surface.plane.reflect_point(eye).to_array()},
                     "transparent_primitives":view.transparency.len(),
-                    "world_opaque_meshes":plans.world.opaque.len(),
-                    "world_surface_marks":plans.world.surface_marks.len(),
-                    "transparent_receiver_marks":plans.world.receiver_marks.len(),
+                    "preparation":preparation_diagnostics(view),
+                    "world_opaque_meshes":plans.world.opaque_mesh_indices().len(),
+                    "world_surface_marks":plans.world.surface_mark_count(),
+                    "transparent_receiver_marks":plans.world.receiver_mark_count(),
                     "world_translucent_meshes":plans.world.translucent.len(),
-                    "world_entity_meshes":plans.world.opaque.iter().filter(|item|upload.meshes[item.mesh_index].entity).count(),
+                    "world_entity_meshes":plans.world.opaque_mesh_indices().iter().filter(|&&index|upload.meshes[index].entity).count(),
                     "skybox_present":plans.map_skybox.is_some(),
                     "visibility_state":format!("{:?}",view.visibility.tracker.state),
                     "target_dimensions":view.targets.as_ref().unwrap().size
@@ -553,13 +651,20 @@ impl shader::Primitive for ModelPrimitive {
                     })
                     .sum::<u64>();
             *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({
+                "clip_mode": pipeline.resources.clip_mode,
+                "device_clip_distances": pipeline.resources.clip_mode == clipping::ClipMode::Primitive,
+                "texture_upload":pipeline.resources.texture_uploader.lock().expect("texture uploader lock").stats(),
+                "image_cache":pipeline.uploads.image_stats(), "image_resources": upload.assets.image_stats(), "image_upload_issues":upload.assets.image_upload_issues,
+                "material_samplers":upload.assets.sampler_diagnostics.iter().map(samplers::SamplerDiagnostic::capture_json).collect::<Vec<_>>(),
                 "raster_offset_physical_pixels":self.raster_offset(),"main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
                 "single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)",
+                "water_intersection":frame.water_intersection.as_ref().and_then(|intersection|intersection.selection.map(|selection|serde_json::json!({"surface_index":selection.surface_index,"body_index":selection.body_index,"preparation":preparation_diagnostics(&intersection.view)}))),
                 "water_body":map.and_then(|map|map.water_volumes.as_ref()).and_then(|volumes|volumes.at(eye)).map(|sample|serde_json::json!({"index":sample.body_index,"surface_z":sample.body.surface_z,"min_z":sample.body.min_z,"surface_material":sample.body.material_name,"contents":sample.contents})),
                 "underwater_overlay":map.and_then(|map|map.immersion_material(eye)).and_then(|water|water.underwater_overlay.as_ref()).map(|effect|&effect.name),
                 "clear_color_linear":self.clear_color,
-                "main_camera_position":self.uniforms.camera_position, "main_fog_color":self.uniforms.fog_color, "main_fog":{"start":self.uniforms.fog.start,"end":self.uniforms.fog.end,"max_density":self.uniforms.fog.max_density,"mode":self.uniforms.fog.mode}, "main_clip_plane":self.uniforms.clip_plane, "main_visibility_state":format!("{:?}",frame.main.visibility.tracker.state),
-                "surface_mark_metadata_bytes":frame.marks.buffer.size(), "world_surface_marks":frame.main.plans.as_ref().unwrap().world.surface_marks.len(), "transparent_receiver_marks":frame.main.plans.as_ref().unwrap().world.receiver_marks.len(),
+                "main_camera_position":self.uniforms.camera_position, "main_fog_color":self.uniforms.fog_color, "main_fog":{"start":self.uniforms.fog.start,"end":self.uniforms.fog.end,"max_density":self.uniforms.fog.max_density,"mode":self.uniforms.fog.mode}, "main_clip_plane":main_uniforms.clip_plane, "main_visibility_state":format!("{:?}",frame.main.visibility.tracker.state),
+                "main_preparation":preparation_diagnostics(&frame.main),
+                "surface_mark_metadata_bytes":frame.marks.buffer.size(), "world_surface_marks":frame.main.plans.as_ref().unwrap().world.surface_mark_count(), "transparent_receiver_marks":frame.main.plans.as_ref().unwrap().world.receiver_mark_count(),
                 "estimated_target_bytes":bytes,"composition":"planar depth occludes main transparency; clipped refraction includes below-plane transparency"
             });
         }
@@ -600,17 +705,29 @@ pub struct ModelPipeline {
 impl shader::Pipeline for ModelPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self {
-            resources: RenderResources::new(device, queue, format),
-            uploads: UploadCache::default(),
+            resources: RenderResources::new(device, queue, format, None),
+            uploads: UploadCache::new(None),
+            frames: Vec::new(),
+        }
+    }
+    fn new_with_capabilities(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        capabilities: &wgpu::DownlevelCapabilities,
+    ) -> Self {
+        Self {
+            resources: RenderResources::new(device, queue, format, Some(capabilities)),
+            uploads: UploadCache::new(Some(capabilities)),
             frames: Vec::new(),
         }
     }
     fn trim(&mut self) {
-        self.uploads.trim();
         self.frames.retain(|frame| frame.live);
         for frame in &mut self.frames {
             frame.live = false;
         }
+        self.uploads.trim();
     }
 }
 

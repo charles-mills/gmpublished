@@ -5,11 +5,20 @@ struct ModelLocalLight {
     attenuation:vec4<f32>,
     spot:vec4<f32>,
 };
-struct ModelLightingContext {
+struct ModelLightingState {
     ambient:array<vec4<f32>,6>,
     lights:array<ModelLocalLight,4>,
     counts:vec4<u32>,
 };
+struct ModelLightingContext {
+    full:ModelLightingState,
+    compiled_vertex:ModelLightingState,
+};
+fn model_lighting_state(index:u32,flags:u32)->ModelLightingState {
+    let context=model_lighting_contexts[index];
+    if (flags&LIGHTING_COMPILED_VERTEX)!=0u {return context.compiled_vertex;}
+    return context.full;
+}
 @group(0) @binding(7) var<storage,read> model_lighting_contexts:array<ModelLightingContext>;
 struct ModelMaterial {
     skin:u32,normal:u32,features:u32,lighting:u32,
@@ -20,7 +29,8 @@ struct ModelMaterial {
 @group(1) @binding(17) var model_exponent:texture_2d_array<f32>;
 @group(1) @binding(18) var model_diffuse_warp:texture_2d_array<f32>;
 @group(1) @binding(19) var model_specular_warp:texture_2d_array<f32>;
-@group(1) @binding(20) var model_warp_sampler:sampler;
+@group(1) @binding(20) var model_diffuse_warp_sampler:sampler;
+@group(1) @binding(29) var model_specular_warp_sampler:sampler;
 
 fn model_light_direction(light:ModelLocalLight,position:vec3<f32>)->vec3<f32> {
     let delta=light.position_kind.xyz-position;

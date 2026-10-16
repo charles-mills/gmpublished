@@ -89,10 +89,7 @@ pub(super) struct MapBsp {
     pub(super) static_props: Option<StaticProps>,
     pub(super) detail_props: Option<DetailProps>,
     pub(super) cubemap_samples: Vec<bsp::CubemapSample>,
-    /// The raw pakfile lump bytes; parsed on demand via
-    /// [`ZipReader`](vformats::bsp::ZipReader)
-    /// (its reader borrows, so it cannot be stored on `Self`).
-    pub(super) pakfile_bytes: Vec<u8>,
+    pub(super) pakfile_bytes: std::sync::Arc<[u8]>,
 }
 
 impl MapBsp {
@@ -173,7 +170,7 @@ impl MapBsp {
             static_props = bsp.static_props(limits);
             detail_props = bsp.detail_props(limits);
             cubemap_samples = bsp.cubemap_samples(limits);
-            pakfile_bytes = Ok::<_, BspError>(bsp.lump(ids::PAKFILE).unwrap_or_default().to_vec());
+            pakfile_bytes = Ok::<_, BspError>(std::sync::Arc::from(bsp.lump(ids::PAKFILE).unwrap_or_default()));
         }
 
         let entities = entities

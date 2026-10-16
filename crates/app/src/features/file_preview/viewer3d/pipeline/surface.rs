@@ -1,4 +1,4 @@
-use crate::bridge::materials::{SurfaceFamily, SurfaceMaterial};
+use crate::bridge::materials::{SourceSurfaceBaseBlend, SurfaceFamily, SurfaceMaterial};
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,6 +25,15 @@ impl From<SurfaceFamily> for SurfaceShaderKind {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SurfaceBlendUniform {
+    pub base_mode: u32,
+    pub masked: u32,
+    pub modulation: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SurfaceUniform {
     pub flags: [u32; 4],
     pub modulation: [f32; 4],
@@ -39,6 +48,7 @@ pub struct SurfaceUniform {
     pub emission_fresnel: [f32; 4],
     pub blend_s: [f32; 4],
     pub blend_t: [f32; 4],
+    pub blend: SurfaceBlendUniform,
     pub state: [u32; 4],
     pub misc: [f32; 4],
     pub env_flags: [u32; 4],
@@ -93,6 +103,12 @@ impl SurfaceUniform {
             emission_fresnel: [1.0, 0.0, 1.0, 1.0],
             blend_s: identity[0],
             blend_t: identity[1],
+            blend: SurfaceBlendUniform {
+                base_mode: SourceSurfaceBaseBlend::Single as u32,
+                masked: 0,
+                modulation: 0,
+                padding: 0,
+            },
             state: [0; 4],
             misc: [0.5, 0.0, 0.0, 0.0],
             env_flags: [0; 4],
@@ -181,9 +197,12 @@ impl SurfaceUniform {
                 result.emission_fresnel = [1.0 - bias, bias, exponent, maximum];
             }
         }
-        result.flags[3] = u32::from(
-            surface.blend_modulation.is_some() && surface.family == SurfaceFamily::Transition,
-        );
+        result.blend = SurfaceBlendUniform {
+            base_mode: surface.base_blend as u32,
+            masked: u32::from(surface.masked_blending),
+            modulation: u32::from(surface.uses_blend_modulation(base_has_alpha)),
+            padding: 0,
+        };
         result.blend_s = surface.blend_mask_transform[0];
         result.blend_t = surface.blend_mask_transform[1];
         if let Some(envmap) = &surface.envmap {
@@ -239,7 +258,7 @@ impl SurfaceUniform {
                     result.env_params[0] = if contrast == 1.0 { 1.0 } else { 0.0 };
                     result.env_params[1] = 1.0;
                 }
-                if result.flags[3] != 0 {
+                if result.blend.modulation != 0 {
                     result.env_params[..2].copy_from_slice(&[0.0, 1.0]);
                 }
             }
@@ -257,7 +276,6 @@ impl SurfaceUniform {
         }
         let alpha_mask = surface.base_alpha_is_mask(base_has_alpha);
         result.state[0] = u32::from(surface.alpha_test && !alpha_mask);
-        result.state[1] = u32::from(surface.masked_blending);
         result.state[2] = u32::from(surface.blend_tint_by_base_alpha);
         result.state[3] =
             u32::from(surface.additive && !surface.translucent && !surface.vertex_alpha);
@@ -303,6 +321,50 @@ mod tests {
                 "{name}"
             );
         }
+        for (name, kind) in [
+            ("BASE_BLEND_SINGLE", SourceSurfaceBaseBlend::Single),
+            (
+                "BASE_BLEND_VERTEX_ALPHA",
+                SourceSurfaceBaseBlend::VertexAlpha,
+            ),
+            ("BASE_BLEND_MASKED", SourceSurfaceBaseBlend::Masked),
+        ] {
+            let constant = module
+                .constants
+                .iter()
+                .find_map(|(_, constant)| {
+                    (constant.name.as_deref() == Some(name)).then_some(constant)
+                })
+                .unwrap();
+            assert!(
+                matches!(module.global_expressions[constant.init], naga::Expression::Literal(naga::Literal::U32(actual)) if actual == kind as u32),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_blend_and_masked_normal_weights_are_independent() {
+        let mut material = SurfaceMaterial {
+            family: SurfaceFamily::Lightmapped,
+            masked_blending: true,
+            ..SurfaceMaterial::default()
+        };
+        let single = SurfaceUniform::new(Some(&material), None, None);
+        assert_eq!(
+            single.blend.base_mode,
+            SourceSurfaceBaseBlend::Single as u32
+        );
+        assert_eq!(single.blend.masked, 1);
+        assert_eq!(single.blend.modulation, 0);
+        material.base_blend = SourceSurfaceBaseBlend::Masked;
+        let secondary = SurfaceUniform::new(Some(&material), None, None);
+        assert_eq!(
+            secondary.blend.base_mode,
+            SourceSurfaceBaseBlend::Masked as u32
+        );
+        assert_eq!(secondary.blend.masked, 1);
+        assert_eq!(secondary.blend.modulation, 0);
     }
 
     #[test]
@@ -378,6 +440,7 @@ mod tests {
             ),
             ("blend_s", offset_of!(SurfaceUniform, blend_s)),
             ("blend_t", offset_of!(SurfaceUniform, blend_t)),
+            ("blend", offset_of!(SurfaceUniform, blend)),
             ("state", offset_of!(SurfaceUniform, state)),
             ("misc", offset_of!(SurfaceUniform, misc)),
             ("env_flags", offset_of!(SurfaceUniform, env_flags)),

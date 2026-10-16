@@ -1,5 +1,3 @@
-//! Main sampling is fixed at resource creation; optical attachments use one sample.
-
 pub(in crate::features::file_preview::viewer3d) fn scene_sample_count() -> u32 {
     #[cfg(feature = "map-capture")]
     {

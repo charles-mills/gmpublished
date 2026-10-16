@@ -1,16 +1,70 @@
-use super::{Arc, ContentPath, Limits, MaterialResolver, ResolvedTextureMip, texture_path};
+#[cfg(any(test, feature = "map-capture"))]
+use super::ResidentTextureMip;
+#[cfg(test)]
+use super::ResolvedTextureMip;
+
+use super::{
+    Arc, MaterialResolver, ResidentTexture, TextureAssetError, TextureLoadOutcome, TextureMetadata,
+    texture_path,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedTextureFrames {
-    pub flags: u32,
-    /// Unconverted RGBA bytes and stored mip chains, one layer per animation frame.
-    pub frames: Vec<Vec<ResolvedTextureMip>>,
+    resident: super::TextureResidency,
+    source_metadata: Option<Arc<TextureMetadata>>,
+    load_outcome: TextureLoadOutcome,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct DecodedFramesKey {
-    path: ContentPath,
-    max_dimension: Option<u32>,
+impl DecodedTextureFrames {
+    #[cfg(test)]
+    pub(crate) fn from_rgba(
+        flags: u32,
+        frames: Vec<Vec<ResolvedTextureMip>>,
+    ) -> Result<Self, TextureAssetError> {
+        let resident =
+            super::texture_asset::generated_rgba("material-data-fallback", Some(flags), frames)?;
+        let source_metadata = resident.metadata_arc();
+        Ok(Self {
+            resident: super::TextureResidency::Resident(resident),
+            source_metadata: Some(source_metadata),
+            load_outcome: TextureLoadOutcome::Generated,
+        })
+    }
+    fn unavailable(metadata: Option<Arc<TextureMetadata>>, outcome: TextureLoadOutcome) -> Self {
+        let placeholder = super::ResolvedTexture::unavailable(metadata.clone(), outcome);
+        Self {
+            resident: placeholder.resident,
+            source_metadata: metadata,
+            load_outcome: outcome,
+        }
+    }
+    pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
+        self.resident.resident()
+    }
+    pub(crate) fn flags(&self) -> u32 {
+        self.source_metadata()
+            .and_then(|metadata| metadata.flags)
+            .unwrap_or(0)
+    }
+    pub(crate) fn frame_count(&self) -> usize {
+        (self.resident.id().frames.end - self.resident.id().frames.start) as usize
+    }
+    #[cfg(any(test, feature = "map-capture"))]
+    pub(crate) fn frame(&self, index: usize) -> Option<&[ResidentTextureMip]> {
+        let frame = self
+            .resident
+            .id()
+            .frames
+            .start
+            .checked_add(u32::try_from(index).ok()?)?;
+        Some(&self.resident()?.layer(frame, 0)?.mips)
+    }
+    pub(crate) fn source_metadata(&self) -> Option<&TextureMetadata> {
+        self.source_metadata.as_deref()
+    }
+    pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
+        self.load_outcome
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -64,82 +118,71 @@ impl MaterialResolver {
         name: &str,
     ) -> Option<Arc<DecodedTextureFrames>> {
         let path = texture_path(name)?;
-        let key = DecodedFramesKey {
-            path: path.clone(),
-            max_dimension: self.config.decoded_texture_max_dimension,
+        let selected = match self.selected_texture_asset(&path) {
+            Ok(selected) => selected,
+            Err(super::TextureSourceError::Preparation { .. }) => {
+                return Some(Arc::new(DecodedTextureFrames::unavailable(
+                    None,
+                    TextureLoadOutcome::Unplanned,
+                )));
+            }
+            Err(
+                super::TextureSourceError::EncodedBudget { metadata, .. }
+                | super::TextureSourceError::WorkingBudget { metadata, .. },
+            ) => {
+                return Some(Arc::new(DecodedTextureFrames::unavailable(
+                    metadata,
+                    TextureLoadOutcome::SourceBudgetRejected,
+                )));
+            }
+            Err(super::TextureSourceError::Missing) => return None,
+            Err(error) => {
+                log::warn!("material data texture {path}: {error}");
+                return None;
+            }
         };
-        if let Some(decoded) = self.shared.frame_texture_cache.lock().get(&key).cloned() {
-            return Some(decoded);
-        }
-        self.find_entry_by_source(std::slice::from_ref(&path), |_, bytes| {
-            let limits = Limits::default();
-            let vtf = vformats::vtf::parse(&bytes, &limits).ok()?;
-            if vtf.frame_count() == 0 || vtf.frame_count() > 128 {
-                log::warn!("decoded texture {name}: invalid or excessive animation frame count");
-                return None;
+        let source_metadata = selected.asset.metadata_arc();
+        let (resident, load_outcome) = match self.resident_texture(
+            &selected,
+            0..1,
+            !self.bc_textures_enabled(),
+        ) {
+            Ok(resident) => {
+                let outcome = resident.load_outcome();
+                (resident, outcome)
             }
-            let max = self
-                .config
-                .decoded_texture_max_dimension
-                .unwrap_or(u32::MAX)
-                .max(1);
-            let mut first_mip = 0;
-            while (vtf.width() >> first_mip).max(vtf.height() >> first_mip) > max
-                && first_mip + 1 < vtf.mip_count()
-            {
-                first_mip += 1;
-            }
-            if (vtf.width() >> first_mip).max(vtf.height() >> first_mip) > max {
-                log::warn!(
-                    "decoded texture {name}: no stored mip satisfies the texture dimension limit"
-                );
-                return None;
-            }
-            let estimate = (first_mip..vtf.mip_count())
-                .map(|mip| {
-                    u64::from((vtf.width() >> mip).max(1))
-                        * u64::from((vtf.height() >> mip).max(1))
-                        * 4
-                        * u64::from(vtf.frame_count())
-                })
-                .sum::<u64>();
-            if estimate > 64 * 1024 * 1024 {
-                log::warn!("decoded texture {name}: decoded animation exceeds 64 MiB");
-                return None;
-            }
-            let mut frames = Vec::new();
-            let mut byte_len = 0_usize;
-            for frame in 0..vtf.frame_count() {
-                let mut mips = Vec::new();
-                for mip in first_mip..vtf.mip_count() {
-                    let image = vtf.decode_rgba(frame, 0, mip, &limits).ok()?;
-                    byte_len = byte_len.checked_add(image.rgba.len())?;
-                    mips.push(ResolvedTextureMip {
-                        rgba: image.rgba,
-                        width: image.width,
-                        height: image.height,
-                    });
+            Err(error) => {
+                log::warn!("material data texture {path}: {error}");
+                if matches!(&error,TextureAssetError::Vtf(error) if super::native_invalid_texture(error))
+                {
+                    return None;
                 }
-                frames.push(mips);
+                let outcome = match error {
+                    TextureAssetError::DimensionLimit(_)
+                    | TextureAssetError::Budget
+                    | TextureAssetError::ResidentImageBudget { .. }
+                    | TextureAssetError::WorkingLimit { .. }
+                    | TextureAssetError::ImageCount(_)
+                    | TextureAssetError::Vtf(vformats::vtf::VtfError::DecodedTooLarge { .. }) => {
+                        TextureLoadOutcome::QualityRejected
+                    }
+                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
+                        TextureLoadOutcome::Unplanned
+                    }
+                    _ => TextureLoadOutcome::Unsupported,
+                };
+                let placeholder = super::ResolvedTexture::unavailable(
+                    Some(Arc::clone(&source_metadata)),
+                    outcome,
+                );
+                (placeholder.resident, outcome)
             }
-            let mut cache = self.shared.frame_texture_cache.lock();
-            if let Some(cached) = cache.get(&key) {
-                return Some(Arc::clone(cached));
-            }
-            if let Some(budget) = &self.config.decoded_texture_budget
-                && !budget.try_reserve(byte_len)
-            {
-                log::warn!("decoded texture {name}: texture budget exhausted");
-                return None;
-            }
-            let decoded = Arc::new(DecodedTextureFrames {
-                flags: vtf.flags(),
-                frames,
-            });
-            cache.insert(key.clone(), Arc::clone(&decoded));
-            drop(cache);
-            Some(decoded)
-        })
+        };
+        Some(Arc::new(DecodedTextureFrames {
+            resident,
+            source_metadata: Some(source_metadata),
+            load_outcome,
+        }))
     }
 }
 

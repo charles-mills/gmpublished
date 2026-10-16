@@ -4,13 +4,18 @@ use super::{RenderResources, ViewerScene, wgpu};
 pub struct Resources {
     pub pipeline: wgpu::RenderPipeline,
     pub layout: wgpu::BindGroupLayout,
-    normal_sampler: wgpu::Sampler,
     scene_sampler: wgpu::Sampler,
 }
 
 #[derive(Debug)]
+pub struct Texture {
+    pub view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
+}
+
+#[derive(Debug)]
 pub struct Frame {
-    name: String,
+    texture: std::sync::Arc<Texture>,
     uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
 }
@@ -112,15 +117,6 @@ impl Resources {
             multiview: None,
             cache: None,
         });
-        let normal_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("file_preview.underwater.normal_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("file_preview.underwater.scene_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -130,7 +126,6 @@ impl Resources {
         Self {
             pipeline,
             layout,
-            normal_sampler,
             scene_sampler,
         }
     }
@@ -162,7 +157,10 @@ pub fn prepare(
         *slot = None;
         return;
     };
-    if slot.as_ref().is_none_or(|frame| frame.name != effect.name) {
+    if slot
+        .as_ref()
+        .is_none_or(|frame| !std::sync::Arc::ptr_eq(&frame.texture, normal))
+    {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("file_preview.underwater.overlay_uniform"),
             size: std::mem::size_of::<Uniform>() as u64,
@@ -176,11 +174,11 @@ pub fn prepare(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(normal),
+                    resource: wgpu::BindingResource::TextureView(&normal.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&r.normal_sampler),
+                    resource: wgpu::BindingResource::Sampler(&normal.sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -193,7 +191,7 @@ pub fn prepare(
             ],
         });
         *slot = Some(Frame {
-            name: effect.name.clone(),
+            texture: std::sync::Arc::clone(normal),
             uniform,
             bind_group,
         });
@@ -215,7 +213,7 @@ pub fn prepare(
             effect
                 .bump_frame
                 .floor()
-                .rem_euclid(effect.normal_map.frames.len().max(1) as f32),
+                .rem_euclid(effect.normal_map.frame_count().max(1) as f32),
             f32::from(effect.blur),
             0.0,
             0.0,

@@ -6,7 +6,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
-use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
+use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::media::preview_model::ModelVertex;
 use gmpublished_domain::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
 use vformats::vtf::BcFormat;
@@ -26,6 +26,7 @@ pub(super) mod capture;
 mod doors;
 mod draw_plan;
 mod pipeline;
+mod source_camera;
 #[cfg(test)]
 mod test_support;
 mod texture;
@@ -39,10 +40,7 @@ use doors::{
 use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem, prepare_draw_plans};
 use pipeline::ModelPrimitive;
 use pipeline::Uniforms;
-use texture::{
-    TextureUploadLevel, bc_mip_is_valid, bc_texture_format, decode_bc_texture,
-    write_bc_texture_level, write_texture_level,
-};
+use texture::TextureUploadLevel;
 
 pub(super) const MODEL_SHADER_SOURCE: &str = concat!(
     include_str!("view_uniforms.wgsl"),
@@ -118,7 +116,6 @@ const MSAA_SAMPLE_COUNT: u32 = 4;
 pub(super) fn scene_sample_count() -> u32 {
     pipeline::sampling::scene_sample_count()
 }
-const MATERIAL_ANISOTROPY_CLAMP: u16 = 16;
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
 const DETAIL_VERTEX_FLOAT_COUNT: u64 = 14;

@@ -360,9 +360,9 @@ impl Frame {
                     }
                 }
             }
-            let (world_rect, world_depth) = proxy(world, sun.direction_to_sun, targets.size);
+            let (world_rect, world_depth) = proxy(&world, sun.direction_to_sun, targets.size);
             let (sky_rect, sky_depth) = skybox.map_or(([0.0; 4], 0.0), |uniforms| {
-                proxy(uniforms, sun.direction_to_sun, targets.size)
+                proxy(&uniforms, sun.direction_to_sun, targets.size)
             });
             let color = |v: Vec3| [v[0], v[1], v[2], 1.0];
             let params = Params {
@@ -490,7 +490,7 @@ impl Frame {
     }
 }
 
-fn proxy(uniforms: Uniforms, direction: Vec3, size: (u32, u32)) -> ([f32; 4], f32) {
+fn proxy(uniforms: &Uniforms, direction: Vec3, size: (u32, u32)) -> ([f32; 4], f32) {
     let matrix = uniforms.view_proj;
     let row = |i| Vec3::new(matrix[0][i], matrix[1][i], matrix[2][i]);
     let forward = row(3).normalize_or_zero();

@@ -26,12 +26,24 @@ pub(super) fn activate(
             .and_then(|id| contexts.get(id.index())) else {
                 continue;
             };
-            if context.source.runtime_seed().is_none()
-                || (!context.entity
-                    && context.compiled_lighting
-                    && !surface.model_shading_profile().requires_runtime_lighting())
-            {
+            let compiled = vertex.lighting_mode
+                & crate::media::preview_model::vertex_lighting::COMPILED_VERTEX
+                != 0
+                && !surface.model_shading_profile().requires_runtime_lighting();
+            let available = if compiled {
+                context
+                    .compiled_supplement
+                    .as_ref()
+                    .is_some_and(Result::is_ok)
+            } else {
+                context.source.runtime_seed().is_some()
+            };
+            if !available {
                 continue;
+            }
+            if !compiled {
+                vertex.lighting_mode &=
+                    !crate::media::preview_model::vertex_lighting::COMPILED_VERTEX;
             }
             vertex.lighting_mode &= !(crate::media::preview_model::vertex_lighting::PREVIEW
                 | crate::media::preview_model::vertex_lighting::LEGACY_VERTEX_COLOR);

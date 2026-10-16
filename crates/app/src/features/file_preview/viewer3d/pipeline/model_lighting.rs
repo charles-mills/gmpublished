@@ -133,10 +133,44 @@ impl From<&ModelLocalLight> for GpuModelLight {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct GpuModelContext {
+pub(super) struct GpuLightingState {
     ambient: [[f32; 4]; 6],
     lights: [GpuModelLight; crate::media::preview_model::MODEL_LOCAL_LIGHT_LIMIT],
     counts: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub(super) struct GpuModelContext {
+    full: GpuLightingState,
+    compiled_vertex: GpuLightingState,
+}
+
+fn encode_snapshot(
+    context: &ModelLightingContext,
+    snapshot: &crate::media::preview_model::ModelLightingSnapshot,
+) -> GpuLightingState {
+    let lights = snapshot.lights.as_slice();
+    assert!(
+        lights.len() <= crate::media::preview_model::MODEL_LOCAL_LIGHT_LIMIT,
+        "model context exceeds native local-light slots"
+    );
+    let mut item = GpuLightingState {
+        ambient: snapshot
+            .ambient_cube
+            .colors
+            .map(|rgb| [rgb[0], rgb[1], rgb[2], 0.0]),
+        counts: [lights.len() as u32, 0, 0, 0],
+        ..GpuLightingState::default()
+    };
+    for (target, light) in item.lights.iter_mut().zip(lights) {
+        *target = light.into();
+        if light.kind == ModelLightKind::Directional {
+            let position = context.lighting_origin - light.direction * DIRECTIONAL_PIXEL_DISTANCE;
+            target.position_kind[..3].copy_from_slice(&position.to_array());
+        }
+    }
+    item
 }
 
 pub(super) fn encode(
@@ -204,28 +238,14 @@ pub(super) fn encode_into(
             }
             None => context.source.fallback_snapshot(),
         };
-        let ambient = &snapshot.ambient_cube;
-        let lights = snapshot.lights.as_slice();
-        assert!(
-            lights.len() <= crate::media::preview_model::MODEL_LOCAL_LIGHT_LIMIT,
-            "model context exceeds native local-light slots"
-        );
-        let mut item = GpuModelContext {
-            ambient: ambient.colors.map(|rgb| [rgb[0], rgb[1], rgb[2], 0.0]),
-            counts: [lights.len() as u32, 0, 0, 0],
-            ..GpuModelContext::default()
-        };
-        for (target, light) in item.lights.iter_mut().zip(lights) {
-            *target = light.into();
-            if light.kind == ModelLightKind::Directional {
-                // ShaderAPI uploads a finite light position to pixel shaders;
-                // its vertex-light constants use the direction independently.
-                let position =
-                    context.lighting_origin - light.direction * DIRECTIONAL_PIXEL_DISTANCE;
-                target.position_kind[..3].copy_from_slice(&position.to_array());
-            }
-        }
-        data.push(item);
+        let compiled_vertex = context
+            .evaluate_compiled_supplement(styles)
+            .map(|snapshot| encode_snapshot(context, &snapshot))
+            .unwrap_or_default();
+        data.push(GpuModelContext {
+            full: encode_snapshot(context, snapshot),
+            compiled_vertex,
+        });
     }
 }
 
@@ -284,8 +304,8 @@ mod tests {
             Some(&mut histories),
             Some(&[true, false]),
         );
-        assert_eq!(data[1].ambient[0][0], (-2.0_f32).exp());
-        assert_eq!(data[2].ambient[0][0], 1.0);
+        assert_eq!(data[1].full.ambient[0][0], (-2.0_f32).exp());
+        assert_eq!(data[2].full.ambient[0][0], 1.0);
         assert_eq!(histories[1], hidden_history);
     }
 
@@ -314,7 +334,25 @@ mod tests {
             ("LIGHTING_RUNTIME_CONTEXT", vertex_lighting::RUNTIME_CONTEXT),
             ("LIGHTING_MODEL_DRAW", vertex_lighting::MODEL_DRAW),
             ("LIGHTING_LIGHTMAP", vertex_lighting::LIGHTMAP),
+            (
+                "LIGHTING_RECEIVER_LIGHTMAP",
+                vertex_lighting::RECEIVER_LIGHTMAP,
+            ),
+            (
+                "LIGHTING_RECEIVER_CONSTANT",
+                vertex_lighting::RECEIVER_CONSTANT,
+            ),
             ("LIGHTING_PREVIEW", vertex_lighting::PREVIEW),
+            ("LIGHTING_COMPILED_VERTEX", vertex_lighting::COMPILED_VERTEX),
+            ("LIGHTING_WORLD_CONSTANT", vertex_lighting::WORLD_CONSTANT),
+            (
+                "LIGHTING_BATCHED_STATIC_DECAL",
+                vertex_lighting::BATCHED_STATIC_DECAL,
+            ),
+            (
+                "LIGHTING_DIRECTIONAL_LIGHTMAP_BLACK",
+                vertex_lighting::DIRECTIONAL_LIGHTMAP_BLACK,
+            ),
             (
                 "LIGHTING_LEGACY_VERTEX_COLOR",
                 vertex_lighting::LEGACY_VERTEX_COLOR,
@@ -342,9 +380,17 @@ mod tests {
                 "ModelLightingContext",
                 size_of::<GpuModelContext>(),
                 vec![
-                    offset_of!(GpuModelContext, ambient),
-                    offset_of!(GpuModelContext, lights),
-                    offset_of!(GpuModelContext, counts),
+                    offset_of!(GpuModelContext, full),
+                    offset_of!(GpuModelContext, compiled_vertex),
+                ],
+            ),
+            (
+                "ModelLightingState",
+                size_of::<GpuLightingState>(),
+                vec![
+                    offset_of!(GpuLightingState, ambient),
+                    offset_of!(GpuLightingState, lights),
+                    offset_of!(GpuLightingState, counts),
                 ],
             ),
             (

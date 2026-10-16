@@ -24,7 +24,14 @@ fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
 
 pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {
     MapPreview {
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
         surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
         water_volumes: None,
         entity_meshes: Vec::new(),
         skybox_entity_meshes: Vec::new(),

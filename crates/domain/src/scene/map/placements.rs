@@ -1,8 +1,9 @@
 use super::{
-    BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropSolid, MapPropVisibility,
-    MapVisibilityBucket, SkyboxPartition, StaticProp, StaticPropPlacement, cluster_in_range,
-    normalize_entity_prop_model_path, normalize_static_prop_model_path, parse_entity_bool,
-    parse_entity_float, parse_entity_i32, parse_entity_vec3, point_visibility_bucket,
+    BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropLeafMembership, MapPropSolid,
+    MapPropVisibility, MapVisibilityBucket, SkyboxPartition, StaticProp, StaticPropPlacement,
+    cluster_in_range, normalize_entity_prop_model_path, normalize_static_prop_model_path,
+    parse_entity_bool, parse_entity_float, parse_entity_i32, parse_entity_vec3,
+    point_visibility_bucket,
 };
 use crate::math::Vec3;
 
@@ -26,7 +27,8 @@ pub struct MapDetailSprite {
     pub origin: Vec3,
     pub angles: Vec3,
     pub orientation: u8,
-    /// Source partitions water detail rendering by the authored BSP leaf.
+    pub fast_eligible: bool,
+    pub leaf_index: u16,
     pub underwater_leaf: bool,
     pub upper_left: [f32; 2],
     pub lower_right: [f32; 2],
@@ -47,7 +49,8 @@ pub(super) fn partitioned_static_prop_placements(
         .enumerate()
         .filter_map(|(index, prop)| {
             let origin = prop.origin;
-            let visibility = static_prop_leaf_visibility(bsp, prop, cluster_count);
+            let leaves = static_prop_render_leaves(bsp, prop);
+            let visibility = static_prop_leaf_visibility(bsp, prop, &leaves, cluster_count);
             Some(StaticPropPlacement {
                 entity: false,
                 static_prop_index: Some(index),
@@ -69,6 +72,7 @@ pub(super) fn partitioned_static_prop_placements(
                     .filter(|scale| scale.is_finite() && *scale > 0.0)
                     .unwrap_or(1.0),
                 solid: static_prop_solid(prop.solid),
+                leaf_membership: MapPropLeafMembership::Compiled(leaves),
                 visibility,
             })
         })
@@ -81,27 +85,37 @@ pub(super) fn partitioned_static_prop_placements(
     (visible, skybox)
 }
 
-fn static_prop_leaf_visibility(
-    bsp: &MapBsp,
-    prop: &StaticProp,
-    cluster_count: u32,
-) -> MapPropVisibility {
+fn static_prop_render_leaves(bsp: &MapBsp, prop: &StaticProp) -> Vec<u16> {
     let model = bsp.static_prop_model(prop);
     let leaf_count = usize::from(prop.leaf_count);
     if leaf_count == 0 {
         log::debug!(
-            "bsp static prop {model} at {:?} has empty leaf list: using Always",
+            "bsp static prop {model} at {:?} has empty leaf list: not registered",
             prop.origin
         );
-        return MapPropVisibility::Always;
+        return Vec::new();
     }
     let Some(prop_leaves) = bsp.static_prop_leaves(prop) else {
         log::debug!(
-            "bsp static prop {model} leaf list out of range first={} count={leaf_count}: using Always",
+            "bsp static prop {model} leaf list out of range first={} count={leaf_count}: not registered",
             prop.first_leaf
         );
-        return MapPropVisibility::Always;
+        return Vec::new();
     };
+    prop_leaves.to_vec()
+}
+
+fn static_prop_leaf_visibility(
+    bsp: &MapBsp,
+    prop: &StaticProp,
+    prop_leaves: &[u16],
+    cluster_count: u32,
+) -> MapPropVisibility {
+    if prop_leaves.is_empty() {
+        return MapPropVisibility::Always;
+    }
+    let model = bsp.static_prop_model(prop);
+    let leaf_count = prop_leaves.len();
     let mut clusters = BTreeSet::<u32>::new();
     let mut invalid_clusters = 0_usize;
     for leaf_index in prop_leaves {
@@ -233,6 +247,7 @@ fn entity_prop_placement(
         skin,
         scale,
         solid,
+        leaf_membership: MapPropLeafMembership::SpatialBounds,
         visibility: point_visibility_bucket(bsp, origin, cluster_count).into(),
     })
 }
@@ -327,6 +342,15 @@ fn detail_sprite_scale(scale: f32) -> f32 {
     }
 }
 
+fn detail_sprite_fast_eligible(prop: &vformats::bsp::DetailProp) -> bool {
+    prop.prop_type == DETAIL_PROP_TYPE_SPRITE
+        && prop.light_style_count == 0
+        && prop.orientation == 2
+        && prop.shape_angle == 0
+        && prop.shape_size == 0
+        && prop.sway_amount == 0
+}
+
 pub(super) fn partitioned_detail_sprite_placements(
     bsp: &MapBsp,
     partition: &SkyboxPartition,
@@ -336,7 +360,6 @@ pub(super) fn partitioned_detail_sprite_placements(
     let mut skybox = Vec::new();
     let cluster_count = bsp.cluster_count();
     for prop in bsp.detail_props_iter() {
-        // vformats prop_type is vbsp detail_type; model_index is vbsp prop_type.
         if prop.prop_type != DETAIL_PROP_TYPE_SPRITE {
             continue;
         }
@@ -355,6 +378,8 @@ pub(super) fn partitioned_detail_sprite_placements(
             origin: Vec3::from(prop.origin),
             angles: Vec3::from(prop.angles),
             orientation: prop.orientation,
+            fast_eligible: detail_sprite_fast_eligible(prop),
+            leaf_index: prop.leaf,
             underwater_leaf: bsp
                 .leaves
                 .get(usize::from(prop.leaf))
@@ -376,3 +401,7 @@ pub(super) fn partitioned_detail_sprite_placements(
     }
     (visible, skybox)
 }
+
+#[cfg(test)]
+#[path = "placements/tests.rs"]
+mod tests;

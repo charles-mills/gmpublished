@@ -129,30 +129,28 @@ impl MaterialResolver {
         controller: Option<&MapSkyPaint>,
     ) -> Option<SkyMaterial> {
         let path = ContentPath::new(path)?;
-        self.find_entry_by_source(std::slice::from_ref(&path), |path, bytes| {
-            let text = String::from_utf8_lossy(&bytes);
-            let material = self.effective_material(&text, 0, &mut vec![path.clone()])?;
-            let paint_proxy = material
-                .proxies
-                .iter()
-                .any(|proxy| proxy.name.eq_ignore_ascii_case("skypaint"));
-            Some(SkyMaterial {
-                shader: material.shader.clone(),
-                texture: material
-                    .parameter("$basetexture")
-                    .and_then(|name| self.resolve_texture(name, false)),
-                color: material
-                    .parameter("$color")
-                    .and_then(parse_material_color)
-                    .unwrap_or(Vec3::splat(1.0)),
-                transform: super::parameters::texture_transform(
-                    material.parameter("$basetexturetransform"),
-                ),
-                paint_proxy,
-                painted: material.shader.eq_ignore_ascii_case("g_sky").then(|| {
-                    PaintedSkyMaterial::resolve(&material, controller.filter(|_| paint_proxy), self)
-                }),
-            })
+        let definition = self.material_definition(std::slice::from_ref(&path))?;
+        let material = &definition.material;
+        let paint_proxy = material
+            .proxies
+            .iter()
+            .any(|proxy| proxy.name.eq_ignore_ascii_case("skypaint"));
+        Some(SkyMaterial {
+            shader: material.shader.clone(),
+            texture: material
+                .parameter("$basetexture")
+                .and_then(|name| self.with_single_texture_mip().resolve_texture(name)),
+            color: material
+                .parameter("$color")
+                .and_then(parse_material_color)
+                .unwrap_or(Vec3::splat(1.0)),
+            transform: super::parameters::texture_transform(
+                material.parameter("$basetexturetransform"),
+            ),
+            paint_proxy,
+            painted: material.shader.eq_ignore_ascii_case("g_sky").then(|| {
+                PaintedSkyMaterial::resolve(material, controller.filter(|_| paint_proxy), self)
+            }),
         })
     }
 }

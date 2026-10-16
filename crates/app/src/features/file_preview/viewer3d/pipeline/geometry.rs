@@ -107,6 +107,118 @@ impl ViewerOverlay {
 }
 
 impl ViewerScene {
+    pub fn brush_origin(
+        &self,
+        mesh_index: usize,
+        owner: gmpublished_domain::scene::map::MapSurfaceOwner,
+    ) -> Vec3 {
+        self.brush_point(mesh_index, owner, Vec3::ZERO)
+    }
+
+    pub fn brush_point(
+        &self,
+        mesh_index: usize,
+        owner: gmpublished_domain::scene::map::MapSurfaceOwner,
+        point: Vec3,
+    ) -> Vec3 {
+        use gmpublished_domain::scene::map::MapSurfaceOwner;
+        match owner {
+            MapSurfaceOwner::World => point,
+            MapSurfaceOwner::Brush { origin, angles, .. } => point.rotate_source(angles) + origin,
+            MapSurfaceOwner::Door { door_index, .. } => {
+                let door = &self
+                    .assets
+                    .map()
+                    .expect("brush doors belong to a map")
+                    .doors[door_index];
+                let pose = self.meshes[mesh_index]
+                    .deformation
+                    .as_ref()
+                    .expect("brush doors have viewer poses")
+                    .pose;
+                super::super::doors::transform_door_point(door, point, pose.progress, pose.swing)
+            }
+        }
+    }
+
+    pub fn brush_bounds(
+        &self,
+        mesh_index: usize,
+        owner: gmpublished_domain::scene::map::MapSurfaceOwner,
+        bounds: gmpublished_domain::scene::map::MapBounds,
+    ) -> gmpublished_domain::scene::map::MapBounds {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for x in [bounds.min[0], bounds.max[0]] {
+            for y in [bounds.min[1], bounds.max[1]] {
+                for z in [bounds.min[2], bounds.max[2]] {
+                    let point = self.brush_point(mesh_index, owner, Vec3::new(x, y, z));
+                    for axis in 0..3 {
+                        min[axis] = min[axis].min(point[axis]);
+                        max[axis] = max[axis].max(point[axis]);
+                    }
+                }
+            }
+        }
+        gmpublished_domain::scene::map::MapBounds { min, max }
+    }
+
+    pub fn brush_eye(
+        &self,
+        mesh_index: usize,
+        owner: gmpublished_domain::scene::map::MapSurfaceOwner,
+        eye: Vec3,
+    ) -> Vec3 {
+        use gmpublished_domain::scene::map::MapSurfaceOwner;
+        match owner {
+            MapSurfaceOwner::World => eye,
+            MapSurfaceOwner::Door { .. } => self.receiver_eye(mesh_index, eye),
+            MapSurfaceOwner::Brush { origin, angles, .. } => {
+                let basis = [
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                ]
+                .map(|axis| axis.rotate_source(angles));
+                let delta = eye - origin;
+                Vec3::new(
+                    delta.dot(basis[0]),
+                    delta.dot(basis[1]),
+                    delta.dot(basis[2]),
+                )
+            }
+        }
+    }
+
+    pub fn receiver_eye(&self, mesh_index: usize, eye: Vec3) -> Vec3 {
+        let mesh = &self.meshes[mesh_index];
+        let Some(deformation) = &mesh.deformation else {
+            return eye;
+        };
+        let door = &self
+            .assets
+            .map()
+            .expect("door geometry belongs to a map")
+            .doors[mesh.door_index.expect("door geometry has an owner")];
+        let pose = deformation.pose;
+        let origin =
+            super::super::doors::transform_door_point(door, Vec3::ZERO, pose.progress, pose.swing);
+        let delta = eye - origin;
+        let basis = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ]
+        .map(|normal| {
+            super::super::doors::transform_door_normal(door, normal, pose.progress, pose.swing)
+        });
+        Vec3::new(
+            delta.dot(basis[0]),
+            delta.dot(basis[1]),
+            delta.dot(basis[2]),
+        )
+    }
+
     pub fn new(assets: Arc<UploadedModel>) -> Self {
         let map = assets.source.map();
         let meshes = assets
@@ -128,15 +240,16 @@ impl ViewerScene {
             .overlays
             .iter()
             .map(|source| {
-                let deformation =
-                    if let gmpublished_domain::scene::map::MapSurfaceOwner::Door { door_index } =
-                        source.owner
-                    {
-                        map.and_then(|map| map.doors.get(door_index))
-                            .map(|door| DoorDeformation::new(door, source.centroid()))
-                    } else {
-                        None
-                    };
+                let deformation = if let gmpublished_domain::scene::map::MapSurfaceOwner::Door {
+                    door_index,
+                    ..
+                } = source.owner
+                {
+                    map.and_then(|map| map.doors.get(door_index))
+                        .map(|door| DoorDeformation::new(door, source.centroid()))
+                } else {
+                    None
+                };
                 ViewerOverlay {
                     source: Arc::clone(source),
                     deformation,
@@ -180,7 +293,8 @@ impl ViewerScene {
             );
         }
         for mark in &mut self.overlays {
-            let gmpublished_domain::scene::map::MapSurfaceOwner::Door { door_index } = mark.owner
+            let gmpublished_domain::scene::map::MapSurfaceOwner::Door { door_index, .. } =
+                mark.owner
             else {
                 continue;
             };

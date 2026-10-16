@@ -117,6 +117,7 @@ mod tests {
 
     fn placement(entity: bool) -> StaticPropPlacement {
         StaticPropPlacement {
+            leaf_membership: gmpublished_domain::scene::map::MapPropLeafMembership::SpatialBounds,
             entity,
             static_prop_index: None,
             lighting_origin: None,

@@ -36,7 +36,7 @@ pub(in super::super) fn map_mesh_to_model_mesh(
     mesh: &gmpublished_domain::scene::map::MapMesh,
     materials: &[MaterialSlot],
 ) -> MeshData {
-    let (width, height) = material_dimensions(materials, mesh.material_index);
+    let mapping_dimensions = material_dimensions(materials, mesh.material_index);
     MeshData {
         geometry: crate::media::preview_model::MeshGeometry::Brush,
         vertices: mesh
@@ -57,16 +57,8 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                 uv: normalize_map_uv(
                     vertex.tex_s,
                     vertex.tex_t,
-                    if vertex.texture_size[0] > 0 {
-                        vertex.texture_size[0]
-                    } else {
-                        width
-                    },
-                    if vertex.texture_size[1] > 0 {
-                        vertex.texture_size[1]
-                    } else {
-                        height
-                    },
+                    mapping_dimensions.map_or(vertex.texture_size[0], |size| size.0),
+                    mapping_dimensions.map_or(vertex.texture_size[1], |size| size.1),
                 ),
                 lightmap_uv: vertex.lightmap_uv,
                 lightmap_bump_step: vertex.lightmap_bump_step,
@@ -77,7 +69,7 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                 lighting_mode: if vertex.has_lightmap {
                     crate::media::preview_model::vertex_lighting::LIGHTMAP
                 } else {
-                    crate::media::preview_model::vertex_lighting::PREVIEW
+                    crate::media::preview_model::vertex_lighting::WORLD_CONSTANT
                 },
             })
             .collect(),

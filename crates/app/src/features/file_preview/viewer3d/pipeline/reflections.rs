@@ -23,6 +23,34 @@ pub fn target_size(size: (u32, u32), count: usize, format: wgpu::TextureFormat) 
     )
 }
 
+const GLASS_CLIP_OFFSET: f32 = 0.1;
+
+#[derive(Clone, Copy)]
+enum ReflectionSpace {
+    World,
+    Skybox,
+}
+
+fn reflection_clip_plane(
+    plane: Plane,
+    shader: &crate::bridge::materials::MaterialShader,
+    space: ReflectionSpace,
+) -> Plane {
+    if shader.water().is_some() {
+        match space {
+            ReflectionSpace::World => {
+                super::water_clip::world_plane(plane, super::water_clip::WorldWaterPass::Reflection)
+            }
+            ReflectionSpace::Skybox => plane,
+        }
+    } else {
+        Plane {
+            distance: plane.distance + GLASS_CLIP_OFFSET,
+            ..plane
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plane {
     pub normal: Vec3,
@@ -47,7 +75,7 @@ impl Plane {
     pub fn signed_distance(self, point: Vec3) -> f32 {
         self.normal.dot(point) - self.distance
     }
-    pub fn intersects_near_plane(self, uniforms: super::Uniforms) -> bool {
+    pub fn intersects_near_plane(self, uniforms: &super::Uniforms) -> bool {
         let matrix = uniforms.view_proj;
         let row = |index| Vec3::new(matrix[0][index], matrix[1][index], matrix[2][index]);
         let x = row(0);
@@ -58,7 +86,6 @@ impl Plane {
             uniforms.camera_position[1],
             uniforms.camera_position[2],
         );
-        // Minimum signed distance over the four perspective near corners.
         self.signed_distance(eye)
             + uniforms.water_depth_params[0]
                 * (self.normal.dot(forward)
@@ -86,7 +113,7 @@ impl Plane {
     pub fn same(self, other: Self) -> bool {
         self.normal.dot(other.normal) > 0.99999 && (self.distance - other.distance).abs() < 0.01
     }
-    pub fn reflect_uniforms(self, mut uniforms: Uniforms, clip: bool) -> Uniforms {
+    pub fn reflect_uniforms(self, mut uniforms: Uniforms, clip: Option<Self>) -> Uniforms {
         uniforms.view_proj = mat_mul(uniforms.view_proj, self.matrix());
         let eye = self.reflect_point(Vec3::from([
             uniforms.camera_position[0],
@@ -94,16 +121,14 @@ impl Plane {
             uniforms.camera_position[2],
         ]));
         uniforms.camera_position = [eye[0], eye[1], eye[2], 0.0];
-        uniforms.clip_plane = if clip {
+        uniforms.clip_plane = clip.map_or([0.0; 4], |plane| {
             [
-                self.normal[0],
-                self.normal[1],
-                self.normal[2],
-                -self.distance - 0.1,
+                plane.normal[0],
+                plane.normal[1],
+                plane.normal[2],
+                -plane.distance,
             ]
-        } else {
-            [0.0; 4]
-        };
+        });
         uniforms
     }
 }
@@ -135,6 +160,7 @@ impl ViewUniforms {
 }
 #[derive(Debug)]
 pub struct SceneView {
+    pub world_groups: super::transparency::WorldDrawGroups,
     pub sun: super::sun::gpu::Frame,
     pub world: ViewUniforms,
     pub sky: ViewUniforms,
@@ -143,9 +169,11 @@ pub struct SceneView {
     pub skybox_visibility: UploadedVisibility,
     pub plans: Option<DrawPlans>,
     pub targets: Option<RenderTargets>,
-    pub planar_exclusion_generation: Option<u64>,
+    pub(super) planar_indices: super::planar::Selections,
     pub transparency: Vec<super::transparency::Draw>,
     pub skybox_transparency: Vec<super::transparency::Draw>,
+    pub transparency_diagnostics: super::transparency::TransparencyDiagnostics,
+    pub skybox_transparency_diagnostics: super::transparency::TransparencyDiagnostics,
 }
 impl SceneView {
     pub fn new(
@@ -155,6 +183,7 @@ impl SceneView {
         surface_marks: &wgpu::Buffer,
     ) -> Self {
         Self {
+            world_groups: super::transparency::WorldDrawGroups::ALL,
             sun: super::sun::gpu::Frame::default(),
             world: ViewUniforms::new(device, resources, lighting, surface_marks),
             sky: ViewUniforms::new(device, resources, lighting, surface_marks),
@@ -163,9 +192,12 @@ impl SceneView {
             skybox_visibility: UploadedVisibility::default(),
             plans: None,
             targets: None,
-            planar_exclusion_generation: None,
+            planar_indices: super::planar::Selections::default(),
             transparency: Vec::new(),
             skybox_transparency: Vec::new(),
+            transparency_diagnostics: super::transparency::TransparencyDiagnostics::default(),
+            skybox_transparency_diagnostics: super::transparency::TransparencyDiagnostics::default(
+            ),
         }
     }
 }
@@ -197,36 +229,43 @@ impl Reflector {
     }
 
     pub fn intersects_view(&self, matrix: [[f32; 4]; 4]) -> bool {
-        let corners = std::array::from_fn::<_, 8, _>(|bits| {
-            let p = [
-                if bits & 1 == 0 {
-                    self.bounds_min[0]
-                } else {
-                    self.bounds_max[0]
-                },
-                if bits & 2 == 0 {
-                    self.bounds_min[1]
-                } else {
-                    self.bounds_max[1]
-                },
-                if bits & 4 == 0 {
-                    self.bounds_min[2]
-                } else {
-                    self.bounds_max[2]
-                },
-                1.0,
-            ];
-            std::array::from_fn::<_, 4, _>(|row| {
-                (0..4).map(|col| matrix[col][row] * p[col]).sum::<f32>()
-            })
-        });
-        // Conservative homogeneous AABB/frustum rejection retains near-plane
-        // crossings instead of dropping triangles whose corners are offscreen.
-        ![(0, 1.0), (0, -1.0), (1, 1.0), (1, -1.0), (2, 1.0)]
-            .iter()
-            .any(|&(axis, sign)| corners.iter().all(|p| p[axis] * sign > p[3]))
-            && !corners.iter().all(|p| p[2] < 0.0)
+        bounds_intersect_view(self.bounds_min, self.bounds_max, matrix)
     }
+}
+
+pub(super) fn bounds_intersect_view(
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    matrix: [[f32; 4]; 4],
+) -> bool {
+    let corners = std::array::from_fn::<_, 8, _>(|bits| {
+        let p = [
+            if bits & 1 == 0 {
+                bounds_min[0]
+            } else {
+                bounds_max[0]
+            },
+            if bits & 2 == 0 {
+                bounds_min[1]
+            } else {
+                bounds_max[1]
+            },
+            if bits & 4 == 0 {
+                bounds_min[2]
+            } else {
+                bounds_max[2]
+            },
+            1.0,
+        ];
+        std::array::from_fn::<_, 4, _>(|row| {
+            (0..4).map(|col| matrix[col][row] * p[col]).sum::<f32>()
+        })
+    });
+    // Retain near-plane crossings when all AABB corners are offscreen.
+    ![(0, 1.0), (0, -1.0), (1, 1.0), (1, -1.0), (2, 1.0)]
+        .iter()
+        .any(|&(axis, sign)| corners.iter().all(|p| p[axis] * sign > p[3]))
+        && !corners.iter().all(|p| p[2] < 0.0)
 }
 
 pub fn optical_passes(shader: &crate::bridge::materials::MaterialShader) -> (bool, bool) {
@@ -344,20 +383,23 @@ impl PlanarView {
             return;
         };
         let offset = primitive.raster_offset();
-        // Reflection reverses different raster axes for water and glass.
-        // Transform the half-pixel bias into the stored target orientation.
+        // Optical target orientation also reverses its half-pixel bias.
         let reflected_offset = if shader.mirror().is_some() {
             [-offset[0], offset[1]]
         } else {
             [offset[0], -offset[1]]
         };
+        let water = shader.water();
+        let clip_plane = reflection_clip_plane(surface.plane, shader, ReflectionSpace::World);
         let mut main = surface
             .plane
-            .reflect_uniforms(primitive.uniforms, true)
+            .reflect_uniforms(primitive.uniforms, Some(clip_plane))
+            .with_clip_camera(primitive.view_camera.map(|camera| {
+                camera
+                    .reflected(surface.plane, water.is_some())
+                    .expect("finite reflection camera")
+            }))
             .with_raster_offset(size, reflected_offset);
-        let water = primitive.preview.render_scene().materials[surface.material_slot]
-            .shader
-            .water();
         main.water_time_sky_tint[1..].copy_from_slice(upload.assets.sky_tint.as_array());
         view.world.write(queue, &main);
         if let Some(sky) = primitive.sky_uniforms {
@@ -368,7 +410,7 @@ impl PlanarView {
             view.sky.write(
                 queue,
                 &direction_plane
-                    .reflect_uniforms(sky, false)
+                    .reflect_uniforms(sky, None)
                     .with_raster_offset(size, reflected_offset),
             );
         }
@@ -378,12 +420,20 @@ impl PlanarView {
             let origin = primitive
                 .skybox_transform
                 .map_or(Vec3::ZERO, |(origin, _)| origin);
-            Plane {
+            let plane = Plane {
                 normal: surface.plane.normal,
                 distance: surface.plane.distance / scale + surface.plane.normal.dot(origin),
-            }
-            .reflect_uniforms(uniforms, true)
-            .with_raster_offset(size, reflected_offset)
+            };
+            let clip = reflection_clip_plane(plane, shader, ReflectionSpace::Skybox);
+            plane
+                .reflect_uniforms(uniforms, Some(clip))
+                .with_clip_camera(primitive.view_camera.map(|camera| {
+                    camera
+                        .skybox(origin, scale)
+                        .reflected(plane, water.is_some())
+                        .expect("finite sky reflection camera")
+                }))
+                .with_raster_offset(size, reflected_offset)
         });
         if let Some(skybox) = skybox {
             view.skybox.write(queue, &skybox);
@@ -407,6 +457,8 @@ impl PlanarView {
         let mut plans = prepare_draw_plans(
             upload,
             DrawPlanRequest {
+                world_view: Some(&main),
+                skybox_view: skybox.as_ref(),
                 content_id: primitive.content_id,
                 selection: DrawPlanSelection {
                     skin_remap: &primitive.skin_remap,
@@ -427,11 +479,17 @@ impl PlanarView {
             .and_then(|slot| slot.shader.water())
         {
             if !water.reflect_entities {
+                let world = std::sync::Arc::make_mut(&mut plans.world);
+                world.brushes.clear();
+                world.receiver_marks.retain(|mark| {
+                    upload.overlays[mark.overlay_index].owner
+                        == gmpublished_domain::scene::map::MapSurfaceOwner::World
+                });
                 for items in [
-                    &mut plans.world.opaque,
-                    &mut plans.world.translucent,
-                    &mut plans.world.additive,
-                    &mut plans.world.planar,
+                    &mut world.opaque,
+                    &mut world.translucent,
+                    &mut world.additive,
+                    &mut world.planar,
                 ] {
                     items.retain(|item| !upload.meshes[item.mesh_index].entity);
                 }
@@ -442,7 +500,22 @@ impl PlanarView {
         }
         let sun_skybox = skybox.filter(|_| plans.map_skybox.is_some());
         view.plans = Some(plans);
-        super::transparency::prepare(view, upload, main, skybox.as_ref(), water.map(|_| false));
+        super::transparency::prepare(
+            view,
+            upload,
+            &main,
+            skybox.as_ref(),
+            water.map(|_| super::transparency::WaterSide::Above),
+            water.is_none(),
+        );
+        super::planar::prepare(
+            view,
+            upload,
+            primitive.preview.render_scene(),
+            device,
+            queue,
+            None,
+        );
         RenderTargets::ensure(
             &mut view.targets,
             device,
@@ -466,6 +539,52 @@ impl PlanarView {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn water_reflection_keeps_shore_margin_without_moving_the_reflected_eye() {
+        use crate::bridge::materials::MaterialResolver;
+        let resolver = MaterialResolver::prop_lighting_fixture(
+            Vec::new(),
+            vec![
+                ("materials/pool.vmt", b"Water {}".to_vec()),
+                ("materials/glass.vmt", b"LightmappedReflective {}".to_vec()),
+            ],
+        );
+        let plane = Plane {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            distance: -160.0,
+        };
+        let mut uniforms = <Uniforms as bytemuck::Zeroable>::zeroed();
+        uniforms.camera_position = [0.0, 3584.0, 64.0, 0.0];
+        let water = resolver
+            .resolve_primary(&[], "pool")
+            .into_material()
+            .unwrap();
+        let clipped = reflection_clip_plane(plane, &water.shader, ReflectionSpace::World);
+        let reflected = plane.reflect_uniforms(uniforms, Some(clipped));
+        assert_eq!(reflected.camera_position, [0.0, 3584.0, -384.0, 0.0]);
+        assert_eq!(reflected.clip_plane, [0.0, 0.0, 1.0, 162.0]);
+        assert!(clipped.signed_distance(Vec3::new(0.0, 0.0, -161.0)) > 0.0);
+        assert!(clipped.signed_distance(Vec3::new(0.0, 0.0, -163.0)) < 0.0);
+        let skybox_plane = Plane {
+            distance: plane.distance / 16.0 + 10991.2,
+            ..plane
+        };
+        let skybox_clip =
+            reflection_clip_plane(skybox_plane, &water.shader, ReflectionSpace::Skybox);
+        assert_eq!(skybox_clip, skybox_plane);
+        assert!(skybox_clip.signed_distance(Vec3::new(0.0, 0.0, 10981.15)) < 0.0);
+        let glass = resolver
+            .resolve_primary(&[], "glass")
+            .into_material()
+            .unwrap();
+        let clipped = reflection_clip_plane(plane, &glass.shader, ReflectionSpace::World);
+        assert_eq!(clipped.distance, -159.9);
+        assert_eq!(
+            reflection_clip_plane(plane, &glass.shader, ReflectionSpace::Skybox),
+            clipped
+        );
+    }
+
+    #[test]
     fn near_intersection_culling_covers_corners_on_both_sides_of_water() {
         use bytemuck::Zeroable;
         let mut uniforms = super::super::Uniforms::zeroed();
@@ -482,19 +601,19 @@ mod tests {
             distance: 0.0,
         };
         uniforms.camera_position[2] = 1.0;
-        assert!(above.intersects_near_plane(uniforms));
+        assert!(above.intersects_near_plane(&uniforms));
         uniforms.camera_position[2] = 2.0;
-        assert!(!above.intersects_near_plane(uniforms));
+        assert!(!above.intersects_near_plane(&uniforms));
         uniforms.camera_position[2] = -1.0;
         let below = Plane {
             normal: -above.normal,
             distance: 0.0,
         };
-        assert!(below.intersects_near_plane(uniforms));
+        assert!(below.intersects_near_plane(&uniforms));
         uniforms.camera_position[2] = -2.0;
-        assert!(!below.intersects_near_plane(uniforms));
+        assert!(!below.intersects_near_plane(&uniforms));
     }
-    use super::{Plane, Vec3, planar_groups};
+    use super::{Plane, ReflectionSpace, Uniforms, Vec3, planar_groups, reflection_clip_plane};
     use crate::media::preview_model::{MeshData, ModelVertex};
 
     #[test]
@@ -523,6 +642,7 @@ mod tests {
             .unwrap();
             let material = MaterialResolver::new(std::sync::Arc::new(archive), None)
                 .resolve_primary(&[], "water")
+                .into_material()
                 .unwrap();
             assert_eq!(super::optical_passes(&material.shader), expected);
         }
@@ -547,8 +667,6 @@ mod tests {
             (0..4).map(|col| matrix[col][row] * p[col]).sum()
         }));
         assert!((transformed - reflected).length_squared() < 1e-8);
-        // A reflection reverses winding: exactly one basis axis changes sign
-        // for this axis-aligned case, so reflected views must reverse culling.
         let horizontal = Plane {
             normal: Vec3::new(0.0, 0.0, 1.0),
             distance: -144.0,

@@ -107,7 +107,11 @@ impl MapWaterVolumes {
             return None;
         }
         let leaf = self.locator.leaf_at(point)?;
-        let &(index, contents) = self.leaves.get(leaf)?;
+        self.at_leaf(u32::try_from(leaf).ok()?)
+    }
+
+    pub fn at_leaf(&self, leaf: u32) -> Option<MapWaterSample<'_>> {
+        let &(index, contents) = self.leaves.get(leaf as usize)?;
         let body_index = usize::try_from(index).ok()?;
         let body = self.bodies.get(body_index)?.as_ref()?;
         // Compiler leaf association is authoritative, including boundary

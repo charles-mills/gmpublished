@@ -87,7 +87,14 @@ fn render_scene(
 
 fn empty_map(scene: Arc<RenderScene>) -> MapPreview {
     MapPreview {
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
         surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
         water_volumes: None,
         entity_meshes: Vec::new(),
         skybox_entity_meshes: Vec::new(),
@@ -373,6 +380,7 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
             }),
             sky_camera: None,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 4,
                 displacement_count: 1,
                 entity_count: 2,
@@ -420,6 +428,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
         PreviewContent::Map {
             scene,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,
@@ -480,6 +489,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
         PreviewContent::Map {
             scene,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,

@@ -1,17 +1,7 @@
 use super::{
-    AmbientCube, Arc, MapAmbientLighting, MapEnvironmentLighting, MapWalkCollision, PropModelAsset,
-    StaticPropPlacement, Vec3,
+    AmbientCube, MapAmbientLighting, MapEnvironmentLighting, MapWalkCollision, StaticPropPlacement,
+    Vec3,
 };
-
-#[derive(Debug)]
-pub(in super::super) struct SelectedPropPlacement<'a> {
-    pub(in super::super) placement: &'a StaticPropPlacement,
-    pub(in super::super) model: Arc<PropModelAsset>,
-    pub(in super::super) lighting: LegacyPropLightingFallback,
-    pub(in super::super) lighting_context: u32,
-    pub(in super::super) compiled_lighting:
-        Option<Arc<super::compiled_lighting::CompiledPropLighting>>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in super::super) struct LegacyPropLightingFallback {

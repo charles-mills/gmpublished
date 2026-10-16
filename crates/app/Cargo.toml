@@ -59,6 +59,7 @@ unic-langid.workspace = true
 ureq.workspace = true
 thumbhash = "0.1.0"
 crc32fast.workspace = true
+sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::inflate::inflate;
+use super::inflate::{self, inflate};
 use crate::Limits;
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
@@ -83,6 +83,9 @@ pub enum ZipError {
         /// The ZIP method id (14 = LZMA).
         method: u16,
     },
+    /// The decoder exceeds the declared working limit.
+    #[allow(missing_docs)]
+    DecoderTooLarge { required: u64, max: u64 },
     /// The entry exceeds [`Limits::max_entry_bytes`].
     EntryTooLarge {
         /// Declared uncompressed size.
@@ -108,6 +111,9 @@ impl fmt::Display for ZipError {
             }
             Self::EntryTooLarge { size, max } => {
                 write!(f, "zip entry of {size} bytes exceeds the {max}-byte limit")
+            }
+            Self::DecoderTooLarge { required, max } => {
+                write!(f, "ZIP decoder requires {required} bytes; limit {max}")
             }
             Self::Decode => write!(f, "zip entry stream is invalid"),
             Self::ForeignEntry => write!(f, "zip entry belongs to a different reader"),
@@ -209,15 +215,100 @@ impl<'a> ZipReader<'a> {
         self.entries.iter().find(|entry| entry.path == path)
     }
 
-    /// An entry's uncompressed payload: STORE borrows; DEFLATE and
-    /// LZMA (the latter with the `lzma` feature) decompress to owned.
+    fn entry_data(&self, entry: &ZipEntry) -> Result<&'a [u8], ZipError> {
+        if entry.reader_id != self.id {
+            return Err(ZipError::ForeignEntry);
+        }
+        let local = entry.local_offset;
+        if read_u32(self.bytes, local) != Some(LOCAL_SIGNATURE) {
+            return Err(ZipError::Corrupt);
+        }
+        let name_len = usize::from(read_u16(self.bytes, local + 26).ok_or(ZipError::Corrupt)?);
+        let extra_len = usize::from(read_u16(self.bytes, local + 28).ok_or(ZipError::Corrupt)?);
+        let start = local
+            .checked_add(LOCAL_BYTES + name_len + extra_len)
+            .ok_or(ZipError::Corrupt)?;
+        let end = start
+            .checked_add(entry.compressed_size)
+            .ok_or(ZipError::Corrupt)?;
+        self.bytes.get(start..end).ok_or(ZipError::Corrupt)
+    }
+
+    /// Decoder workspace excludes the caller's output allocation.
+    pub fn decoder_working_bytes(&self, entry: &ZipEntry) -> Result<u64, ZipError> {
+        let data = self.entry_data(entry)?;
+        match entry.method {
+            METHOD_STORE => Ok(0),
+            METHOD_DEFLATE => Ok(inflate::WORKING_BYTES as u64),
+            #[cfg(feature = "lzma")]
+            METHOD_LZMA => {
+                let (props, dict, _) = zip_lzma_properties(data)?;
+                lzma_rust2::lzma_get_memory_usage_by_props(dict, props)
+                    .map(|kib| u64::from(kib) * 1024)
+                    .map_err(|_| ZipError::Decode)
+            }
+            method => Err(ZipError::UnsupportedCompression { method }),
+        }
+    }
+
+    /// Reads a bounded prefix without validating the remainder of compressed data.
+    pub fn entry_prefix(&self, entry: &ZipEntry, max_bytes: usize) -> Result<Vec<u8>, ZipError> {
+        self.entry_prefix_with_decoder_limit(entry, max_bytes, Limits::default().max_input_bytes)
+    }
+
+    #[allow(missing_docs)]
+    pub fn entry_prefix_with_decoder_limit(
+        &self,
+        entry: &ZipEntry,
+        max_bytes: usize,
+        decoder_limit: u64,
+    ) -> Result<Vec<u8>, ZipError> {
+        let required = self.decoder_working_bytes(entry)?;
+        if required > decoder_limit {
+            return Err(ZipError::DecoderTooLarge {
+                required,
+                max: decoder_limit,
+            });
+        }
+        let data = self.entry_data(entry)?;
+        let expected = usize::try_from(entry.uncompressed_size.min(max_bytes as u64))
+            .map_err(|_| ZipError::Decode)?;
+        match entry.method {
+            METHOD_STORE => {
+                if entry.uncompressed_size != data.len() as u64 {
+                    return Err(ZipError::Corrupt);
+                }
+                Ok(data[..expected].to_vec())
+            }
+            METHOD_DEFLATE => inflate::prefix(data, expected).map_err(|_| ZipError::Decode),
+            #[cfg(feature = "lzma")]
+            METHOD_LZMA => decompress_zip_lzma(data, entry.uncompressed_size, expected, true),
+            method => Err(ZipError::UnsupportedCompression { method }),
+        }
+    }
+
+    /// Extracts one complete entry within the uncompressed byte limit.
     pub fn entry_bytes(
         &self,
         entry: &ZipEntry,
         limits: &Limits,
     ) -> Result<Cow<'a, [u8]>, ZipError> {
-        if entry.reader_id != self.id {
-            return Err(ZipError::ForeignEntry);
+        self.entry_bytes_with_decoder_limit(entry, limits, limits.max_input_bytes)
+    }
+
+    #[allow(missing_docs)]
+    pub fn entry_bytes_with_decoder_limit(
+        &self,
+        entry: &ZipEntry,
+        limits: &Limits,
+        decoder_limit: u64,
+    ) -> Result<Cow<'a, [u8]>, ZipError> {
+        let required = self.decoder_working_bytes(entry)?;
+        if required > decoder_limit {
+            return Err(ZipError::DecoderTooLarge {
+                required,
+                max: decoder_limit,
+            });
         }
         if entry.uncompressed_size > limits.max_entry_bytes {
             return Err(ZipError::EntryTooLarge {
@@ -225,25 +316,7 @@ impl<'a> ZipReader<'a> {
                 max: limits.max_entry_bytes,
             });
         }
-        // Local header: name/extra lengths there govern the data start.
-        let local = entry.local_offset;
-        if read_u32(self.bytes, local) != Some(LOCAL_SIGNATURE) {
-            return Err(ZipError::Corrupt);
-        }
-        let name_len = usize::from(read_u16(self.bytes, local + 26).ok_or(ZipError::Corrupt)?);
-        let extra_len = usize::from(read_u16(self.bytes, local + 28).ok_or(ZipError::Corrupt)?);
-        let data_start = local
-            .checked_add(LOCAL_BYTES + name_len + extra_len)
-            .ok_or(ZipError::Corrupt)?;
-        let data = self
-            .bytes
-            .get(
-                data_start
-                    ..data_start
-                        .checked_add(entry.compressed_size)
-                        .ok_or(ZipError::Corrupt)?,
-            )
-            .ok_or(ZipError::Corrupt)?;
+        let data = self.entry_data(entry)?;
 
         match entry.method {
             METHOD_STORE => {
@@ -260,18 +333,20 @@ impl<'a> ZipReader<'a> {
                     .map_err(|_| ZipError::Decode)
             }
             #[cfg(feature = "lzma")]
-            METHOD_LZMA => decompress_zip_lzma(data, entry.uncompressed_size).map(Cow::Owned),
+            METHOD_LZMA => decompress_zip_lzma(
+                data,
+                entry.uncompressed_size,
+                usize::try_from(entry.uncompressed_size).map_err(|_| ZipError::Decode)?,
+                false,
+            )
+            .map(Cow::Owned),
             method => Err(ZipError::UnsupportedCompression { method }),
         }
     }
 }
 
-/// ZIP-flavored LZMA: a 4-byte version/props-size prefix, the 5-byte
-/// props (props byte + u32 dictionary size), then the raw stream.
 #[cfg(feature = "lzma")]
-fn decompress_zip_lzma(data: &[u8], uncompressed_size: u64) -> Result<Vec<u8>, ZipError> {
-    use std::io::Read as _;
-
+fn zip_lzma_properties(data: &[u8]) -> Result<(u8, u32, &[u8]), ZipError> {
     if data.len() < 9 {
         return Err(ZipError::Corrupt);
     }
@@ -279,26 +354,28 @@ fn decompress_zip_lzma(data: &[u8], uncompressed_size: u64) -> Result<Vec<u8>, Z
     if props_size < 5 || data.len() < 4 + props_size {
         return Err(ZipError::Corrupt);
     }
-    let props = data[4];
-    let dict_size = u32::from_le_bytes(data[5..9].try_into().expect("4 bytes"));
-    let stream = &data[4 + props_size..];
+    Ok((
+        data[4],
+        u32::from_le_bytes(data[5..9].try_into().expect("4 bytes")),
+        &data[4 + props_size..],
+    ))
+}
+
+#[cfg(feature = "lzma")]
+fn decompress_zip_lzma(
+    data: &[u8],
+    uncompressed_size: u64,
+    expected: usize,
+    prefix: bool,
+) -> Result<Vec<u8>, ZipError> {
+    use std::io::Read as _;
+    let (props, dict_size, stream) = zip_lzma_properties(data)?;
     let mut reader =
         lzma_rust2::LzmaReader::new_with_props(stream, uncompressed_size, props, dict_size, None)
             .map_err(|_| ZipError::Decode)?;
-    let expected = usize::try_from(uncompressed_size).map_err(|_| ZipError::Decode)?;
-    let mut out = Vec::with_capacity(expected);
-    let mut buf = [0u8; 16 * 1024];
-    while out.len() < expected {
-        let n = reader.read(&mut buf).map_err(|_| ZipError::Decode)?;
-        if n == 0 {
-            break;
-        }
-        out.extend_from_slice(&buf[..n]);
-        if out.len() > expected {
-            return Err(ZipError::Decode);
-        }
-    }
-    if out.len() != expected {
+    let mut out = vec![0; expected];
+    reader.read_exact(&mut out).map_err(|_| ZipError::Decode)?;
+    if !prefix && reader.read(&mut [0]).map_err(|_| ZipError::Decode)? != 0 {
         return Err(ZipError::Decode);
     }
     Ok(out)

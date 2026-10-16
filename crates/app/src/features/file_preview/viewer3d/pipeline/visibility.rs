@@ -4,7 +4,7 @@ use super::{WorldVisibilityPlan, wgpu};
 use gmpublished_domain::math::Vec3;
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UploadedVisibleIndices {
     pub buffer: Option<wgpu::Buffer>,
     pub index_count: u32,
@@ -71,7 +71,7 @@ pub fn upload_visible_indices(
     queue: &wgpu::Queue,
     indices: &[u32],
 ) -> UploadedVisibleIndices {
-    let index_count = u32::try_from(indices.len()).unwrap_or(u32::MAX);
+    let index_count = u32::try_from(indices.len()).expect("admitted visibility index count");
     if indices.is_empty() {
         return UploadedVisibleIndices {
             buffer: None,
@@ -145,8 +145,10 @@ impl UploadedVisibility {
     ) {
         self.mesh_indices.clear();
         if let Some(plan) = plan.as_ref() {
+            let canonical_world = canonical_world_meshes(upload);
             for (index, mesh) in upload.meshes.iter().enumerate() {
-                if mesh.map_skybox || mesh.door_index.is_some() {
+                if mesh.map_skybox || mesh.door_index.is_some() || canonical_world.contains(&index)
+                {
                     continue;
                 }
                 let visible = plan
@@ -161,9 +163,60 @@ impl UploadedVisibility {
     }
 }
 
+fn canonical_world_meshes(upload: &ViewerScene) -> std::collections::HashSet<usize> {
+    use gmpublished_domain::scene::map::MapSurfaceOwnerId;
+    let Some(map) = upload.assets.map().filter(|map| map.visibility.is_some()) else {
+        return Default::default();
+    };
+    let mut ranges = HashMap::<usize, Vec<(bool, std::ops::Range<u32>)>>::new();
+    for receiver in upload.assets.receiver_faces.values().flatten() {
+        let source = &map.surface_receivers[receiver.source_index];
+        ranges.entry(receiver.mesh_index).or_default().push((
+            source.owner.id() == MapSurfaceOwnerId::World,
+            source.range.start..source.range.start.saturating_add(source.range.count),
+        ));
+    }
+    ranges
+        .into_iter()
+        .filter_map(|(mesh, ranges)| {
+            canonical_world_ranges(upload.meshes[mesh].index_count, ranges).then_some(mesh)
+        })
+        .collect()
+}
+
+fn canonical_world_ranges(index_count: u32, mut ranges: Vec<(bool, std::ops::Range<u32>)>) -> bool {
+    if ranges.is_empty() || ranges.iter().any(|(world, _)| !world) {
+        return false;
+    }
+    ranges.sort_unstable_by_key(|(_, range)| range.start);
+    let mut covered = 0;
+    for (_, range) in ranges {
+        if range.start != covered || range.end < range.start || range.end > index_count {
+            return false;
+        }
+        covered = range.end;
+    }
+    covered == index_count
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Vec3, VisibilityClusterState, VisibilityClusterTracker};
+    use super::{Vec3, VisibilityClusterState, VisibilityClusterTracker, canonical_world_ranges};
+
+    #[test]
+    fn canonical_world_coverage_replaces_only_fully_owned_index_buffers() {
+        assert!(canonical_world_ranges(9, vec![(true, 3..9), (true, 0..3)]));
+        for ranges in [
+            vec![],
+            vec![(true, 0..3)],
+            vec![(true, 0..3), (true, 6..9)],
+            vec![(true, 0..6), (true, 3..9)],
+            vec![(true, 0..12)],
+            vec![(true, 0..3), (false, 3..9)],
+        ] {
+            assert!(!canonical_world_ranges(9, ranges));
+        }
+    }
 
     #[test]
     fn visibility_tracker_rebuilds_only_when_cluster_changes() {

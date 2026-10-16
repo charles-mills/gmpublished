@@ -212,8 +212,11 @@ mod tests {
             &value.diffuse_warp,
         ] {
             let texture = role.as_ref().unwrap().texture.as_ref().unwrap();
-            assert_eq!(texture.flags, 0);
-            assert_eq!(texture.frames[0][0].rgba, [32, 64, 128, 17]);
+            assert_eq!(texture.flags(), 0);
+            assert_eq!(
+                texture.frame(0).unwrap()[0].bytes.as_slice(),
+                [32, 64, 128, 17]
+            );
         }
         assert!(Arc::ptr_eq(
             value
@@ -222,6 +225,8 @@ mod tests {
                 .unwrap()
                 .texture
                 .as_ref()
+                .unwrap()
+                .resident()
                 .unwrap(),
             value
                 .diffuse_warp
@@ -229,6 +234,8 @@ mod tests {
                 .unwrap()
                 .texture
                 .as_ref()
+                .unwrap()
+                .resident()
                 .unwrap()
         ));
     }

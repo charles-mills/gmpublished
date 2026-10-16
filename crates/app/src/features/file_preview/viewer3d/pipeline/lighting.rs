@@ -11,17 +11,17 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, map: Option<&MapPreview>) -> Self {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        uploader: &super::texture_upload::SharedUploader,
+        map: Option<&MapPreview>,
+    ) -> Self {
         let model = model_lighting::State::new(
             map.map_or(&[], |map| map.model_lighting.as_slice()),
             &styles(map, 0.0),
         );
         Self {
-            lightmap: lightmaps::Frame::new(
-                device,
-                queue,
-                map.and_then(|map| map.lightmap.as_ref()),
-            ),
+            lightmap: lightmaps::Frame::new(uploader, map.and_then(|map| map.lightmap.as_ref())),
             model_lights: model_lighting::upload(device, model.data()),
             model,
             #[cfg(feature = "map-capture")]
@@ -79,11 +79,8 @@ impl Frame {
         time: f64,
         active_contexts: &[bool],
     ) {
-        self.lightmap.update(
-            queue,
-            map.and_then(|map| map.lightmap.as_ref()),
-            time as f32,
-        );
+        self.lightmap
+            .update(map.and_then(|map| map.lightmap.as_ref()), time as f32);
         if self.model.advance(
             map.map_or(&[], |map| map.model_lighting.as_slice()),
             &styles(map, time),

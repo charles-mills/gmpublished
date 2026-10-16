@@ -90,6 +90,8 @@ fn mdl_with(
         illumination_position: [0.0; 3],
         hull_min: [0.0; 3],
         hull_max: [0.0; 3],
+        view_min: [0.0; 3],
+        view_max: [0.0; 3],
         attachments: Vec::new(),
         illumination_attachment_index: None,
         bones,

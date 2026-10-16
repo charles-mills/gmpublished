@@ -31,6 +31,7 @@ pub struct MapData {
     pub sky_camera: Option<MapSkyCamera>,
     pub skybox_completion_bounds: Option<MapBounds>,
     pub lightmap: Option<LightmapAtlas>,
+    pub lighting_source: Option<super::LightmapSource>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
     pub stats: MapStatsRaw,
@@ -66,10 +67,35 @@ pub enum MapSurfaceOwner {
     },
     Door {
         door_index: usize,
+        model_index: super::ModelIndex,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MapSurfaceOwnerId {
+    World,
+    Brush(usize),
+    Door(usize),
+}
+
+impl MapSurfaceOwner {
+    pub const fn id(self) -> MapSurfaceOwnerId {
+        match self {
+            Self::World => MapSurfaceOwnerId::World,
+            Self::Brush { entity_index, .. } => MapSurfaceOwnerId::Brush(entity_index),
+            Self::Door { door_index, .. } => MapSurfaceOwnerId::Door(door_index),
+        }
+    }
+
+    pub const fn model_index(self) -> Option<super::ModelIndex> {
+        match self {
+            Self::World => None,
+            Self::Brush { model_index, .. } | Self::Door { model_index, .. } => Some(model_index),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapMeshSurfaceOwner {
     pub index_start: u32,
     pub owner: MapSurfaceOwner,
@@ -77,7 +103,22 @@ pub struct MapMeshSurfaceOwner {
     pub allows_decals: bool,
     pub plane_normal: Vec3,
     pub plane_distance: f32,
-    pub displacement: bool,
+    pub displacement: Option<MapDisplacementProjection>,
+    pub texture_projection: Option<MapSurfaceTextureProjection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapSurfaceTextureProjection {
+    pub vectors: [[f32; 4]; 2],
+    pub minimum: [i32; 2],
+    pub extent: [i16; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapDisplacementProjection {
+    pub base_corners: [Vec3; 4],
+    pub steps: usize,
+    pub positions: std::sync::Arc<[Vec3]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -146,6 +187,8 @@ impl From<MapVisibilityBucket> for MapPropVisibility {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapVertex {
     pub position: Vec3,
+    /// Parent surface position before displacement deformation.
+    pub base_position: Vec3,
     pub normal: Vec3,
     pub tangent_s: Vec3,
     pub tangent_t: Vec3,
@@ -182,7 +225,14 @@ pub struct StaticPropPlacement {
     pub skin: i32,
     pub scale: f32,
     pub solid: MapPropSolid,
+    pub leaf_membership: MapPropLeafMembership,
     pub visibility: MapPropVisibility,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MapPropLeafMembership {
+    Compiled(Vec<u16>),
+    SpatialBounds,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,6 +267,18 @@ pub struct MapStatsRaw {
     pub skybox_entity_prop_count: u32,
     pub cluster_count: u32,
     pub version: u32,
+    pub lightmap: MapLightmapStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Prepared receiver payloads; shared-model placements count independently.
+pub struct MapLightmapStats {
+    pub unlightmapped_surfaces: u32,
+    /// Includes valid payloads rejected by atlas limits.
+    pub valid_payloads: u32,
+    pub missing_payloads: u32,
+    pub invalid_payloads: u32,
+    pub atlas_dropped_blocks: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

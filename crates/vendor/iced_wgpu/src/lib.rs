@@ -935,14 +935,11 @@ impl renderer::Headless for Renderer {
             .await
             .ok()?;
 
+        let requested_features = (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::CLIP_DISTANCES).intersection(adapter.features());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("iced_wgpu [headless]"),
-                // GMPUBLISHED PATCH: opt into BC texture compression when the
-                // adapter has it (universal on desktop; harmless intersection
-                // elsewhere). See GMPUBLISHED-PATCH.md.
-                required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
-                    .intersection(adapter.features()),
+                required_features: requested_features,
                 required_limits: wgpu::Limits {
                     max_bind_groups: 2,
                     ..wgpu::Limits::default()
@@ -968,10 +965,12 @@ impl renderer::Headless for Renderer {
         );
 
         log::info!(
-            "Headless renderer: adapter {:?}, target {:?}, device features {:?}",
+            "Headless renderer: adapter {:?}, target {:?}, requested features {:?}, device features {:?}, limits {:?}",
             adapter.get_info(),
             engine.format,
+            requested_features,
             engine.device.features(),
+            engine.device.limits(),
         );
 
         Some(Self::new(engine, default_font, default_text_size))

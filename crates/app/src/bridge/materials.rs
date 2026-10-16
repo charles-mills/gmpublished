@@ -3,15 +3,16 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
 mod cubemap;
+mod decal_format;
+mod definition;
+use definition::MaterialDefinitionCache;
 mod discovery;
 mod frames;
+mod lightmap_layout;
 mod mirror;
 mod parameters;
 use parameters::parse_material_color;
@@ -22,12 +23,28 @@ mod radiosity;
 mod shader;
 mod sibling_gma;
 mod sky;
+pub mod sprite_sheet;
+pub use sprite_sheet::{
+    DEFAULT_SPRITE_SHEET_FRAMES, DEFAULT_SPRITE_SHEET_METADATA_BYTES, SpriteSheetBudget,
+};
 mod surface;
 mod texture;
+mod texture_asset;
+mod texture_budget;
+pub use texture_budget::DecodedTextureBudget;
+mod texture_plan;
+mod texture_source;
+mod texture_working;
+pub use texture_source::EncodedTextureBudget;
+#[cfg(feature = "map-capture")]
+pub use texture_working::TextureHostLimits;
+pub use texture_working::TextureWorkingBudget;
 mod water;
-pub use cubemap::{
-    EnvironmentMapMask, EnvironmentMapMaterial, EnvironmentMapSource, ResolvedCubemap,
-};
+#[cfg(test)]
+pub use cubemap::ResolvedCubemap;
+pub use cubemap::{EnvironmentMapMask, EnvironmentMapMaterial, EnvironmentMapSource};
+pub use decal_format::SourceDecalFormat;
+pub use lightmap_layout::ResolvedLightmapLayoutMaterial;
 pub use mirror::MirrorMaterial;
 pub use phong::{PhongMaterial, PhongTexture};
 pub use radiosity::ResolvedSurfaceLighting;
@@ -35,19 +52,20 @@ pub use shader::MaterialShader;
 pub use sky::{PaintedSkyMaterial, SkyMaterial};
 #[cfg(test)]
 use surface::DecalParameters;
-pub use surface::{ModelShadingProfile, SurfaceFamily, SurfaceMaterial};
+pub use surface::{ModelShadingProfile, SourceSurfaceBaseBlend, SurfaceFamily, SurfaceMaterial};
 pub use water::WaterMaterial;
 
 pub use frames::{DecodedTextureFrames, TextureReadTransfer, TextureRole};
 pub use texture::decode_vtf_rgba;
-use texture::{
-    bc_supported, decode_vtf_rgba_max, downscale_resolved_texture, force_opaque_alpha,
-    push_matching_path, resolved_bc_texture, with_generated_mip_chain,
-};
+use texture::push_matching_path;
 #[cfg(test)]
-use texture::{
-    downscaled_texture_dimensions, drop_bc_mips_to_max_dimension, generate_srgb_mip_chain,
+use texture::resolved_bc_texture;
+pub use texture_asset::{
+    ResidentTexture, ResidentTextureLayer, ResidentTextureMip, TextureAssetError, TextureBytes,
+    TextureMetadata, TextureResidency, TextureResidentId, TextureStorage,
 };
+use texture_asset::{TextureAssetCache, TextureSourceError};
+pub use texture_plan::{TextureAdmissions, TextureRequestCost, TextureRequestPlan};
 
 #[cfg(test)]
 use sibling_gma::SiblingGmaPathKind;
@@ -74,46 +92,46 @@ const PATCH_INCLUDE_LIMIT: usize = 4;
 const MAX_SIBLING_GMA_ARCHIVES: usize = 2048;
 const MAX_LEGACY_BIN_ENTRY_TABLE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
-/// Must match the shader's default water fog tint when a material omits $fogcolor.
 pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
 const GMA_MAGIC: &[u8; 4] = b"GMAD";
-/// Use gray for envmaps without a basetexture, matching Source's reflective-metal fallback.
 const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
+const NATIVE_ERROR_TEXTURE_FLAGS: u32 = 0x0008_0000;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedTexture {
-    payload: ResolvedTexturePayload,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    original_width: u32,
-    original_height: u32,
-    water_fallback: bool,
-    pub(crate) flags: Option<u32>,
-    pub(crate) reflectivity_bits: Option<[u32; 3]>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureLoadOutcome {
+    Loaded,
+    Generated,
+    MissingSource,
+    InvalidSource,
+    InvalidPayload,
+    QualityRejected,
+    SourceBudgetRejected,
+    Unsupported,
+    Deferred,
+    Unplanned,
+}
+
+impl TextureLoadOutcome {
+    const fn uses_native_error_texture(self) -> bool {
+        matches!(
+            self,
+            Self::MissingSource | Self::InvalidSource | Self::InvalidPayload
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResolvedTexturePayload {
-    Rgba {
-        rgba: Vec<u8>,
-        mip_chain: Vec<ResolvedTextureMip>,
-    },
-    Bc {
-        format: BcFormat,
-        mips: Vec<ResolvedBcMip>,
-    },
+pub struct ResolvedTexture {
+    resident: TextureResidency,
+    source_metadata: Option<Arc<TextureMetadata>>,
+    mapping_dimensions: Option<[u32; 2]>,
+    load_outcome: TextureLoadOutcome,
+    water_fallback: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTextureMip {
     pub(crate) rgba: Vec<u8>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedBcMip {
-    pub(crate) data: Vec<u8>,
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
@@ -134,132 +152,181 @@ impl ResolvedTexture {
         original_height: u32,
         water_fallback: bool,
     ) -> Self {
-        Self {
-            payload: ResolvedTexturePayload::Rgba {
+        let resident = texture_asset::generated_rgba(
+            "material-fallback",
+            None,
+            vec![vec![ResolvedTextureMip {
                 rgba,
-                mip_chain: Vec::new(),
-            },
-            width,
-            height,
-            original_width,
-            original_height,
+                width,
+                height,
+            }]],
+        )
+        .expect("generated material image has valid dimensions");
+        let source_metadata =
+            if [original_width, original_height] == resident.metadata().original_dimensions {
+                resident.metadata_arc()
+            } else {
+                let mut metadata = resident.metadata().clone();
+                metadata.original_dimensions = [original_width, original_height];
+                Arc::new(metadata)
+            };
+        Self {
+            resident: TextureResidency::Resident(resident),
+            source_metadata: Some(source_metadata),
+            mapping_dimensions: (!water_fallback).then_some([original_width, original_height]),
+            load_outcome: TextureLoadOutcome::Generated,
             water_fallback,
-            flags: None,
-            reflectivity_bits: None,
         }
     }
 
-    fn bc(
-        format: BcFormat,
-        mips: Vec<ResolvedBcMip>,
-        original_width: u32,
-        original_height: u32,
-    ) -> Option<Self> {
-        let (width, height) = mips
-            .first()
-            .map(|base| (base.width.max(1), base.height.max(1)))?;
-        Some(Self {
-            payload: ResolvedTexturePayload::Bc { format, mips },
-            width,
-            height,
-            original_width,
-            original_height,
+    fn from_resident(resident: TextureResidency, source_metadata: Arc<TextureMetadata>) -> Self {
+        let load_outcome = resident.load_outcome();
+        Self {
+            mapping_dimensions: Some(source_metadata.original_dimensions),
+            resident,
+            source_metadata: Some(source_metadata),
+            load_outcome,
             water_fallback: false,
-            flags: None,
-            reflectivity_bits: None,
-        })
+        }
     }
 
+    fn unavailable(
+        source_metadata: Option<Arc<TextureMetadata>>,
+        load_outcome: TextureLoadOutcome,
+    ) -> Self {
+        let error_texture = load_outcome.uses_native_error_texture();
+        let resident = if error_texture {
+            texture_asset::native_error_resident()
+        } else {
+            texture_asset::generated_rgba(
+                "unavailable-resident-base",
+                None,
+                vec![vec![ResolvedTextureMip {
+                    rgba: vec![
+                        255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 255, 255,
+                    ],
+                    width: 2,
+                    height: 2,
+                }]],
+            )
+            .expect("fallback image has valid dimensions")
+        };
+        let mapping_dimensions = if error_texture {
+            Some(resident.metadata().original_dimensions)
+        } else {
+            source_metadata
+                .as_ref()
+                .map(|metadata| metadata.original_dimensions)
+        };
+        Self {
+            resident: TextureResidency::Resident(resident),
+            source_metadata,
+            mapping_dimensions,
+            load_outcome,
+            water_fallback: false,
+        }
+    }
+
+    pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
+        self.resident.resident()
+    }
+    pub(crate) fn source_metadata(&self) -> Option<&TextureMetadata> {
+        self.source_metadata.as_deref()
+    }
+    pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
+        self.load_outcome
+    }
+    pub(crate) fn width(&self) -> u32 {
+        self.dimensions()[0]
+    }
+    pub(crate) fn height(&self) -> u32 {
+        self.dimensions()[1]
+    }
+    fn dimensions(&self) -> [u32; 2] {
+        match &self.resident {
+            TextureResidency::Resident(resident) => resident.layers()[0].mips[0].dimensions,
+            TextureResidency::Deferred(_) => self.resident.dimensions(
+                self.source_metadata()
+                    .expect("deferred image retains source metadata"),
+            ),
+        }
+    }
+    pub(crate) fn flags(&self) -> Option<u32> {
+        if self.load_outcome.uses_native_error_texture() {
+            Some(NATIVE_ERROR_TEXTURE_FLAGS)
+        } else {
+            self.source_metadata().and_then(|metadata| metadata.flags)
+        }
+    }
+    #[cfg(any(test, feature = "map-capture"))]
+    pub(crate) fn reflectivity_bits(&self) -> Option<[u32; 3]> {
+        if self.load_outcome.uses_native_error_texture() {
+            Some([0.5_f32.to_bits(); 3])
+        } else {
+            self.source_metadata()
+                .and_then(|metadata| metadata.reflectivity_bits)
+        }
+    }
+    pub(crate) fn has_effective_base_texture(&self) -> bool {
+        !self.water_fallback
+    }
+    #[cfg(any(test, feature = "map-capture"))]
     pub(crate) fn is_water_fallback(&self) -> bool {
         self.water_fallback
     }
-
+    #[cfg(test)]
     pub(crate) fn rgba_bytes(&self) -> Option<&[u8]> {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, .. } => Some(rgba),
-            ResolvedTexturePayload::Bc { .. } => None,
+        let resident = self.resident()?;
+        matches!(resident.id().storage, TextureStorage::Rgba8)
+            .then(|| resident.layers()[0].mips[0].bytes.as_slice())
+    }
+    pub(crate) fn bc_payload(&self) -> Option<(BcFormat, &[ResidentTextureMip])> {
+        let resident = self.resident()?;
+        if let TextureStorage::Bc(format) = resident.id().storage {
+            Some((format, &resident.layers()[0].mips))
+        } else {
+            None
         }
     }
-
-    pub(crate) fn bc_payload(&self) -> Option<(BcFormat, &[ResolvedBcMip])> {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { .. } => None,
-            ResolvedTexturePayload::Bc { format, mips } => Some((*format, mips)),
-        }
-    }
-
     pub(crate) fn is_bc(&self) -> bool {
-        matches!(self.payload, ResolvedTexturePayload::Bc { .. })
+        matches!(self.resident.id().storage, TextureStorage::Bc(_))
     }
-
     #[cfg(test)]
     pub(crate) fn mip_level_count(&self) -> u32 {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { mip_chain, .. } => u32::try_from(mip_chain.len())
-                .unwrap_or(u32::MAX)
-                .saturating_add(1),
-            ResolvedTexturePayload::Bc { mips, .. } => {
-                u32::try_from(mips.len()).unwrap_or(u32::MAX)
-            }
-        }
+        u32::from(self.resident.id().mip_count)
     }
-
     pub(crate) fn mip_chain(&self) -> impl Iterator<Item = ResolvedTextureMipRef<'_>> {
-        let (base_rgba, mip_chain) = match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, mip_chain } => {
-                (rgba.as_slice(), mip_chain.as_slice())
-            }
-            ResolvedTexturePayload::Bc { .. } => (&[][..], &[][..]),
-        };
-        std::iter::once(ResolvedTextureMipRef {
-            rgba: base_rgba,
-            width: self.width.max(1),
-            height: self.height.max(1),
-        })
-        .filter(|mip| !mip.rgba.is_empty())
-        .chain(mip_chain.iter().map(|mip| ResolvedTextureMipRef {
-            rgba: mip.rgba.as_slice(),
-            width: mip.width.max(1),
-            height: mip.height.max(1),
-        }))
+        self.resident()
+            .into_iter()
+            .flat_map(|resident| resident.layers()[0].mips.iter())
+            .filter(|_| matches!(self.resident.id().storage, TextureStorage::Rgba8))
+            .map(|mip| ResolvedTextureMipRef {
+                rgba: mip.bytes.as_slice(),
+                width: mip.dimensions[0],
+                height: mip.dimensions[1],
+            })
     }
-
-    pub(crate) fn mip_chain_byte_len(&self) -> usize {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, mip_chain } => rgba
-                .len()
-                .saturating_add(mip_chain.iter().map(|mip| mip.rgba.len()).sum::<usize>()),
-            ResolvedTexturePayload::Bc { mips, .. } => mips.iter().map(|mip| mip.data.len()).sum(),
-        }
-    }
-
-    pub(crate) fn without_mip_chain(&self) -> Self {
-        let payload = match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, .. } => ResolvedTexturePayload::Rgba {
-                rgba: rgba.clone(),
-                mip_chain: Vec::new(),
-            },
-            ResolvedTexturePayload::Bc { format, mips } => ResolvedTexturePayload::Bc {
-                format: *format,
-                mips: mips.first().cloned().into_iter().collect(),
-            },
-        };
-        Self {
-            payload,
-            width: self.width,
-            height: self.height,
-            original_width: self.original_width,
-            original_height: self.original_height,
-            water_fallback: self.water_fallback,
-            flags: self.flags,
-            reflectivity_bits: self.reflectivity_bits,
-        }
-    }
-
-    /// Pre-downscale dimensions: BSP texel UVs normalize against the source
-    /// texture size, not whatever the preview uploaded.
+    #[cfg(any(test, feature = "map-capture"))]
     pub(crate) fn original_dimensions(&self) -> (u32, u32) {
-        (self.original_width.max(1), self.original_height.max(1))
+        let [width, height] = self
+            .source_metadata()
+            .unwrap_or_else(|| {
+                self.resident()
+                    .expect("generated image has residency")
+                    .metadata()
+            })
+            .original_dimensions;
+        (width.max(1), height.max(1))
+    }
+
+    pub(crate) fn mapping_dimensions(&self) -> Option<(u32, u32)> {
+        self.mapping_dimensions
+            .map(|[width, height]| (width.max(1), height.max(1)))
+    }
+
+    fn unmapped(mut self) -> Self {
+        self.mapping_dimensions = None;
+        self
     }
 }
 
@@ -275,7 +342,85 @@ pub struct ResolvedMaterialTextures {
 pub struct ResolvedPrimaryMaterial {
     pub(crate) shader: MaterialShader,
     pub(crate) texture: Arc<ResolvedTexture>,
+    pub(crate) texture2: Option<Arc<ResolvedTexture>>,
     pub(crate) render_mode: RenderMode,
+}
+
+fn canonical_error_primary() -> ResolvedPrimaryMaterial {
+    static MATERIAL: OnceLock<ResolvedPrimaryMaterial> = OnceLock::new();
+    MATERIAL
+        .get_or_init(|| ResolvedPrimaryMaterial {
+            shader: MaterialShader::Surface(Arc::new(SurfaceMaterial {
+                shader: "UnlitGeneric".to_owned(),
+                family: SurfaceFamily::Unlit,
+                diffuse_bump: false,
+                ..Default::default()
+            })),
+            texture: Arc::new(ResolvedTexture {
+                resident: TextureResidency::Resident(texture_asset::missing_material_resident()),
+                source_metadata: None,
+                mapping_dimensions: Some([32, 32]),
+                load_outcome: TextureLoadOutcome::Generated,
+                water_fallback: false,
+            }),
+            texture2: None,
+            render_mode: RenderMode::Opaque,
+        })
+        .clone()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MaterialResolutionOutcome {
+    Loaded,
+    Missing,
+    Malformed,
+    #[default]
+    Unresolved,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaterialResolution<T> {
+    Loaded { canonical_name: String, material: T },
+    Missing { fallback: T },
+    Malformed { path: ContentPath },
+    Unresolved { canonical_name: String },
+}
+
+impl<T> MaterialResolution<T> {
+    pub(crate) fn material(&self) -> Option<&T> {
+        match self {
+            Self::Loaded { material, .. } => Some(material),
+            Self::Missing { fallback } => Some(fallback),
+            Self::Malformed { .. } | Self::Unresolved { .. } => None,
+        }
+    }
+
+    pub(crate) fn into_material(self) -> Option<T> {
+        match self {
+            Self::Loaded { material, .. } => Some(material),
+            Self::Missing { fallback } => Some(fallback),
+            Self::Malformed { .. } | Self::Unresolved { .. } => None,
+        }
+    }
+
+    pub(crate) fn outcome(&self) -> MaterialResolutionOutcome {
+        match self {
+            Self::Loaded { .. } => MaterialResolutionOutcome::Loaded,
+            Self::Missing { .. } => MaterialResolutionOutcome::Missing,
+            Self::Malformed { .. } => MaterialResolutionOutcome::Malformed,
+            Self::Unresolved { .. } => MaterialResolutionOutcome::Unresolved,
+        }
+    }
+
+    pub(crate) fn canonical_name(&self) -> Option<&str> {
+        match self {
+            Self::Loaded { canonical_name, .. } | Self::Unresolved { canonical_name } => {
+                Some(canonical_name)
+            }
+            Self::Missing { .. } => Some("___error"),
+            Self::Malformed { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,7 +432,6 @@ pub enum RenderMode {
     Modulate,
 }
 
-/// Texture opacity interpretation, independent of per-instance blend-queue selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureAlphaPolicy {
     Opaque,
@@ -301,7 +445,6 @@ impl TextureAlphaPolicy {
 }
 
 impl RenderMode {
-    /// Initialize texture-alpha handling before instance draw-queue overrides.
     pub(crate) const fn texture_alpha_policy(self) -> TextureAlphaPolicy {
         if matches!(self, Self::Opaque) {
             TextureAlphaPolicy::Opaque
@@ -317,7 +460,15 @@ struct ResolverConfig {
     pakfile: Option<Arc<PakSource>>,
     decoded_texture_max_dimension: Option<u32>,
     decoded_texture_budget: Option<Arc<DecodedTextureBudget>>,
+    encoded_texture_budget: Option<Arc<EncodedTextureBudget>>,
+    texture_working_budget: Option<Arc<TextureWorkingBudget>>,
+    texture_source_working_budget: Option<Arc<TextureWorkingBudget>>,
+    texture_decoder_limit: Option<usize>,
+    texture_resource_limit: Option<usize>,
+    sprite_sheet_budget: Arc<SpriteSheetBudget>,
     bc_textures: BcTextures,
+    texture_access: texture_plan::TextureAccess,
+    single_texture_mip: bool,
 }
 
 #[derive(Debug)]
@@ -328,17 +479,15 @@ struct ResolverShared {
     game_vpk_paths: Vec<PathBuf>,
     sibling_gmas: OnceLock<SiblingGmaIndex>,
     game_vpks: OnceLock<Vec<VpkArchive>>,
-    decoded_texture_cache: Mutex<HashMap<DecodedTextureCacheKey, Arc<ResolvedTexture>>>,
-    frame_texture_cache: Mutex<HashMap<frames::DecodedFramesKey, Arc<DecodedTextureFrames>>>,
-    cubemap_cache: Mutex<HashMap<cubemap::CubemapCacheKey, Arc<ResolvedCubemap>>>,
+    material_definitions: MaterialDefinitionCache,
+    texture_assets: TextureAssetCache,
     sound_scripts: OnceLock<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BcTextures {
-    IfGpuSupports,
-    /// Skybox and PHY uploads require RGBA, even when the GPU supports BC textures.
+    RetainAuthored,
     Never,
     #[cfg(test)]
     Forced(bool),
@@ -420,68 +569,6 @@ struct SoundScriptLibrary {
     script_files: Vec<String>,
 }
 
-#[derive(Debug)]
-pub struct DecodedTextureBudget {
-    budget_bytes: usize,
-    decoded_bytes: AtomicUsize,
-    rejected_textures: AtomicUsize,
-    exhausted: AtomicBool,
-}
-
-impl DecodedTextureBudget {
-    pub(crate) fn new(budget_bytes: usize) -> Self {
-        Self {
-            budget_bytes,
-            decoded_bytes: AtomicUsize::new(0),
-            rejected_textures: AtomicUsize::new(0),
-            exhausted: AtomicBool::new(false),
-        }
-    }
-
-    pub(crate) fn decoded_bytes(&self) -> usize {
-        self.decoded_bytes.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn rejected_textures(&self) -> usize {
-        self.rejected_textures.load(Ordering::Acquire)
-    }
-
-    fn try_reserve(&self, byte_len: usize) -> bool {
-        if byte_len > self.budget_bytes {
-            self.rejected_textures.fetch_add(1, Ordering::AcqRel);
-            self.exhausted.store(true, Ordering::Release);
-            return false;
-        }
-        let reserved = self
-            .decoded_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(byte_len)
-                    .filter(|total| *total <= self.budget_bytes)
-            })
-            .is_ok();
-        if !reserved {
-            self.rejected_textures.fetch_add(1, Ordering::AcqRel);
-            self.exhausted.store(true, Ordering::Release);
-        }
-        reserved
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum DecodedTextureCacheKey {
-    Rgba {
-        path: ContentPath,
-        preserve_alpha: bool,
-        transfer: TextureReadTransfer,
-        max_dimension: Option<u32>,
-    },
-    Bc {
-        path: ContentPath,
-        max_dimension: Option<u32>,
-    },
-}
-
 impl MaterialResolver {
     fn variant(&self, config: ResolverConfig) -> Self {
         Self {
@@ -509,9 +596,6 @@ impl MaterialResolver {
             .as_deref()
             .map(discover_loose_source_dirs)
             .unwrap_or_default();
-        // Only explicit mount.cfg targets join the loose tier: sibling Steam
-        // games ship their content entirely in the VPKs discovered above, and
-        // a mount.cfg target is routinely a loose models/materials tree.
         loose_source_dirs.extend(
             gmod_dir
                 .as_deref()
@@ -530,7 +614,18 @@ impl MaterialResolver {
                 pakfile: None,
                 decoded_texture_max_dimension: None,
                 decoded_texture_budget: None,
-                bc_textures: BcTextures::IfGpuSupports,
+                encoded_texture_budget: None,
+                texture_working_budget: None,
+                texture_source_working_budget: None,
+                texture_decoder_limit: None,
+                texture_resource_limit: None,
+                sprite_sheet_budget: Arc::new(SpriteSheetBudget::new(
+                    DEFAULT_SPRITE_SHEET_FRAMES,
+                    DEFAULT_SPRITE_SHEET_METADATA_BYTES,
+                )),
+                bc_textures: BcTextures::RetainAuthored,
+                texture_access: texture_plan::TextureAccess::Direct,
+                single_texture_mip: false,
             },
             shared: Arc::new(ResolverShared {
                 addon: addon.into_preview_archive_source(),
@@ -539,9 +634,8 @@ impl MaterialResolver {
                 game_vpk_paths,
                 sibling_gmas: OnceLock::new(),
                 game_vpks: OnceLock::new(),
-                decoded_texture_cache: Mutex::new(HashMap::new()),
-                frame_texture_cache: Mutex::new(HashMap::new()),
-                cubemap_cache: Mutex::new(HashMap::new()),
+                material_definitions: MaterialDefinitionCache::default(),
+                texture_assets: TextureAssetCache::default(),
                 sound_scripts: OnceLock::new(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
             }),
@@ -584,7 +678,7 @@ impl MaterialResolver {
         self.variant(ResolverConfig {
             bc_textures: match self.config.bc_textures {
                 BcTextures::Never => BcTextures::Never,
-                BcTextures::IfGpuSupports | BcTextures::Forced(_) => BcTextures::Forced(supported),
+                BcTextures::RetainAuthored | BcTextures::Forced(_) => BcTextures::Forced(supported),
             },
             ..self.config.clone()
         })
@@ -597,32 +691,76 @@ impl MaterialResolver {
         material_name: &str,
     ) -> Option<Arc<ResolvedTexture>> {
         let material_paths = material_paths(material_dirs, material_name);
-        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_primary_material_bytes(material_path, &vmt_bytes)
-                .map(|material| Arc::clone(&material.texture))
-        })
+        let definition = self.material_definition(&material_paths)?;
+        self.resolve_primary_material(&definition.material)
+            .map(|material| Arc::clone(&material.texture))
     }
 
     pub(crate) fn resolve_primary(
         &self,
         material_dirs: &[String],
         material_name: &str,
-    ) -> Option<ResolvedPrimaryMaterial> {
-        let material_paths = material_paths(material_dirs, material_name);
-        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_primary_material_bytes(material_path, &vmt_bytes)
-        })
+    ) -> MaterialResolution<ResolvedPrimaryMaterial> {
+        self.resolve_named_material(
+            material_dirs,
+            material_name,
+            |material| self.resolve_primary_material(material),
+            canonical_error_primary,
+        )
     }
 
     pub(crate) fn resolve_with_base2(
         &self,
         material_dirs: &[String],
         material_name: &str,
-    ) -> Option<ResolvedMaterialTextures> {
-        let material_paths = material_paths(material_dirs, material_name);
-        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_material_bytes(material_path, &vmt_bytes)
-        })
+    ) -> MaterialResolution<ResolvedMaterialTextures> {
+        self.resolve_named_material(
+            material_dirs,
+            material_name,
+            |material| self.resolve_material(material),
+            || {
+                let primary = canonical_error_primary();
+                ResolvedMaterialTextures {
+                    shader: primary.shader,
+                    texture: Some(primary.texture),
+                    texture2: None,
+                    render_mode: primary.render_mode,
+                }
+            },
+        )
+    }
+
+    fn resolve_named_material<T>(
+        &self,
+        material_dirs: &[String],
+        material_name: &str,
+        resolve: impl FnOnce(&EffectiveMaterial) -> Option<T>,
+        missing: impl FnOnce() -> T,
+    ) -> MaterialResolution<T> {
+        let paths = material_paths(material_dirs, material_name);
+        self.material_definition(&paths).map_or_else(
+            || match self.material_source_failure(&paths) {
+                Some(definition::MaterialSourceFailure::Missing) => MaterialResolution::Missing {
+                    fallback: missing(),
+                },
+                Some(definition::MaterialSourceFailure::Malformed(path)) => {
+                    MaterialResolution::Malformed { path }
+                }
+                None => MaterialResolution::Unresolved {
+                    canonical_name: material_name.to_owned(),
+                },
+            },
+            |definition| {
+                let canonical_name = definition.canonical_name();
+                match resolve(&definition.material) {
+                    Some(material) => MaterialResolution::Loaded {
+                        canonical_name,
+                        material,
+                    },
+                    None => MaterialResolution::Unresolved { canonical_name },
+                }
+            },
+        )
     }
 
     pub(crate) fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
@@ -659,51 +797,42 @@ impl MaterialResolver {
         self.sound_scripts().script_files.clone()
     }
 
-    fn resolve_material_bytes(
-        &self,
-        material_path: &ContentPath,
-        vmt_bytes: &[u8],
-    ) -> Option<ResolvedMaterialTextures> {
-        let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.clone()];
-        let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
+    fn resolve_material(&self, material: &EffectiveMaterial) -> Option<ResolvedMaterialTextures> {
         let render_mode = material.render_mode();
         let texture = material
             .effective_base_texture()
-            .and_then(|base_texture| {
-                self.resolve_texture_transfer(
-                    base_texture,
-                    true,
-                    shader::base_read_transfer(&material.shader),
-                )
+            .and_then(|base_texture| self.resolve_material_texture(material, base_texture))
+            .or_else(|| self.mirror_fallback_texture(material))
+            .or_else(|| self.water_fallback_texture(material))
+            .or_else(|| self.envmap_fallback_texture(material));
+        let has_base_texture = texture
+            .as_ref()
+            .is_some_and(|texture| texture.has_effective_base_texture());
+        let accepts_secondary_base = shader::surface_family(&material.shader)
+            .is_some_and(SurfaceFamily::accepts_secondary_base)
+            && material.effective_base_texture().is_some()
+            && has_base_texture;
+        let texture2 = accepts_secondary_base
+            .then(|| {
+                material
+                    .parameter("$basetexture2")
+                    .and_then(|base_texture| self.resolve_material_texture(material, base_texture))
             })
-            .or_else(|| self.mirror_fallback_texture(&material))
-            .or_else(|| self.water_fallback_texture(&material))
-            .or_else(|| self.envmap_fallback_texture(&material));
-        let texture2 = material
-            .parameter("$basetexture2")
-            .and_then(|base_texture| {
-                self.resolve_texture_transfer(
-                    base_texture,
-                    true,
-                    shader::base_read_transfer(&material.shader),
-                )
-            });
+            .flatten();
 
         let shader = self.resolve_shader(
-            &material,
-            texture
+            material,
+            has_base_texture,
+            texture2
                 .as_ref()
-                .is_some_and(|texture| !texture.is_water_fallback()),
+                .is_some_and(|texture| texture.has_effective_base_texture()),
         );
         let render_mode = shader.surface().map_or(render_mode, |surface| {
             surface.draw_render_mode(
-                texture.as_ref().and_then(|texture| texture.flags),
+                texture.as_ref().and_then(|texture| texture.flags()),
                 surface.alpha,
             )
         });
-        // A missing bitmap changes the fallback image, not UnlitGeneric's
-        // authored shading and blend identity.
         (texture.is_some() || texture2.is_some() || shader.surface().is_some()).then_some(
             ResolvedMaterialTextures {
                 shader,
@@ -714,201 +843,112 @@ impl MaterialResolver {
         )
     }
 
-    fn resolve_primary_material_bytes(
+    fn resolve_primary_material(
         &self,
-        material_path: &ContentPath,
-        vmt_bytes: &[u8],
+        material: &EffectiveMaterial,
     ) -> Option<ResolvedPrimaryMaterial> {
-        let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.clone()];
-        let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
-        let render_mode = material.render_mode();
-        let texture = material
-            .effective_base_texture()
-            .and_then(|base_texture| {
-                self.resolve_texture_transfer(
-                    base_texture,
-                    true,
-                    shader::base_read_transfer(&material.shader),
-                )
-            })
-            .or_else(|| self.mirror_fallback_texture(&material))
-            .or_else(|| self.water_fallback_texture(&material))
-            .or_else(|| self.envmap_fallback_texture(&material))?;
-        let shader = self.resolve_shader(&material, !texture.is_water_fallback());
-        let render_mode = shader.surface().map_or(render_mode, |surface| {
-            surface.draw_render_mode(texture.flags, surface.alpha)
-        });
+        let resolved = self.resolve_material(material)?;
         Some(ResolvedPrimaryMaterial {
-            shader,
-            texture,
-            render_mode,
+            shader: resolved.shader,
+            texture: resolved.texture?,
+            texture2: resolved.texture2,
+            render_mode: resolved.render_mode,
         })
     }
 
-    fn effective_material(
+    fn resolve_texture(&self, base_texture: &str) -> Option<Arc<ResolvedTexture>> {
+        self.resolve_texture_with_policy(base_texture, TextureFailurePolicy::Unverified)
+    }
+
+    fn resolve_material_texture(
         &self,
-        vmt_text: &str,
-        depth: usize,
-        visited_includes: &mut Vec<ContentPath>,
-    ) -> Option<EffectiveMaterial> {
-        let document = vformats::vmt::parse(vmt_text, &Limits::default()).ok()?;
-        if let Some(patch) = document.patch() {
-            let mut material = self
-                .effective_patch_include(&patch.include, depth, visited_includes)
-                .unwrap_or_else(|| {
-                    EffectiveMaterial::with_profile(&document, self.config.hardware_profile)
+        material: &EffectiveMaterial,
+        name: &str,
+    ) -> Option<Arc<ResolvedTexture>> {
+        self.resolve_texture_with_policy(name, texture_failure_policy(material))
+    }
+
+    fn resolve_texture_with_policy(
+        &self,
+        base_texture: &str,
+        policy: TextureFailurePolicy,
+    ) -> Option<Arc<ResolvedTexture>> {
+        let path = texture_path(base_texture)?;
+        let selected = match self.selected_texture_asset(&path) {
+            Ok(selected) => selected,
+            Err(TextureSourceError::Missing) => {
+                return (policy == TextureFailurePolicy::NativeErrorTexture).then(|| {
+                    Arc::new(ResolvedTexture::unavailable(
+                        None,
+                        TextureLoadOutcome::MissingSource,
+                    ))
                 });
-            material.apply_patch_values(&document, &patch);
-            return Some(material);
-        }
-
-        Some(EffectiveMaterial::with_profile(
-            &document,
-            self.config.hardware_profile,
-        ))
-    }
-
-    fn effective_patch_include(
-        &self,
-        include: &str,
-        depth: usize,
-        visited_includes: &mut Vec<ContentPath>,
-    ) -> Option<EffectiveMaterial> {
-        if depth >= PATCH_INCLUDE_LIMIT {
-            log::debug!("material patch include recursion limit reached at {include}");
-            return None;
-        }
-        let Some(include_path) = ContentPath::new(include) else {
-            log::debug!("material patch include path rejected: {include}");
-            return None;
-        };
-        if visited_includes.contains(&include_path) {
-            log::debug!("material patch include cycle rejected at {include_path}");
-            return None;
-        }
-
-        visited_includes.push(include_path.clone());
-        let include_bytes = self.entry_bytes_from_sources(&include_path);
-        let material = include_bytes.and_then(|include_bytes| {
-            let include_text = String::from_utf8_lossy(&include_bytes);
-            self.effective_material(&include_text, depth + 1, visited_includes)
-        });
-        visited_includes.pop();
-        material
-    }
-
-    fn resolve_texture(
-        &self,
-        base_texture: &str,
-        preserve_alpha: bool,
-    ) -> Option<Arc<ResolvedTexture>> {
-        self.resolve_texture_transfer(
-            base_texture,
-            preserve_alpha,
-            TextureReadTransfer::SrgbToLinear,
-        )
-    }
-
-    fn resolve_texture_transfer(
-        &self,
-        base_texture: &str,
-        preserve_alpha: bool,
-        transfer: TextureReadTransfer,
-    ) -> Option<Arc<ResolvedTexture>> {
-        let texture_path = texture_path(base_texture)?;
-        // Include the size cap in the shared cache key or a bounded resolver can receive
-        // an uncapped decode.
-        let max_dimension = self.config.decoded_texture_max_dimension;
-        let bc_cache_key = DecodedTextureCacheKey::Bc {
-            path: texture_path.clone(),
-            max_dimension,
-        };
-        if self.bc_textures_enabled()
-            && let Some(texture) = self.cached_decoded_texture(&bc_cache_key)
-        {
-            return Some(texture);
-        }
-
-        let rgba_cache_key = DecodedTextureCacheKey::Rgba {
-            path: texture_path.clone(),
-            preserve_alpha,
-            transfer,
-            max_dimension,
-        };
-        if let Some(texture) = self.cached_decoded_texture(&rgba_cache_key) {
-            return Some(texture);
-        }
-
-        self.find_entry_by_source(std::slice::from_ref(&texture_path), |_, vtf_bytes| {
-            if self.bc_textures_enabled()
-                && let Some(texture) =
-                    resolved_bc_texture(&vtf_bytes, self.config.decoded_texture_max_dimension)
+            }
+            Err(TextureSourceError::Preparation { .. }) => {
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    None,
+                    TextureLoadOutcome::Unplanned,
+                )));
+            }
+            Err(
+                TextureSourceError::EncodedBudget { metadata, .. }
+                | TextureSourceError::WorkingBudget { metadata, .. },
+            ) => {
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    metadata,
+                    TextureLoadOutcome::SourceBudgetRejected,
+                )));
+            }
+            Err(TextureSourceError::Invalid {
+                error: TextureAssetError::Vtf(error),
+                ..
+            }) if policy == TextureFailurePolicy::NativeErrorTexture
+                && native_invalid_texture(&error) =>
             {
-                return self.cache_decoded_texture(bc_cache_key.clone(), texture);
+                log::warn!("texture {path}: {error}");
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    None,
+                    TextureLoadOutcome::InvalidSource,
+                )));
             }
-
-            match decode_vtf_rgba_max(&vtf_bytes, self.config.decoded_texture_max_dimension) {
-                Ok(decoded) => {
-                    let mut rgba = decoded.image.rgba;
-                    if !preserve_alpha {
-                        force_opaque_alpha(&mut rgba);
+            Err(error) => {
+                log::warn!("texture {path}: {error}");
+                return None;
+            }
+        };
+        log::debug!("texture {path}: selected {:?}", selected.origin);
+        let source_metadata = selected.asset.metadata_arc();
+        let outcome = self.resident_texture(&selected, 0..1, !self.bc_textures_enabled());
+        let texture = match outcome {
+            Ok(resident) => ResolvedTexture::from_resident(resident, source_metadata),
+            Err(error) => {
+                log::warn!("texture {path}: {error}");
+                if matches!(&error,TextureAssetError::Vtf(error) if native_invalid_texture(error))
+                    && policy != TextureFailurePolicy::NativeErrorTexture
+                {
+                    return None;
+                }
+                let outcome = match &error {
+                    TextureAssetError::Vtf(error) if native_invalid_texture(error) => {
+                        TextureLoadOutcome::InvalidPayload
                     }
-                    let mut texture = ResolvedTexture::rgba(
-                        rgba,
-                        decoded.image.width,
-                        decoded.image.height,
-                        decoded.original_dimensions[0],
-                        decoded.original_dimensions[1],
-                        false,
-                    );
-                    texture.flags = Some(decoded.flags);
-                    texture.reflectivity_bits = Some(decoded.reflectivity_bits);
-                    let texture = with_generated_mip_chain(
-                        downscale_resolved_texture(
-                            texture,
-                            self.config.decoded_texture_max_dimension,
-                        ),
-                        transfer,
-                    );
-                    self.cache_decoded_texture(rgba_cache_key.clone(), texture)
-                }
-                Err(error) => {
-                    log::debug!("material texture decode failed for {texture_path}: {error}");
-                    None
-                }
+                    TextureAssetError::DimensionLimit(_)
+                    | TextureAssetError::Budget
+                    | TextureAssetError::ResidentImageBudget { .. }
+                    | TextureAssetError::WorkingLimit { .. }
+                    | TextureAssetError::Vtf(vformats::vtf::VtfError::DecodedTooLarge { .. })
+                    | TextureAssetError::ImageCount(_) => TextureLoadOutcome::QualityRejected,
+                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
+                        TextureLoadOutcome::Unplanned
+                    }
+                    _ => TextureLoadOutcome::Unsupported,
+                };
+                ResolvedTexture::unavailable(Some(source_metadata), outcome)
             }
-        })
+        };
+        Some(Arc::new(texture))
     }
 
-    fn cached_decoded_texture(&self, key: &DecodedTextureCacheKey) -> Option<Arc<ResolvedTexture>> {
-        self.shared.decoded_texture_cache.lock().get(key).cloned()
-    }
-
-    fn cache_decoded_texture(
-        &self,
-        key: DecodedTextureCacheKey,
-        texture: ResolvedTexture,
-    ) -> Option<Arc<ResolvedTexture>> {
-        let texture = Arc::new(texture);
-        let byte_len = texture.mip_chain_byte_len();
-        let mut cache = self.shared.decoded_texture_cache.lock();
-        if let Some(cached) = cache.get(&key) {
-            return Some(Arc::clone(cached));
-        }
-        if let Some(budget) = &self.config.decoded_texture_budget
-            && !budget.try_reserve(byte_len)
-        {
-            return None;
-        }
-        cache.insert(key, Arc::clone(&texture));
-        drop(cache);
-        Some(texture)
-    }
-
-    /// An envmap without a basetexture is chrome, not a missing material.
-    /// Use the envmap if readable, else gray. A named but missing basetexture
-    /// still gets the error checkerboard.
     fn envmap_fallback_texture(
         &self,
         material: &EffectiveMaterial,
@@ -920,18 +960,13 @@ impl MaterialResolver {
             .parameter("$envmap")
             .and_then(normalize_texture_name)?;
         if env_map != "env_cubemap"
-            && let Some(texture) = self.resolve_texture(&env_map, false)
+            && let Some(texture) = self.resolve_texture(&env_map)
         {
-            return Some(texture);
+            return Some(Arc::new((*texture).clone().unmapped()));
         }
-        Some(Arc::new(ResolvedTexture::rgba(
-            ENVMAP_FALLBACK_RGBA.to_vec(),
-            1,
-            1,
-            1,
-            1,
-            false,
-        )))
+        Some(Arc::new(
+            ResolvedTexture::rgba(ENVMAP_FALLBACK_RGBA.to_vec(), 1, 1, 1, 1, false).unmapped(),
+        ))
     }
 
     fn mirror_fallback_texture(
@@ -939,7 +974,7 @@ impl MaterialResolver {
         material: &EffectiveMaterial,
     ) -> Option<Arc<ResolvedTexture>> {
         mirror::is_mirror_shader(&material.shader)
-            .then(|| Arc::new(ResolvedTexture::rgba(vec![255; 4], 1, 1, 1, 1, false)))
+            .then(|| Arc::new(ResolvedTexture::rgba(vec![255; 4], 1, 1, 1, 1, false).unmapped()))
     }
 
     fn water_fallback_texture(&self, material: &EffectiveMaterial) -> Option<Arc<ResolvedTexture>> {
@@ -957,7 +992,7 @@ impl MaterialResolver {
 
     fn bc_textures_enabled(&self) -> bool {
         match self.config.bc_textures {
-            BcTextures::IfGpuSupports => bc_supported(),
+            BcTextures::RetainAuthored => true,
             BcTextures::Never => false,
             #[cfg(test)]
             BcTextures::Forced(supported) => supported,
@@ -1102,7 +1137,6 @@ impl MaterialResolver {
         self.find_entry_by_source(std::slice::from_ref(path), |_, bytes| Some(bytes))
     }
 
-    /// Defer sibling GMA and VPK indexing until earlier sources miss.
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
             .pakfile
@@ -1216,16 +1250,15 @@ impl SourceRef<'_> {
         }
     }
 
-    /// `Addon` and `GameVpk` take `&str`: both are lower-level archive readers
-    /// with their own path space and callers outside this resolver.
-    /// `Ok(None)` when this tier simply does not have the path; `Err` when it
-    /// has it and could not read it.
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
         match self {
             Self::Pakfile(pakfile) => pakfile.entry_bytes(path),
             Self::Addon(addon) => match addon.entry_bytes(path.as_str()) {
                 Ok(bytes) => Ok(Some(bytes)),
-                Err(PreviewArchiveSourceError::EntryNotFound(_)) => Ok(None),
+                Err(
+                    PreviewArchiveSourceError::EntryNotFound(_)
+                    | PreviewArchiveSourceError::Gma(crate::bridge::gma::GmaError::EntryNotFound),
+                ) => Ok(None),
                 Err(error) => Err(SourceError::Addon(error)),
             },
             Self::Loose(loose_dir) => loose_dir.entry_bytes(path),
@@ -1285,23 +1318,46 @@ impl EffectiveMaterial {
 
     fn effective_base_texture(&self) -> Option<&str> {
         let base = self.parameter("$basetexture")?;
-        let world = [
-            "LightmappedGeneric",
-            "LightmappedGeneric_DX9",
-            "WorldVertexTransition",
-            "WorldVertexTransition_DX9",
-        ]
-        .iter()
-        .any(|shader| self.shader.eq_ignore_ascii_case(shader));
-        let model = ["VertexLitGeneric", "VertexLitGeneric_DX9"]
-            .iter()
-            .any(|shader| self.shader.eq_ignore_ascii_case(shader));
-        if self.parameter("$bumpmap").is_some()
-            && (model || (world && !vmt_bool(self.parameter("$nodiffusebumplighting"))))
-        {
+        let family = shader::surface_family(&self.shader);
+        let diffuse_bump = match family {
+            Some(SurfaceFamily::VertexLit) => true,
+            Some(SurfaceFamily::Lightmapped | SurfaceFamily::Transition) => {
+                !vmt_bool(self.parameter("$nodiffusebumplighting"))
+            }
+            _ => false,
+        };
+        if self.effective_bumpmap().is_some() && diffuse_bump {
             return self.parameter("$albedo").or(Some(base));
         }
         Some(base)
+    }
+
+    fn effective_bumpmap(&self) -> Option<&str> {
+        let family = shader::surface_family(&self.shader)?;
+        family
+            .accepts_primary_bumpmap(vmt_bool(self.parameter("$decal")))
+            .then(|| self.parameter("$bumpmap"))
+            .flatten()
+    }
+
+    fn effective_bumpmap2(&self) -> Option<&str> {
+        shader::surface_family(&self.shader)?
+            .accepts_secondary_bumpmap(
+                vmt_bool(self.parameter("$decal")),
+                self.parameter("$bumpmap").is_some(),
+            )
+            .then(|| self.parameter("$bumpmap2"))
+            .flatten()
+    }
+
+    fn effective_envmap_mask(&self) -> Option<&str> {
+        shader::surface_family(&self.shader)?
+            .accepts_envmap_mask(
+                vmt_bool(self.parameter("$decal")),
+                self.parameter("$bumpmap").is_some(),
+            )
+            .then(|| self.parameter("$envmapmask"))
+            .flatten()
     }
 
     fn render_mode(&self) -> RenderMode {
@@ -1351,6 +1407,30 @@ fn vmt_bool(value: Option<&str>) -> bool {
             .is_ok_and(|number| number.is_finite() && number != 0.0)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextureFailurePolicy {
+    NativeErrorTexture,
+    Unverified,
+}
+
+fn texture_failure_policy(material: &EffectiveMaterial) -> TextureFailurePolicy {
+    if matches!(
+        shader::surface_family(&material.shader),
+        Some(SurfaceFamily::Lightmapped | SurfaceFamily::Unlit | SurfaceFamily::VertexLit)
+    ) {
+        TextureFailurePolicy::NativeErrorTexture
+    } else {
+        TextureFailurePolicy::Unverified
+    }
+}
+
+fn native_invalid_texture(error: &vformats::vtf::VtfError) -> bool {
+    matches!(
+        error,
+        vformats::vtf::VtfError::BadMagic | vformats::vtf::VtfError::Truncated { .. }
+    )
+}
+
 fn is_water_shader(shader: &str) -> bool {
     strip_prefix_ascii_case(shader, "water").is_some()
 }
@@ -1389,7 +1469,7 @@ pub fn srgb_byte_to_linear(byte: u8) -> f32 {
 #[derive(Debug)]
 struct PakSource {
     pakfile: MapPakFile,
-    entries: HashMap<String, usize>,
+    entries: HashMap<String, (usize, u64)>,
 }
 
 impl PakSource {
@@ -1407,7 +1487,7 @@ impl PakSource {
         };
         let entries = entries
             .into_iter()
-            .map(|entry| (entry.path, entry.index))
+            .map(|entry| (entry.path, (entry.index, entry.size)))
             .collect::<HashMap<_, _>>();
         Some(Self { pakfile, entries })
     }
@@ -1417,7 +1497,7 @@ impl PakSource {
     }
 
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
-        let Some(index) = self.entries.get(path.as_str()).copied() else {
+        let Some((index, _)) = self.entries.get(path.as_str()).copied() else {
             return Ok(None);
         };
         self.pakfile
@@ -1438,7 +1518,6 @@ impl LooseSourceDir {
 
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
         let mut candidate = self.root.clone();
-        // Reject traversal here too, before turning a content path into a filesystem path.
         for segment in path.as_str().split('/') {
             if segment.is_empty() || segment == "." || segment == ".." {
                 return Ok(None);

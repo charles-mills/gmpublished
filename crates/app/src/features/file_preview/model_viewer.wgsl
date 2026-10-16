@@ -5,6 +5,10 @@
 @group(1) @binding(1) var base_texture2: texture_2d<f32>;
 @group(0) @binding(5) var lightmap_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
+@group(1) @binding(21) var base2_sampler:sampler;
+@group(1) @binding(22) var normal_sampler:sampler;
+@group(1) @binding(23) var normal2_sampler:sampler;
+@group(1) @binding(28) var model_exponent_sampler:sampler;
 @group(1) @binding(4) var lightmap_sampler: sampler;
 @group(1) @binding(5) var<uniform> material: Material;
 @group(1) @binding(6) var normal_texture: texture_2d_array<f32>;
@@ -20,11 +24,17 @@ const MODEL_MATERIAL_RIM:u32=1u;
 const MODEL_MATERIAL_PIXEL_LIGHTING:u32=2u;
 const LIGHTING_LINEAR_ILLUMINATION:u32=1u;
 const LIGHTING_STATIC_PROP:u32=2u;
+const LIGHTING_COMPILED_VERTEX:u32=4096u;
 const LIGHTING_RUNTIME_CONTEXT:u32=4u;
 const LIGHTING_MODEL_DRAW:u32=8u;
 const LIGHTING_LIGHTMAP:u32=16u;
 const LIGHTING_PREVIEW:u32=32u;
 const LIGHTING_LEGACY_VERTEX_COLOR:u32=64u;
+const LIGHTING_RECEIVER_LIGHTMAP:u32=128u;
+const LIGHTING_RECEIVER_CONSTANT:u32=256u;
+const LIGHTING_WORLD_CONSTANT:u32=512u;
+const LIGHTING_BATCHED_STATIC_DECAL:u32=1024u;
+const LIGHTING_DIRECTIONAL_LIGHTMAP_BLACK:u32=2048u;
 
 struct SurfaceMark {
     origin:vec3<f32>, fade_min_sq:f32,
@@ -57,7 +67,7 @@ struct VertexOutput {
     @location(2) lightmap_uv: vec2<f32>,
     @location(3) color: vec3<f32>,
     @location(4) blend_alpha: f32,
-    @location(5) world_position: vec3<f32>,
+    @location(5) world_position_clip: vec4<f32>,
     @location(6) lightmap_bump_step:f32,
     @location(7) opacity:f32,
     @location(8) illumination:vec3<f32>,
@@ -70,8 +80,7 @@ struct VertexOutput {
     @location(15) eye_vertex_unit:vec3<f32>,
 }
 
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
+fn transform_model_vertex(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = uniforms.view_proj * vec4<f32>(input.position, 1.0);
     out.normal = input.normal;
@@ -79,7 +88,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.tangent_vertex_unit = vec4<f32>(input.tangent_s * inverseSqrt(max(dot(input.tangent_s,input.tangent_s),0.00000001)),input.tangent_sign);
     out.light_attenuation=vec4<f32>(0.0);
     if (input.lighting_mode&LIGHTING_RUNTIME_CONTEXT)!=0u {
-        let context=model_lighting_contexts[input.lighting_context];
+        let context=model_lighting_state(input.lighting_context,input.lighting_mode);
         for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
             out.light_attenuation[i]=model_light_attenuation(context.lights[i],input.position);
         }
@@ -123,10 +132,12 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     }
     out.illumination = input.illumination;
     if (input.lighting_mode&LIGHTING_RUNTIME_CONTEXT)!=0u && !model_pixel_lighting_enabled() {
-        out.illumination=model_vertex_lighting(input.position,out.normal_vertex_unit,out.light_attenuation,input.lighting_context);
+        let lighting=model_vertex_lighting(input.position,out.normal_vertex_unit,out.light_attenuation,model_lighting_state(input.lighting_context,input.lighting_mode));
+        if (input.lighting_mode&LIGHTING_COMPILED_VERTEX)!=0u {out.illumination+=lighting;}
+        else {out.illumination=lighting;}
     }
     out.vertex_state = vec4<u32>(input.lighting_mode,input.lighting_context,bitcast<u32>(input.opacity),bitcast<u32>(surface_mark_fade));
-    out.world_position = input.position;
+    out.world_position_clip = vec4<f32>(input.position,view_clip_distance(input.position));
     return out;
 }
 
@@ -135,14 +146,20 @@ fn vertex_lighting_context(input:VertexOutput)->u32 {return input.vertex_state.y
 fn vertex_draw_opacity(input:VertexOutput)->f32 {return bitcast<f32>(input.vertex_state.z);}
 fn vertex_surface_mark_fade(input:VertexOutput)->f32 {return bitcast<f32>(input.vertex_state.w);}
 
+fn quantized_vertex_alpha(alpha:f32)->f32 {
+    // The float mantissa rounds to an alpha byte, including ties to even.
+    let rounding_bias=8388608.0;
+    return f32(bitcast<u32>(alpha*255.0+rounding_bias)&255u)/255.0;
+}
+
 fn shade(input: VertexOutput) -> vec4<f32> {
-    if dot(vec4<f32>(input.world_position,1.0),uniforms.clip_plane)<0.0 {discard;}
+    if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
     var diagnostic_value=vec3<f32>(0.0);
     switch uniforms.diagnostic.mode {
         case DIAGNOSTIC_RAW_NORMAL: {diagnostic_value=input.normal;}
         case DIAGNOSTIC_RAW_TANGENT_S: {diagnostic_value=input.tangent_s;}
         case DIAGNOSTIC_RAW_TANGENT_T: {diagnostic_value=input.tangent_t;}
-        case DIAGNOSTIC_POSITION: {diagnostic_value=input.world_position;}
+        case DIAGNOSTIC_POSITION: {diagnostic_value=input.world_position_clip.xyz;}
         case DIAGNOSTIC_UNIT_NORMAL: {diagnostic_value=input.normal_vertex_unit;}
         case DIAGNOSTIC_UNIT_TANGENT_S: {diagnostic_value=input.tangent_vertex_unit.xyz;}
         case DIAGNOSTIC_UNIT_EYE: {diagnostic_value=input.eye_vertex_unit;}
@@ -155,24 +172,29 @@ fn shade(input: VertexOutput) -> vec4<f32> {
         }
         default: {}
     }
-    if uniforms.diagnostic.mode!=DIAGNOSTIC_DISABLED {
+    if uniforms.diagnostic.mode!=DIAGNOSTIC_DISABLED && uniforms.diagnostic.mode<DIAGNOSTIC_SURFACE_POSITION {
         return vec4<f32>(clamp(diagnostic_value*uniforms.diagnostic.transform.w+uniforms.diagnostic.transform.xyz,vec3<f32>(0.0),vec3<f32>(1.0)),1.0);
     }
     let height_fog=uniforms.fog.mode==FOG_HEIGHT;
+    let mark_fade=vertex_surface_mark_fade(input);
+    if mark_fade<=0.0 {discard;}
     let weight=surface_weight(input.uv,input.blend_alpha,height_fog);
     let uv=surface_uv(input.uv,surface.base_s,surface.base_t);
     var albedo=textureSample(base_texture,base_sampler,uv);
+    let sampled_base=albedo;
     if surface.flags.x==SURFACE_DECAL_MODULATE {
-        if albedo.a<=0.0 || vertex_surface_mark_fade(input)<=0.0 {discard;}
-        let factor=pow(view_fog_factor(input.world_position,1.0/input.clip_position.w),0.4);
+        if albedo.a<=0.0 {discard;}
+        let factor=pow(view_fog_factor(input.world_position_clip.xyz,1.0/input.clip_position.w),0.4);
         let opacity=select(factor*factor,factor,uniforms.fog.mode==FOG_HEIGHT);
         return vec4<f32>(mix(albedo.rgb,vec3<f32>(0.5),opacity),albedo.a);
     }
     if surface.alpha_state.x==0u {albedo.a=1.0;}
-    if surface.flags.x==SURFACE_TRANSITION || (surface.flags.x==SURFACE_NONE && material.unlit==0u) {
-        var second=textureSample(base_texture2,base_sampler,uv);
+    var environment_alpha=albedo.a;
+    if surface.blend.base_mode!=BASE_BLEND_SINGLE {
+        var second=textureSample(base_texture2,base2_sampler,uv);
         if surface.alpha_state.y==0u {second.a=1.0;}
-        albedo=mix(albedo,second,weight);
+        albedo=vec4<f32>(mix(albedo.rgb,second.rgb,weight),albedo.a);
+        environment_alpha=mix(albedo.a,second.a,weight);
     }
     let base_alpha=albedo.a;
     let detail_color=surface_detail(input.uv);
@@ -181,7 +203,6 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     let explicit_lighting=(vertex_lighting_flags(input)&LIGHTING_LINEAR_ILLUMINATION)!=0u;
     let static_prop=(vertex_lighting_flags(input)&LIGHTING_STATIC_PROP)!=0u;
     let model_draw=(vertex_lighting_flags(input)&(LIGHTING_STATIC_PROP|LIGHTING_MODEL_DRAW))!=0u;
-    // Flat alpha preserves byte cutoffs.
     let draw_opacity=clamp(select(input.opacity,vertex_draw_opacity(input),model_draw),0.0,1.0);
     let model=surface.flags.x==SURFACE_VERTEX_LIT || explicit_lighting || static_prop || model_draw;
     var modulation=surface_modulation(model,vec3<f32>(1.0),model_draw);
@@ -195,16 +216,25 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     }
     var opacity=albedo.a;
     if material.texture_alpha_opaque!=0u || (surface.flags.x!=SURFACE_NONE && surface.misc.w<0.5) {opacity=1.0;}
-    // Lightmapped material alpha is squared.
     opacity*=select(modulation.a,modulation.a*modulation.a,world);
     if material.vertex_alpha!=0u || explicit_lighting || model_draw {opacity*=draw_opacity;}
+    if material.vertex_alpha!=0u {opacity*=quantized_vertex_alpha(mark_fade);}
     let alpha_test=select(material.alpha_test!=0u,surface.state.x!=0u,surface.flags.x!=SURFACE_NONE);
     if alpha_test && opacity<surface.misc.x {discard;}
+    switch uniforms.diagnostic.mode {
+        case DIAGNOSTIC_SURFACE_POSITION: {diagnostic_value=input.world_position_clip.xyz;}
+        case DIAGNOSTIC_SURFACE_UV: {diagnostic_value=vec3<f32>(uv,0.0);}
+        case DIAGNOSTIC_SURFACE_ALPHA: {diagnostic_value=vec3<f32>(sampled_base.a);}
+        case DIAGNOSTIC_SURFACE_BASE_COLOR: {diagnostic_value=sampled_base.rgb;}
+        default: {}
+    }
+    if uniforms.diagnostic.mode>=DIAGNOSTIC_SURFACE_POSITION {
+        return vec4<f32>(clamp(diagnostic_value*uniforms.diagnostic.transform.w+uniforms.diagnostic.transform.xyz,vec3<f32>(0.0),vec3<f32>(1.0)),1.0);
+    }
     if material.alpha_test!=0u {opacity=1.0;}
     if surface.state.w!=0u && modulation.a==1.0 && (!model_draw || draw_opacity==1.0) {
         opacity=select(1.0,draw_opacity,model_draw);
     }
-    opacity*=vertex_surface_mark_fade(input);
     var lit:vec3<f32>;
     if material.unlit!=0u {
         lit=albedo.rgb;
@@ -215,16 +245,23 @@ fn shade(input: VertexOutput) -> vec4<f32> {
         } else {lit=albedo.rgb*input.illumination;}
     } else if explicit_lighting {
         lit=albedo.rgb*input.illumination;
-    } else if (vertex_lighting_flags(input)&LIGHTING_LIGHTMAP)!=0u {
+    } else if (vertex_lighting_flags(input)&(LIGHTING_RECEIVER_CONSTANT|LIGHTING_WORLD_CONSTANT))!=0u {
+        lit=albedo.rgb*input.illumination;
+        if material.bump_mode!=BUMP_NONE && (vertex_lighting_flags(input)&LIGHTING_DIRECTIONAL_LIGHTMAP_BLACK)!=0u {
+            lit=vec3<f32>(0.0);
+        } else if material.bump_mode==BUMP_SSBUMP {
+            let normal=surface_bump_normal(input,weight);
+            lit*=dot(bump_lightmap_weights(normal,true,detail_color.rgb),vec3<f32>(1.0));
+        }
+    } else if (vertex_lighting_flags(input)&(LIGHTING_LIGHTMAP|LIGHTING_RECEIVER_LIGHTMAP))!=0u {
         var lightmap=textureSample(lightmap_texture,lightmap_sampler,input.lightmap_uv).rgb*lightmap_scale();
-        if material.bump_mode!=BUMP_NONE && input.lightmap_bump_step>0.0 {
-            let bump_uv=surface_uv(input.uv,material.normal_s,material.normal_t);
-            let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
-            let first=textureSample(normal_texture,base_sampler,bump_uv,layer).xyz;
-            let second=textureSample(normal_texture2,base_sampler,bump_uv,0).xyz;
-            let encoded=mix(first,second,weight);
-            let normal=select(encoded*2.0-1.0,encoded,material.bump_mode==BUMP_SSBUMP);
-            lightmap=bumped_lightmap(input.lightmap_uv,input.lightmap_bump_step,normal,material.bump_mode==BUMP_SSBUMP,detail_color.rgb);
+        if material.bump_mode!=BUMP_NONE {
+            let normal=surface_bump_normal(input,weight);
+            if input.lightmap_bump_step>0.0 {
+                lightmap=bumped_lightmap(input.lightmap_uv,input.lightmap_bump_step,normal,material.bump_mode==BUMP_SSBUMP,detail_color.rgb);
+            } else {
+                if material.bump_mode==BUMP_SSBUMP {lightmap*=dot(bump_lightmap_weights(normal,true,detail_color.rgb),vec3<f32>(1.0));}
+            }
         }
         lit=albedo.rgb*lightmap;
     } else if (vertex_lighting_flags(input)&LIGHTING_PREVIEW)!=0u {
@@ -234,9 +271,14 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     } else if (vertex_lighting_flags(input)&LIGHTING_LEGACY_VERTEX_COLOR)!=0u {
         lit=albedo.rgb*input.color*2.0;
     } else {lit=albedo.rgb;}
-    if uniforms.shading_mode==SHADING_FULLBRIGHT && material.unlit==0u {
+    if uniforms.shading_mode==SHADING_FULLBRIGHT && material.unlit==0u
+        && ((vertex_lighting_flags(input)&(LIGHTING_RECEIVER_LIGHTMAP|LIGHTING_RECEIVER_CONSTANT))==0u
+            || (vertex_lighting_flags(input)&LIGHTING_BATCHED_STATIC_DECAL)!=0u) {
         lit=albedo.rgb;
-
+        if (vertex_lighting_flags(input)&(LIGHTING_LIGHTMAP|LIGHTING_WORLD_CONSTANT|LIGHTING_BATCHED_STATIC_DECAL))!=0u && material.bump_mode==BUMP_SSBUMP {
+            let normal=surface_bump_normal(input,weight);
+            lit*=dot(bump_lightmap_weights(normal,true,detail_color.rgb),vec3<f32>(1.0));
+        }
     }
     let skin_emission_order=!world && model_material.skin!=0u;
     if world {
@@ -247,9 +289,9 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     lit=surface_emission(lit,albedo.rgb,emission_alpha,uv,input.normal_vertex_unit,input.eye_vertex_unit);
     if skin_emission_order {lit=surface_detail_post(lit,detail_color);}
     if (vertex_lighting_flags(input)&LIGHTING_RUNTIME_CONTEXT)!=0u {lit+=model_specular_lighting(input,unmodulated_albedo,emission_alpha);}
-    lit+=surface_environment_lighting(input,weight,emission_alpha,world);
-    lit=mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position,1.0/input.clip_position.w));
-    if dot(vec4<f32>(input.world_position,1.0),uniforms.clip_plane)<0.0 {discard;}
+    lit+=surface_environment_lighting(input,weight,select(emission_alpha,environment_alpha,world),world);
+    lit=mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w));
+    if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
     return vec4<f32>(lit,opacity);
 }
 
@@ -259,20 +301,27 @@ fn fs_main(input:VertexOutput) -> @location(0) vec4<f32> { return shade(input); 
 @fragment
 fn fs_refraction(input:VertexOutput) -> @location(0) vec4<f32> {
     let colour=shade(input);
-    let fog=select(1.0,view_fog_factor(input.world_position,1.0/input.clip_position.w),uniforms.fog.mode==FOG_HEIGHT);
+    let fog=select(1.0,view_fog_factor(input.world_position_clip.xyz,1.0/input.clip_position.w),uniforms.fog.mode==FOG_HEIGHT);
     return vec4<f32>(colour.rgb,fog);
 }
 
 @fragment
 fn fs_additive(input:VertexOutput) -> @location(0) vec4<f32> {
     let colour=shade(input);
-    // Additive fog attenuates toward black.
-    let fog=view_fog_color_factor(input.world_position,1.0/input.clip_position.w);
+    let fog=view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w);
     return vec4<f32>(max(colour.rgb-uniforms.fog_color.rgb*fog,vec3<f32>(0.0))*colour.a,colour.a);
 }
 
-fn bumped_lightmap(uv:vec2<f32>, step:f32, tangent_normal:vec3<f32>, ssbump:bool, detail_color:vec3<f32>) -> vec3<f32> {
-    if step <= 0.0 { return textureSample(lightmap_texture, lightmap_sampler, uv).rgb * lightmap_scale(); }
+fn surface_bump_normal(input:VertexOutput,weight:f32)->vec3<f32> {
+    let uv=surface_uv(input.uv,material.normal_s,material.normal_t);
+    let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
+    let first=textureSample(normal_texture,normal_sampler,uv,layer).xyz;
+    let second=textureSample(normal_texture2,normal2_sampler,uv,0).xyz;
+    let encoded=mix(first,second,weight);
+    return select(encoded*2.0-1.0,encoded,material.bump_mode==BUMP_SSBUMP);
+}
+
+fn bump_lightmap_weights(tangent_normal:vec3<f32>,ssbump:bool,detail_color:vec3<f32>)->vec3<f32> {
     var weights = tangent_normal;
     if !ssbump {
         weights = clamp(vec3<f32>(dot(tangent_normal,vec3<f32>(0.81649658,0.0,0.57735027)),
@@ -282,6 +331,12 @@ fn bumped_lightmap(uv:vec2<f32>, step:f32, tangent_normal:vec3<f32>, ssbump:bool
         if surface.flags.y==11u {weights*=2.0*detail_color;}
         weights /= max(dot(weights,vec3<f32>(1.0)),0.000001);
     }
+    return weights;
+}
+
+fn bumped_lightmap(uv:vec2<f32>, step:f32, tangent_normal:vec3<f32>, ssbump:bool, detail_color:vec3<f32>) -> vec3<f32> {
+    if step <= 0.0 { return textureSample(lightmap_texture, lightmap_sampler, uv).rgb * lightmap_scale(); }
+    let weights=bump_lightmap_weights(tangent_normal,ssbump,detail_color);
     let a=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step,0.0)).rgb;
     let b=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step*2.0,0.0)).rgb;
     let c=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step*3.0,0.0)).rgb;
@@ -314,13 +369,13 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
     if (surface.env_flags.w&ENV_BUMP)!=0u {
         let uv=surface_uv(input.uv,material.normal_s,material.normal_t);
         let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
-        let first=textureSample(normal_texture,base_sampler,uv,layer);
+        let first=textureSample(normal_texture,normal_sampler,uv,layer);
         var encoded=first.xyz;
         normal_alpha=first.a;
         if (surface.env_flags.w&ENV_SECOND_NORMAL)!=0u {
-            let second=textureSample(normal_texture2,base_sampler,uv,0);
+            let second=textureSample(normal_texture2,normal2_sampler,uv,0);
             encoded=mix(encoded,second.xyz,weight);
-            if surface.flags.w!=0u {normal_alpha=mix(first.a,second.a,weight);}
+            if surface_uses_blend_modulation(uniforms.fog.mode==FOG_HEIGHT) {normal_alpha=mix(first.a,second.a,weight);}
         }
         var tangent_normal=encoded*2.0-1.0;
         if (surface.env_flags.w&ENV_SSBUMP)!=0u {
@@ -340,9 +395,9 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
     if surface.env_flags.y==ENV_MASK_NORMAL_ALPHA {mask=vec3<f32>(normal_alpha);}
     if surface.env_flags.y==ENV_MASK_TEXTURE {
         let layer=i32(surface.env_flags.z%max(textureNumLayers(surface_envmask),1u));
-        mask=textureSample(surface_envmask,base_sampler,surface_uv(input.uv,surface.env_mask_s,surface.env_mask_t),layer).rgb;
+        mask=textureSample(surface_envmask,surface_envmask_sampler,surface_uv(input.uv,surface.env_mask_s,surface.env_mask_t),layer).rgb;
     }
-    var eye=uniforms.camera_position.xyz-input.world_position;
+    var eye=uniforms.camera_position.xyz-input.world_position_clip.xyz;
     if !world && (surface.env_flags.w&ENV_BUMP)!=0u {eye=input.eye_vertex_unit;}
     let direction=source_cube_reflection(normal,eye);
     let radiance=textureSample(surface_environment,surface_env_sampler,direction).rgb*surface.env_params.z;
@@ -354,7 +409,7 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
 fn model_sampled_normal(input:VertexOutput,base_alpha:f32)->vec4<f32> {
     let uv=surface_uv(input.uv,surface.base_s,surface.base_t);
     var texel=vec4<f32>(0.5,0.5,1.0,1.0);
-    if model_material.normal!=0u {texel=textureSample(normal_texture,base_sampler,uv,0);}
+    if model_material.normal!=0u {texel=textureSample(normal_texture,normal_sampler,uv,0);}
     let base_mask=model_material.skin!=0u && (model_material.features&MODEL_BASE_ALPHA_MASK)!=0u;
     let tangent_normal=source_model_phong_tangent_normal(texel.xyz,base_mask);
     var tangent_t=cross(input.normal_vertex_unit,input.tangent_vertex_unit.xyz)*input.tangent_vertex_unit.w;
@@ -363,7 +418,7 @@ fn model_sampled_normal(input:VertexOutput,base_alpha:f32)->vec4<f32> {
     return vec4<f32>(normal,source_model_phong_mask(texel.a,base_alpha,base_mask));
 }
 
-fn model_ambient_cube(context:ModelLightingContext)->array<vec3<f32>,6> {
+fn model_ambient_cube(context:ModelLightingState)->array<vec3<f32>,6> {
     var cube:array<vec3<f32>,6>;
     for(var i=0u;i<6u;i+=1u) {cube[i]=context.ambient[i].rgb;}
     return cube;
@@ -373,8 +428,7 @@ fn model_pixel_lighting_enabled()->bool {
     return (model_material.lighting&MODEL_MATERIAL_PIXEL_LIGHTING)!=0u;
 }
 
-fn model_vertex_lighting(position:vec3<f32>,normal:vec3<f32>,attenuation:vec4<f32>,context_index:u32)->vec3<f32> {
-    let context=model_lighting_contexts[context_index];
+fn model_vertex_lighting(position:vec3<f32>,normal:vec3<f32>,attenuation:vec4<f32>,context:ModelLightingState)->vec3<f32> {
     var result=source_model_ambient(normal,model_ambient_cube(context));
     for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
         let light=context.lights[i];
@@ -389,16 +443,16 @@ fn model_vertex_lighting(position:vec3<f32>,normal:vec3<f32>,attenuation:vec4<f3
 }
 
 fn model_diffuse_lighting(input:VertexOutput,base_alpha:f32)->vec3<f32> {
-    let context=model_lighting_contexts[vertex_lighting_context(input)];
+    let context=model_lighting_state(vertex_lighting_context(input),vertex_lighting_flags(input));
     let normal=model_sampled_normal(input,base_alpha).xyz;
     var result=source_model_ambient(normal,model_ambient_cube(context));
     let warp=(model_material.features&MODEL_DIFFUSE_WARP)!=0u;
     for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
         let light=context.lights[i];
-        let direction=model_light_direction(light,input.world_position);
+        let direction=model_light_direction(light,input.world_position_clip.xyz);
         let coordinate=source_model_diffuse_coordinate(normal,direction,(model_material.features&MODEL_HALF_LAMBERT)!=0u,warp);
         var texel=vec3<f32>(1.0);
-        if warp {texel=textureSample(model_diffuse_warp,model_warp_sampler,source_model_diffuse_warp_uv(coordinate,1.0),0).rgb;}
+        if warp {texel=textureSample(model_diffuse_warp,model_diffuse_warp_sampler,source_model_diffuse_warp_uv(coordinate,1.0),0).rgb;}
         result+=source_model_diffuse_term(coordinate,1.0,warp,texel)*light.color.rgb*input.light_attenuation[i];
     }
     return result;
@@ -406,23 +460,23 @@ fn model_diffuse_lighting(input:VertexOutput,base_alpha:f32)->vec3<f32> {
 
 fn model_specular_lighting(input:VertexOutput,base_linear:vec3<f32>,base_alpha:f32)->vec3<f32> {
     if model_material.skin==0u {return vec3<f32>(0.0);}
-    let context=model_lighting_contexts[vertex_lighting_context(input)];
+    let context=model_lighting_state(vertex_lighting_context(input),vertex_lighting_flags(input));
     let sampled=model_sampled_normal(input,base_alpha);
     let normal=sampled.xyz;
     let eye=normalize(input.eye_vertex_unit);
     let fresnel=source_model_phong_fresnel(normal,eye,model_material.fresnel.xyz);
     let uv=surface_uv(input.uv,surface.base_s,surface.base_t);
-    let exponent_texel=textureSample(model_exponent,base_sampler,uv,0);
+    let exponent_texel=textureSample(model_exponent,model_exponent_sampler,uv,0);
     let exponent=source_model_phong_exponent(model_material.exponent,exponent_texel.r);
     let warp=(model_material.features&MODEL_SPECULAR_WARP)!=0u;
     var specular=vec3<f32>(0.0);
     var rim=vec3<f32>(0.0);
     for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
         let light=context.lights[i];
-        let direction=model_light_direction(light,input.world_position);
+        let direction=model_light_direction(light,input.world_position_clip.xyz);
         let lobe=source_model_phong_lobe(normal,direction,eye,exponent);
         var texel=vec3<f32>(1.0);
-        if warp {texel=textureSample(model_specular_warp,model_warp_sampler,source_model_phong_warp_uv(lobe,fresnel),0).rgb;}
+        if warp {texel=textureSample(model_specular_warp,model_specular_warp_sampler,source_model_phong_warp_uv(lobe,fresnel),0).rgb;}
         specular+=source_model_phong_light(normal,direction,lobe,light.color.rgb,input.light_attenuation[i],1.0,warp,texel);
         if (model_material.lighting&MODEL_MATERIAL_RIM)!=0u {rim+=source_model_rim_light(normal,direction,eye,model_material.rim.x,light.color.rgb,input.light_attenuation[i]);}
     }

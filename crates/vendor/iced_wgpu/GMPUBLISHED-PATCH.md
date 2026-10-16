@@ -1,14 +1,20 @@
-Opt into BC texture compression when the adapter has it (`src/lib.rs`,
+Request supported BC texture compression and primitive clip distances (`src/lib.rs`,
 `src/window/compositor.rs`):
 
 ```diff
 -required_features: wgpu::Features::empty(),
-+required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
-+    .intersection(adapter.features()),
++required_features: (wgpu::Features::TEXTURE_COMPRESSION_BC
++    | wgpu::Features::CLIP_DISTANCES).intersection(adapter.features()),
 ```
 
 Headless initialization also logs the selected adapter, render target format,
 and enabled device features so fixed-camera map captures identify the graphics
 hardware and rendering path used.
 
+Custom primitive pipelines receive the rendering adapter's downlevel capabilities
+through `Pipeline::new_with_capabilities`. Existing pipelines retain their `new`
+implementation by default. The renderer uses this contract to share compatible
+linear/sRGB image views only on adapters supporting `VIEW_FORMATS`.
 
+Viewer shaders select primitive clipping from the enabled device feature. Devices
+without clip distances retain fragment clipping.

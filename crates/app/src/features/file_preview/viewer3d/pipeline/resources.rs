@@ -1,9 +1,8 @@
 use super::uniforms::{MaterialUniform, Uniforms};
 use super::{
     BLIT_SHADER_SOURCE, DETAIL_SHADER_SOURCE, DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT,
-    MATERIAL_ANISOTROPY_CLAMP, MODEL_VERTEX_ATTRIBUTES, ModelVertex, SHADER_SOURCE,
-    SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT, SkyboxFace, WATER_SHADER_SOURCE, scene_sample_count,
-    wgpu,
+    MODEL_VERTEX_ATTRIBUTES, ModelVertex, SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT,
+    SkyboxFace, WATER_SHADER_SOURCE, scene_sample_count, wgpu,
 };
 use gmpublished_domain::math::Vec3;
 use std::{ops::Deref, sync::Arc};
@@ -23,6 +22,9 @@ pub struct RenderResources {
 
 #[derive(Debug)]
 pub struct SharedResources {
+    #[cfg(any(test, feature = "map-capture"))]
+    pub(super) clip_mode: super::clipping::ClipMode,
+    pub(super) texture_uploader: super::texture_upload::SharedUploader,
     model_shader: wgpu::ShaderModule,
     detail_shader: wgpu::ShaderModule,
     water_shader: wgpu::ShaderModule,
@@ -30,17 +32,23 @@ pub struct SharedResources {
     model_layout: wgpu::PipelineLayout,
     refractive_water_layout: wgpu::PipelineLayout,
     sky_pipeline_layout: wgpu::PipelineLayout,
+    _fallback_allocations: Vec<super::texture_upload::UploadedTexture>,
     pub surface_white: wgpu::TextureView,
     pub flat_normal: wgpu::TextureView,
+    pub error_texture: wgpu::TextureView,
+    pub phy_debug_texture: wgpu::TextureView,
+    pub sky_black_texture: wgpu::TextureView,
     pub surface_black_cube: wgpu::TextureView,
     pub screen_refraction: super::screen_refraction::Resources,
     pub uniform_layout: wgpu::BindGroupLayout,
     pub material_layout: wgpu::BindGroupLayout,
+    pub water_material_layout: wgpu::BindGroupLayout,
     pub water_frame_layout: wgpu::BindGroupLayout,
     pub sky_layout: wgpu::BindGroupLayout,
     pub blit_layout: wgpu::BindGroupLayout,
-    pub material_sampler: wgpu::Sampler,
-    pub simple_sampler: wgpu::Sampler,
+    pub(super) samplers: super::samplers::SamplerCache,
+    pub(super) sampler_quality: super::samplers::QualityProfile,
+    pub lightmap_sampler: wgpu::Sampler,
     pub blit_sampler: wgpu::Sampler,
     pub water_refraction_sampler: wgpu::Sampler,
     pub sky_vertices: wgpu::Buffer,
@@ -80,18 +88,40 @@ impl Deref for ViewPipelines {
 }
 
 impl SharedResources {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        capabilities: Option<&wgpu::DownlevelCapabilities>,
+    ) -> Self {
+        let clip_mode = super::clipping::ClipMode::for_device(device);
+        let shader_source = |source, kind| {
+            super::clipping::shader(source, kind, clip_mode)
+                .expect("maintained viewer shader interface")
+        };
+        let texture_uploader = super::texture_upload::TextureUploader::shared(
+            device,
+            queue,
+            super::texture_upload::configured_policy(),
+        )
+        .expect("validated device texture upload policy");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("file_preview.model_viewer.shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(SHADER_SOURCE, super::clipping::ShaderKind::Model).into(),
+            ),
         });
         let detail_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("file_preview.model_viewer.detail_shader"),
-            source: wgpu::ShaderSource::Wgsl(DETAIL_SHADER_SOURCE.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(DETAIL_SHADER_SOURCE, super::clipping::ShaderKind::Detail).into(),
+            ),
         });
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("file_preview.model_viewer.water_shader"),
-            source: wgpu::ShaderSource::Wgsl(WATER_SHADER_SOURCE.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(WATER_SHADER_SOURCE, super::clipping::ShaderKind::Water).into(),
+            ),
         });
         let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("file_preview.model_viewer.sky_shader"),
@@ -104,228 +134,28 @@ impl SharedResources {
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("file_preview.model_viewer.uniforms"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<Uniforms>() as u64
-                        ),
-                    },
-                    count: None,
-                },
-                lightmap_layout_entry(5),
-                lightmap_layout_entry(6),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                            super::model_lighting::GpuModelContext,
-                        >() as u64),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                            super::marks::GpuSurfaceMark,
-                        >() as u64),
-                    },
-                    count: None,
-                },
-            ],
+            entries: &uniform_layout_entries(),
         });
 
+        let material_entries = material_layout_entries();
+        let water_material_entries = material_entries
+            .iter()
+            .copied()
+            .filter(|entry| water_material_binding(entry.binding))
+            .collect::<Vec<_>>();
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("file_preview.model_viewer.material"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<MaterialUniform>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                            super::surface::SurfaceUniform,
-                        >() as u64),
-                    },
-                    count: None,
-                },
-                surface_texture_layout(9),
-                surface_texture_layout(10),
-                surface_texture_layout(11),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 12,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::Cube,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                surface_texture_layout(13),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 14,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 16,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                            super::model_lighting::ModelMaterialUniform,
-                        >() as u64),
-                    },
-                    count: None,
-                },
-                surface_texture_layout(17),
-                surface_texture_layout(18),
-                surface_texture_layout(19),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 20,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+            entries: &material_entries,
         });
-        // Uniforms and refraction inputs share one group so the refractive
-        // water pipeline fits iced_wgpu's max_bind_groups = 2 alongside the
-        // per-material group.
+        let water_material_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("file_preview.water.material"),
+                entries: &water_material_entries,
+            });
         let water_frame_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("file_preview.model_viewer.water_frame"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(
-                                std::mem::size_of::<Uniforms>() as u64,
-                            ),
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    lightmap_layout_entry(5),
-                    lightmap_layout_entry(6),
-                ],
+                entries: &water_frame_layout_entries(),
             });
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("file_preview.model_viewer.sky_material"),
@@ -396,7 +226,7 @@ impl SharedResources {
         let refractive_water_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("file_preview.model_viewer.refractive_water_layout"),
-                bind_group_layouts: &[&water_frame_layout, &material_layout],
+                bind_group_layouts: &[&water_frame_layout, &water_material_layout],
                 push_constant_ranges: &[],
             });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -439,19 +269,17 @@ impl SharedResources {
             multiview: None,
             cache: None,
         });
-        let material_sampler = sampler(
+        let samplers = super::samplers::SamplerCache::new(
             device,
-            "file_preview.model_viewer.material_sampler",
-            &SamplerSpec {
-                address: wgpu::AddressMode::Repeat,
-                filter: wgpu::FilterMode::Linear,
-                mipmap: wgpu::FilterMode::Linear,
-                anisotropy: MATERIAL_ANISOTROPY_CLAMP,
-            },
+            capabilities.is_some_and(|caps| {
+                caps.flags
+                    .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING)
+            }),
         );
-        let simple_sampler = sampler(
+        let sampler_quality = super::samplers::quality_profile();
+        let lightmap_sampler = sampler(
             device,
-            "file_preview.model_viewer.simple_sampler",
+            "file_preview.model_viewer.lightmap_sampler",
             &SamplerSpec {
                 address: wgpu::AddressMode::Repeat,
                 filter: wgpu::FilterMode::Linear,
@@ -490,9 +318,9 @@ impl SharedResources {
         });
         queue.write_buffer(&sky_vertices, 0, &sky_vertex_bytes);
 
-        let surface_white = RenderResources::create_texture_frames_view(
+        let (surface_white, surface_white_allocation) = RenderResources::create_texture_frames_view(
             device,
-            queue,
+            &texture_uploader,
             &[vec![crate::bridge::materials::ResolvedTextureMip {
                 rgba: vec![255; 4],
                 width: 1,
@@ -500,20 +328,66 @@ impl SharedResources {
             }]],
             wgpu::TextureFormat::Rgba8Unorm,
         );
-        let flat_normal = RenderResources::create_normal_view(
+        let (flat_normal, flat_normal_allocation) = RenderResources::create_texture_frames_view(
             device,
-            queue,
-            &crate::bridge::materials::DecodedTextureFrames {
-                flags: 0,
-                frames: vec![vec![crate::bridge::materials::ResolvedTextureMip {
-                    rgba: vec![128, 128, 255, 255],
+            &texture_uploader,
+            &[vec![crate::bridge::materials::ResolvedTextureMip {
+                rgba: vec![128, 128, 255, 255],
+                width: 1,
+                height: 1,
+            }]],
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let (error_texture, error_texture_allocation) =
+            RenderResources::create_texture_view_from_levels_format(
+                device,
+                &texture_uploader,
+                "file_preview.error_texture",
+                &super::materials::checkerboard_mip_levels(),
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+        let (sky_black_texture, sky_black_texture_allocation) =
+            RenderResources::create_texture_view_from_levels_format(
+                device,
+                &texture_uploader,
+                "file_preview.sky_black",
+                &[super::TextureUploadLevel {
+                    rgba: &[0, 0, 0, 255],
                     width: 1,
                     height: 1,
-                }]],
-            },
-        );
-        let surface_black_cube = super::cubemap::create_view(device, queue, None);
+                }],
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+        let (phy_debug_texture, phy_debug_texture_allocation) =
+            RenderResources::create_texture_view_from_levels_format(
+                device,
+                &texture_uploader,
+                "file_preview.phy_debug_texture",
+                &[super::TextureUploadLevel {
+                    rgba: super::PHY_DEBUG_RGBA.as_slice(),
+                    width: 1,
+                    height: 1,
+                }],
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+        let (surface_black_cube, surface_black_cube_allocation) =
+            super::cubemap::create_black_view(device, &texture_uploader);
+        texture_uploader
+            .lock()
+            .expect("texture uploader lock")
+            .flush();
         Self {
+            #[cfg(any(test, feature = "map-capture"))]
+            clip_mode,
+            texture_uploader,
+            _fallback_allocations: vec![
+                surface_white_allocation,
+                flat_normal_allocation,
+                error_texture_allocation,
+                sky_black_texture_allocation,
+                phy_debug_texture_allocation,
+                surface_black_cube_allocation,
+            ],
             model_shader: shader,
             detail_shader,
             water_shader,
@@ -523,15 +397,20 @@ impl SharedResources {
             sky_pipeline_layout,
             surface_white,
             flat_normal,
+            error_texture,
+            phy_debug_texture,
+            sky_black_texture,
             surface_black_cube,
             screen_refraction,
             uniform_layout,
             material_layout,
+            water_material_layout,
             water_frame_layout,
             sky_layout,
             blit_layout,
-            material_sampler,
-            simple_sampler,
+            samplers,
+            sampler_quality,
+            lightmap_sampler,
             blit_sampler,
             water_refraction_sampler,
             sky_vertices,
@@ -542,9 +421,14 @@ impl SharedResources {
 }
 
 impl RenderResources {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        capabilities: Option<&wgpu::DownlevelCapabilities>,
+    ) -> Self {
         use super::draw::ViewKind;
-        let shared = Arc::new(SharedResources::new(device, queue, format));
+        let shared = Arc::new(SharedResources::new(device, queue, format, capabilities));
         let sample_count = scene_sample_count();
         let main = ViewPipelines::new(
             device,
@@ -573,8 +457,7 @@ impl RenderResources {
         };
         let refractive_water_layout = &shared.refractive_water_layout;
         let water_shader = &shared.water_shader;
-        // Depth texture loads are unsupported by some shader translators.
-        // Preserve the single-pass fallback when pipeline creation fails.
+        // Some backends cannot translate depth texture loads.
         device.push_error_scope(wgpu::ErrorFilter::Internal);
         device.push_error_scope(wgpu::ErrorFilter::Validation);
         let refractive_water_pipeline = create_model_pipeline_with_fragment_entry(
@@ -892,7 +775,7 @@ fn surface_texture_layout(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// Native wgpu resolves scoped errors synchronously, so one poll is enough.
+// Native error scopes resolve on the first poll.
 fn take_scoped_error(device: &wgpu::Device) -> Option<wgpu::Error> {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -1343,6 +1226,441 @@ mod tests {
                     Vec3::new(-1.0, -1.0, -1.0),
                 ],
             ]
+        );
+    }
+}
+
+pub(super) fn water_material_binding(binding: u32) -> bool {
+    matches!(binding, 0 | 3 | 4 | 5 | 6 | 22)
+}
+
+fn sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+fn material_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut material_entries = vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(
+                    std::mem::size_of::<MaterialUniform>() as u64
+                ),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 8,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                    super::surface::SurfaceUniform,
+                >() as u64),
+            },
+            count: None,
+        },
+        surface_texture_layout(9),
+        surface_texture_layout(10),
+        surface_texture_layout(11),
+        wgpu::BindGroupLayoutEntry {
+            binding: 12,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
+                multisampled: false,
+            },
+            count: None,
+        },
+        surface_texture_layout(13),
+        wgpu::BindGroupLayoutEntry {
+            binding: 14,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 16,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                    super::model_lighting::ModelMaterialUniform,
+                >() as u64),
+            },
+            count: None,
+        },
+        surface_texture_layout(17),
+        surface_texture_layout(18),
+        surface_texture_layout(19),
+        wgpu::BindGroupLayoutEntry {
+            binding: 20,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ];
+    material_entries.extend((21..=29).map(sampler_layout_entry));
+    material_entries
+}
+
+fn water_frame_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        lightmap_layout_entry(5),
+        lightmap_layout_entry(6),
+    ]
+}
+
+fn uniform_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+            },
+            count: None,
+        },
+        lightmap_layout_entry(5),
+        lightmap_layout_entry(6),
+        wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                    super::model_lighting::GpuModelContext,
+                >() as u64),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 8,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                    super::marks::GpuSurfaceMark,
+                >() as u64),
+            },
+            count: None,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod sampler_layout_tests {
+    use super::*;
+
+    fn counts(entries: impl Iterator<Item = wgpu::BindGroupLayoutEntry>) -> (u32, u32) {
+        let mut result = (0, 0);
+        for entry in entries.filter(|entry| entry.visibility.contains(wgpu::ShaderStages::FRAGMENT))
+        {
+            match entry.ty {
+                wgpu::BindingType::Texture { .. } => result.0 += 1,
+                wgpu::BindingType::Sampler(_) => result.1 += 1,
+                _ => {}
+            }
+        }
+        result
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan GPU"]
+    fn gpu_role_samplers_and_narrow_water_groups_validate() {
+        use super::super::{
+            images::ImageCache,
+            materials::{
+                MaterialTextureViews, MaterialUploadMode, PreparedMaterial, SampledTexture,
+            },
+            samplers::{SamplerQuality, TextureKind, TextureSamplerPolicy},
+        };
+        use vformats::vtf::texture_flags as flags;
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = iced::futures::executor::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .expect("Vulkan adapter");
+        let capabilities = adapter.get_downlevel_capabilities();
+        let (device, queue) = iced::futures::executor::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor::default()),
+        )
+        .unwrap();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let resources = RenderResources::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            Some(&capabilities),
+        );
+        let mut images = ImageCache::new(Some(&capabilities));
+        let mut lease = images.lease(&resources.texture_uploader);
+        let mut diagnostics = Vec::new();
+        let primary = SampledTexture {
+            view: &resources.error_texture,
+            flags: Some(flags::POINTSAMPLE | flags::CLAMPS),
+        };
+        let secondary = SampledTexture {
+            view: &resources.error_texture,
+            flags: Some(flags::TRILINEAR | flags::CLAMPT),
+        };
+        let normal = SampledTexture {
+            view: &resources.flat_normal,
+            flags: Some(flags::CLAMPT),
+        };
+        let (_main, _water, _uniform) = resources.create_material(
+            &device,
+            &queue,
+            MaterialTextureViews {
+                base: primary,
+                base2: secondary,
+                normal,
+                normal2: normal,
+            },
+            MaterialUploadMode {
+                name: "sampler-test",
+                material: PreparedMaterial::Fallback,
+                base_flags: primary.flags,
+                base2_flags: secondary.flags,
+                render_mode: super::super::RenderMode::Opaque,
+                alpha_policy: crate::bridge::materials::TextureAlphaPolicy::Opaque,
+            },
+            &mut lease,
+            &mut diagnostics,
+        );
+        let policies = diagnostics
+            .iter()
+            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap())
+            .collect::<Vec<_>>();
+        let base = policies
+            .iter()
+            .find(|policy| policy["role"] == "base")
+            .unwrap();
+        let second = policies
+            .iter()
+            .find(|policy| policy["role"] == "base2")
+            .unwrap();
+        assert_eq!(base["policy"]["descriptor"]["mag_filter"], "Nearest");
+        assert_eq!(base["policy"]["descriptor"]["address"][0], "ClampToEdge");
+        assert_eq!(second["policy"]["descriptor"]["mag_filter"], "Linear");
+        assert_eq!(second["policy"]["descriptor"]["address"][1], "ClampToEdge");
+        assert_eq!(diagnostics.len(), 12);
+        let requested =
+            TextureSamplerPolicy::from_flags(flags::POINTSAMPLE, TextureKind::Texture2d)
+                .request(SamplerQuality {
+                    anisotropy: 1,
+                    force_trilinear: false,
+                })
+                .unwrap();
+        assert_eq!(
+            resources.samplers.resolve(requested).sampler,
+            resources.samplers.resolve(requested).sampler
+        );
+        assert!(iced::futures::executor::block_on(device.pop_error_scope()).is_none());
+    }
+
+    #[test]
+    fn combined_pipeline_bindings_fit_default_limits() {
+        let main = counts(
+            uniform_layout_entries()
+                .into_iter()
+                .chain(material_layout_entries()),
+        );
+        let water = counts(
+            water_frame_layout_entries().into_iter().chain(
+                material_layout_entries()
+                    .into_iter()
+                    .filter(|entry| water_material_binding(entry.binding)),
+            ),
+        );
+        assert_eq!(main, (14, 13));
+        assert_eq!(water, (7, 4));
+        let limits = wgpu::Limits::default();
+        for (textures, samplers) in [main, water] {
+            assert!(textures <= limits.max_sampled_textures_per_shader_stage);
+            assert!(samplers <= limits.max_samplers_per_shader_stage);
+        }
+    }
+
+    #[test]
+    fn shader_texture_sampling_pairs_use_their_own_role_samplers() {
+        use iced::wgpu::naga::{self, Expression, valid};
+        let material_pairs = [
+            (0, 3),
+            (1, 21),
+            (6, 22),
+            (7, 23),
+            (9, 24),
+            (10, 25),
+            (11, 26),
+            (12, 14),
+            (13, 27),
+            (17, 28),
+            (18, 20),
+            (19, 29),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for source in [super::SHADER_SOURCE, super::WATER_SHADER_SOURCE] {
+            let module = naga::front::wgsl::parse_str(source).unwrap();
+            valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+                .validate(&module)
+                .unwrap();
+            for function in module
+                .functions
+                .iter()
+                .map(|(_, function)| function)
+                .chain(module.entry_points.iter().map(|entry| &entry.function))
+            {
+                for (_, expression) in function.expressions.iter() {
+                    let Expression::ImageSample { image, sampler, .. } = expression else {
+                        continue;
+                    };
+                    let (Expression::GlobalVariable(image), Expression::GlobalVariable(sampler)) = (
+                        &function.expressions[*image],
+                        &function.expressions[*sampler],
+                    ) else {
+                        panic!("unexpected indirect sampling binding");
+                    };
+                    let image = module.global_variables[*image].binding.as_ref().unwrap();
+                    let sampler = module.global_variables[*sampler].binding.as_ref().unwrap();
+                    if image.group == 1 {
+                        let expected = material_pairs
+                            .iter()
+                            .find(|(texture, _)| *texture == image.binding)
+                            .unwrap();
+                        assert_eq!(
+                            (sampler.group, sampler.binding),
+                            (1, expected.1),
+                            "texture {}",
+                            image.binding
+                        );
+                        seen.insert(image.binding);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            material_pairs
+                .map(|(texture, _)| texture)
+                .into_iter()
+                .collect()
         );
     }
 }

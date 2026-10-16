@@ -509,7 +509,14 @@ fn loaded_map_state() -> State {
     let mut state = State::default();
     let request = state.begin_open(map_request());
     let scene = Arc::new(MapPreview {
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
         surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
         scene: Arc::new(RenderScene {
             meshes: Vec::new(),
             materials: Vec::new(),
@@ -554,6 +561,7 @@ fn loaded_map_state() -> State {
             sky_camera: None,
             spawn: None,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,

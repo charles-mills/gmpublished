@@ -1,6 +1,4 @@
-use super::{
-    Arc, BTreeSet, HashMap, HashSet, MAP_FALLBACK_TEXTURE_DIMENSION, MaterialSlot, RenderMode,
-};
+use super::{Arc, BTreeSet, HashMap, HashSet, MaterialSlot, RenderMode};
 
 #[derive(Debug)]
 pub(in super::super) struct PropMaterialResolveJob {
@@ -23,8 +21,6 @@ impl MaterialTable {
         index
     }
 
-    /// Keep the detail slot unindexed so overlays with the same material name
-    /// cannot inherit its hard-coded render mode.
     pub(in super::super) fn push_unindexed(&mut self, slot: MaterialSlot) -> usize {
         let index = self.slots.len();
         self.slots.push(slot);
@@ -49,7 +45,10 @@ impl MaterialTable {
     }
 
     pub(in super::super) fn resolved_count(&self) -> u32 {
-        count_of(self.slots.iter().filter(|slot| slot.texture.is_some()))
+        count_of(self.slots.iter().filter(|slot| {
+            slot.resolution == crate::bridge::materials::MaterialResolutionOutcome::Loaded
+                && slot.texture.is_some()
+        }))
     }
 
     pub(in super::super) fn water_material_count(&self) -> u32 {
@@ -148,7 +147,10 @@ pub(in super::super) fn unresolved_material_names_for_debug(
 ) -> (Vec<String>, usize) {
     let names = materials
         .iter()
-        .filter(|material| material.texture.is_none())
+        .filter(|material| {
+            material.resolution != crate::bridge::materials::MaterialResolutionOutcome::Loaded
+                || material.texture.is_none()
+        })
         .map(|material| material.name.clone())
         .collect::<BTreeSet<_>>();
     let total = names.len();
@@ -158,17 +160,12 @@ pub(in super::super) fn unresolved_material_names_for_debug(
 pub(in super::super) fn material_dimensions(
     materials: &[MaterialSlot],
     index: usize,
-) -> (u32, u32) {
-    materials
-        .get(index)
-        .and_then(|material| material.texture.as_ref())
-        .map_or(
-            (
-                MAP_FALLBACK_TEXTURE_DIMENSION,
-                MAP_FALLBACK_TEXTURE_DIMENSION,
-            ),
-            |texture| texture.original_dimensions(),
-        )
+) -> Option<(u32, u32)> {
+    materials.get(index).and_then(|material| {
+        material
+            .shader
+            .mapping_dimensions(material.texture.as_deref())
+    })
 }
 
 pub(in super::super) fn normalize_map_uv(

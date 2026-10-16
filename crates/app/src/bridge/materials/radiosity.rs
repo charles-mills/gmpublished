@@ -1,53 +1,131 @@
-use super::{Limits, MaterialResolver, Vec3, material_paths, texture_path};
+use super::{
+    MaterialResolver, TextureAssetError, TextureSourceError, Vec3, material_paths, texture_path,
+};
 use gmpublished_domain::scene::map::MapRadiosityMaterialFlags;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedSurfaceLighting {
     pub reflectivity: Vec3,
     pub flags: MapRadiosityMaterialFlags,
+    pub source_outcome: super::TextureLoadOutcome,
 }
 
 impl MaterialResolver {
-    /// Runtime material reflectivity comes from the loaded base VTF header,
-    /// independently of the optional compiler-facing `$reflectivity` parameter.
     pub(crate) fn resolve_surface_lighting(&self, name: &str) -> Option<ResolvedSurfaceLighting> {
-        self.find_entry_by_source(&material_paths(&[], name), |path, bytes| {
-            let material = self.effective_material(
-                &String::from_utf8_lossy(&bytes),
-                0,
-                &mut vec![path.clone()],
-            )?;
-            if material.shader.eq_ignore_ascii_case("patch") {
+        let paths = material_paths(&[], name);
+        let Some(definition) = self.material_definition(&paths) else {
+            if self.material_source_failure(&paths)
+                != Some(super::definition::MaterialSourceFailure::Missing)
+            {
                 return None;
             }
-            let (reflectivity, base_flags) = if let Some(base) = material.effective_base_texture() {
-                let path = texture_path(base)?;
-                self.find_entry_by_source(std::slice::from_ref(&path), |_, bytes| {
-                    let texture = vformats::vtf::parse(&bytes, &Limits::default()).ok()?;
-                    let reflectivity = Vec3::from(texture.reflectivity());
-                    reflectivity
-                        .is_finite()
-                        .then_some((reflectivity, Some(texture.flags())))
-                })?
-            } else {
-                (Vec3::splat(0.2), None)
-            };
-            let shader =
-                self.resolve_shader(&material, material.effective_base_texture().is_some());
-            let render_mode = shader.surface().map_or_else(
-                || material.render_mode(),
-                |surface| surface.draw_render_mode(base_flags, surface.alpha),
-            );
-            Some(ResolvedSurfaceLighting {
-                reflectivity,
+            return Some(ResolvedSurfaceLighting {
+                reflectivity: Vec3::ZERO,
+                source_outcome: super::TextureLoadOutcome::Generated,
                 flags: MapRadiosityMaterialFlags {
-                    no_draw: super::vmt_bool(material.parameter("$nodraw")),
-                    translucent: matches!(
-                        render_mode,
-                        super::RenderMode::Translucent | super::RenderMode::Additive
-                    ),
+                    no_draw: false,
+                    translucent: false,
                 },
-            })
+            });
+        };
+        let material = &definition.material;
+        if material.shader.eq_ignore_ascii_case("patch") {
+            return None;
+        }
+        let native_error_texture = super::texture_failure_policy(material)
+            == super::TextureFailurePolicy::NativeErrorTexture;
+        let mut source_outcome = super::TextureLoadOutcome::Loaded;
+        let (reflectivity, base_flags, has_base_texture) = if let Some(base) =
+            material.effective_base_texture()
+        {
+            let path = texture_path(base)?;
+            match self.selected_texture_asset(&path) {
+                Ok(selected) => match selected.asset.validate_payload() {
+                    Ok(()) => {
+                        let metadata = selected.asset.metadata();
+                        let reflectivity =
+                            Vec3::from(metadata.reflectivity_bits?.map(f32::from_bits));
+                        if !reflectivity.is_finite() {
+                            return None;
+                        }
+                        (reflectivity, metadata.flags, true)
+                    }
+                    Err(error) if native_error_texture && super::native_invalid_texture(&error) => {
+                        source_outcome = super::TextureLoadOutcome::InvalidPayload;
+                        (
+                            Vec3::splat(0.5),
+                            Some(super::NATIVE_ERROR_TEXTURE_FLAGS),
+                            true,
+                        )
+                    }
+                    Err(error) => {
+                        log::warn!("surface lighting texture {path}: {error}");
+                        return None;
+                    }
+                },
+                Err(
+                    TextureSourceError::EncodedBudget {
+                        metadata: Some(metadata),
+                        ..
+                    }
+                    | TextureSourceError::WorkingBudget {
+                        metadata: Some(metadata),
+                        ..
+                    },
+                ) => {
+                    let reflectivity = Vec3::from(metadata.reflectivity_bits?.map(f32::from_bits));
+                    if !reflectivity.is_finite() {
+                        return None;
+                    }
+                    source_outcome = super::TextureLoadOutcome::SourceBudgetRejected;
+                    (reflectivity, metadata.flags, true)
+                }
+                Err(TextureSourceError::Invalid {
+                    error: TextureAssetError::Vtf(error),
+                    ..
+                }) if native_error_texture && super::native_invalid_texture(&error) => {
+                    source_outcome = super::TextureLoadOutcome::InvalidSource;
+                    (
+                        Vec3::splat(0.5),
+                        Some(super::NATIVE_ERROR_TEXTURE_FLAGS),
+                        true,
+                    )
+                }
+                Err(TextureSourceError::Missing) if native_error_texture => {
+                    source_outcome = super::TextureLoadOutcome::MissingSource;
+                    (
+                        Vec3::splat(0.5),
+                        Some(super::NATIVE_ERROR_TEXTURE_FLAGS),
+                        true,
+                    )
+                }
+                Err(TextureSourceError::Missing) => return None,
+                Err(error) => {
+                    log::warn!("surface lighting texture {path}: {error}");
+                    return None;
+                }
+            }
+        } else {
+            source_outcome = super::TextureLoadOutcome::Generated;
+            (Vec3::splat(0.2), None, false)
+        };
+        let (shader, _) = self.plan_texture_requests(|resolver| {
+            resolver.resolve_shader(material, has_base_texture, false)
+        });
+        let render_mode = shader.surface().map_or_else(
+            || material.render_mode(),
+            |surface| surface.draw_render_mode(base_flags, surface.alpha),
+        );
+        Some(ResolvedSurfaceLighting {
+            reflectivity,
+            source_outcome,
+            flags: MapRadiosityMaterialFlags {
+                no_draw: super::vmt_bool(material.parameter("$nodraw")),
+                translucent: matches!(
+                    render_mode,
+                    super::RenderMode::Translucent | super::RenderMode::Additive
+                ),
+            },
         })
     }
 }
@@ -86,9 +164,21 @@ mod tests {
                 .reflectivity,
             Vec3::splat(0.2)
         );
-        assert!(resolver.resolve_surface_lighting("test/missing").is_none());
-        assert!(resolver.resolve_surface_lighting("test/absent").is_none());
-        assert!(resolver.shared.decoded_texture_cache.lock().is_empty());
+        assert_eq!(
+            resolver
+                .resolve_surface_lighting("test/missing")
+                .unwrap()
+                .reflectivity,
+            Vec3::splat(0.5)
+        );
+        assert_eq!(
+            resolver
+                .resolve_surface_lighting("test/absent")
+                .unwrap()
+                .reflectivity,
+            Vec3::ZERO
+        );
+        assert!(resolver.shared.texture_assets.resident_count() == 0);
     }
 
     #[test]
@@ -121,7 +211,31 @@ mod tests {
                 "\"$nodiffusebumplighting\" \"1\"",
                 false,
             ),
+            (
+                "materials/test/world_decal.vmt",
+                "LightmappedGeneric_DX9",
+                "\"$decal\" \"1\"",
+                false,
+            ),
+            (
+                "materials/test/transition_decal.vmt",
+                "WorldVertexTransition_DX9",
+                "\"$decal\" \"1\"",
+                false,
+            ),
+            (
+                "materials/test/world_translucent.vmt",
+                "LightmappedGeneric",
+                "\"$translucent\" \"1\"",
+                true,
+            ),
             ("materials/test/model.vmt", "VertexLitGeneric", "", true),
+            (
+                "materials/test/model_decal.vmt",
+                "VertexLitGeneric",
+                "\"$decal\" \"1\"",
+                true,
+            ),
             (
                 "materials/test/model_disabled.vmt",
                 "VertexLitGeneric",
@@ -145,9 +259,12 @@ mod tests {
             } else {
                 [255, 0, 0, 255]
             };
-            let primary = resolver.resolve_primary(&[], name).unwrap();
+            let primary = resolver.resolve_primary(&[], name).into_material().unwrap();
             assert_eq!(primary.texture.rgba_bytes().unwrap(), expected);
-            let full = resolver.resolve_with_base2(&[], name).unwrap();
+            let full = resolver
+                .resolve_with_base2(&[], name)
+                .into_material()
+                .unwrap();
             assert_eq!(
                 full.texture.as_ref().unwrap().rgba_bytes().unwrap(),
                 expected
@@ -167,6 +284,11 @@ mod tests {
                 primary.shader.surface().unwrap().parameters["$basetexture"],
                 "test/base"
             );
+            let surface = full.shader.surface().unwrap();
+            let excluded = name.ends_with("world_decal") || name.ends_with("transition_decal");
+            assert_eq!(surface.normal.is_none(), excluded, "{name}");
+            assert_eq!(surface.parameters["$bumpmap"], "test/base");
+            assert!(surface.unavailable_textures().is_empty(), "{name}");
         }
     }
 }

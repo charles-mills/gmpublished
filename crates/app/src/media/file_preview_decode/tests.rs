@@ -8,7 +8,7 @@ use std::sync::Arc;
 use vformats::vtf::VtfFormat;
 
 use super::*;
-use crate::bridge::materials::DecodedTextureBudget;
+use crate::bridge::materials::{DecodedTextureBudget, TextureLoadOutcome};
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::generation::Generation;
 use crate::media::preview_model::{MapStats, ModelVertex};
@@ -655,12 +655,13 @@ fn map_uv_normalization_divides_raw_texels_by_resolved_dimensions() {
 }
 
 #[test]
-fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
+fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
     use gmpublished_domain::scene::map::{MapMesh, MapMeshVisibility, MapVertex};
     let mesh = MapMesh {
         entity: false,
         vertices: vec![MapVertex {
             position: Vec3::ZERO,
+            base_position: Vec3::ZERO,
             tangent_s: Vec3::ZERO,
             tangent_t: Vec3::ZERO,
             normal: Vec3::new(0.0, 0.0, 1.0),
@@ -678,10 +679,8 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
         visibility: MapMeshVisibility::default(),
         surface_owners: Vec::new(),
     };
-    // No resolved material: the face's compiled coordinates still have scale.
     let converted = map_preview::map_mesh_to_model_mesh(&mesh, &[]);
     assert_eq!(converted.vertices[0].uv, [2.0, 2.0]);
-    // Texture resolution and fallbacks must not change geometry coordinates.
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Water UV")
             .entry("materials/water.vmt", b"Water { }".to_vec())
@@ -690,9 +689,15 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
     .unwrap();
     let resolved = MaterialResolver::new(Arc::new(archive), None)
         .resolve_primary(&[], "water")
+        .into_material()
         .unwrap();
-    assert_eq!([resolved.texture.width, resolved.texture.height], [1, 1]);
+    assert_eq!(
+        [resolved.texture.width(), resolved.texture.height()],
+        [1, 1]
+    );
     let material = MaterialSlot {
+        resolution: Default::default(),
+        canonical_name: None,
         name: "water".into(),
         shader: resolved.shader,
         texture: Some(resolved.texture),
@@ -702,8 +707,45 @@ fn compiled_face_uv_dimensions_survive_missing_or_different_sized_textures() {
     };
     assert_eq!(
         map_preview::map_mesh_to_model_mesh(&mesh, &[material]).vertices[0].uv,
-        [2.0, 2.0]
+        [8.0, 4.0]
     );
+
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Runtime mapping dimensions")
+            .entry(
+                "materials/replacement.vmt",
+                b"LightmappedGeneric { $basetexture replacement }".to_vec(),
+            )
+            .entry(
+                "materials/replacement.vtf",
+                fixture_vtf_bytes(64, 128, VtfFormat::Rgba8888, &[&vec![255; 64 * 128 * 4]]),
+            )
+            .entry(
+                "materials/invalid.vmt",
+                b"LightmappedGeneric { $basetexture invalid }".to_vec(),
+            )
+            .entry("materials/invalid.vtf", b"invalid".to_vec())
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    for (name, expected) in [("replacement", [4.0, 1.0]), ("invalid", [8.0, 4.0])] {
+        let resolved = resolver.resolve_primary(&[], name).into_material().unwrap();
+        let material = MaterialSlot {
+            resolution: Default::default(),
+            canonical_name: None,
+            name: name.into(),
+            shader: resolved.shader,
+            texture: Some(resolved.texture),
+            texture2: None,
+            render_mode: RenderMode::Opaque,
+            alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
+        };
+        assert_eq!(
+            map_preview::map_mesh_to_model_mesh(&mesh, &[material]).vertices[0].uv,
+            expected
+        );
+    }
 }
 
 #[test]
@@ -796,7 +838,7 @@ fn painted_sky_retains_authored_state_and_loads_cloud_vtf_without_a_material() {
         .texture
         .as_ref()
         .unwrap();
-    assert_eq!(clouds.frames[0][0].rgba, pixels);
+    assert_eq!(clouds.frame(0).unwrap()[0].bytes.as_slice(), pixels);
 }
 
 #[test]
@@ -896,7 +938,10 @@ fn decoded_texture_budget_counts_deduped_bytes_once() {
                 "materials/test/second.vmt",
                 br#""LightmappedGeneric" { "$basetexture" "test/shared" }"#.to_vec(),
             )
-            .entry("materials/test/shared.vtf", create_vtf_bytes(&[64; 16]))
+            .entry(
+                "materials/test/shared.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[64; 4], &[64; 16]]),
+            )
             .build(),
     )
     .expect("fixture archive should load");
@@ -912,6 +957,59 @@ fn decoded_texture_budget_counts_deduped_bytes_once() {
 }
 
 #[test]
+fn material_slots_preserve_missing_identity_and_canonical_error_state() {
+    use crate::bridge::materials::{MaterialResolutionOutcome, SurfaceFamily};
+    let resolver = MaterialResolver::prop_lighting_fixture(
+        vec![
+            (
+                "materials/test/lit.vmt",
+                br#"LightmappedGeneric { "$basetexture" "test/absent" }"#.to_vec(),
+            ),
+            ("materials/test/malformed.vmt", Vec::new()),
+        ],
+        Vec::new(),
+    );
+    let names = vec![
+        "test/lit".to_owned(),
+        "TEST/MISSING_A.VMT".to_owned(),
+        "test/missing_b".to_owned(),
+        "test/malformed".to_owned(),
+    ];
+    let table = resolve_map_material_slots_serial(&names, &resolver);
+    assert_eq!(table.resolved_count(), 1);
+    assert_eq!(
+        table.slots()[0].resolution,
+        MaterialResolutionOutcome::Loaded
+    );
+    for index in [1, 2] {
+        let slot = &table.slots()[index];
+        assert_eq!(slot.name, names[index]);
+        assert_eq!(slot.resolution, MaterialResolutionOutcome::Missing);
+        assert_eq!(slot.canonical_name.as_deref(), Some("___error"));
+        assert_eq!(slot.shader.surface().unwrap().family, SurfaceFamily::Unlit);
+        assert_eq!(
+            slot.texture.as_ref().unwrap().original_dimensions(),
+            (32, 32)
+        );
+    }
+    assert!(Arc::ptr_eq(
+        table.slots()[1].texture.as_ref().unwrap(),
+        table.slots()[2].texture.as_ref().unwrap()
+    ));
+    assert_eq!(
+        table.slots()[3].resolution,
+        MaterialResolutionOutcome::Malformed
+    );
+    assert!(table.slots()[3].canonical_name.is_none());
+    assert!(table.slots()[3].texture.is_none());
+    assert!(
+        unresolved_material_names_for_debug(table.slots())
+            .0
+            .contains(&names[1])
+    );
+}
+
+#[test]
 fn decoded_texture_budget_counts_full_mip_chain_bytes() {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Map Texture Budget Fixture")
@@ -919,7 +1017,10 @@ fn decoded_texture_budget_counts_full_mip_chain_bytes() {
                 "materials/test/first.vmt",
                 br#""LightmappedGeneric" { "$basetexture" "test/first" }"#.to_vec(),
             )
-            .entry("materials/test/first.vtf", create_vtf_bytes(&[10; 16]))
+            .entry(
+                "materials/test/first.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[10; 4], &[10; 16]]),
+            )
             .build(),
     )
     .expect("fixture archive should load");
@@ -927,7 +1028,10 @@ fn decoded_texture_budget_counts_full_mip_chain_bytes() {
     let resolver = MaterialResolver::new(Arc::new(archive), None)
         .with_decoded_texture_budget(Arc::clone(&budget));
 
-    assert!(resolver.resolve(&[], "test/first").is_none());
+    assert_eq!(
+        resolver.resolve(&[], "test/first").unwrap().load_outcome(),
+        TextureLoadOutcome::QualityRejected
+    );
 
     assert_eq!(budget.decoded_bytes(), 0);
     assert_eq!(budget.rejected_textures(), 1);
@@ -949,9 +1053,18 @@ fn decoded_texture_budget_stops_and_counts_rejected_textures() {
                 "materials/test/third.vmt",
                 br#""LightmappedGeneric" { "$basetexture" "test/third" }"#.to_vec(),
             )
-            .entry("materials/test/first.vtf", create_vtf_bytes(&[10; 16]))
-            .entry("materials/test/second.vtf", create_vtf_bytes(&[20; 16]))
-            .entry("materials/test/third.vtf", create_vtf_bytes(&[30; 16]))
+            .entry(
+                "materials/test/first.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[10; 4], &[10; 16]]),
+            )
+            .entry(
+                "materials/test/second.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[20; 4], &[20; 16]]),
+            )
+            .entry(
+                "materials/test/third.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[30; 4], &[30; 16]]),
+            )
             .build(),
     )
     .expect("fixture archive should load");
@@ -960,8 +1073,14 @@ fn decoded_texture_budget_stops_and_counts_rejected_textures() {
         .with_decoded_texture_budget(Arc::clone(&budget));
 
     assert!(resolver.resolve(&[], "test/first").is_some());
-    assert!(resolver.resolve(&[], "test/second").is_none());
-    assert!(resolver.resolve(&[], "test/third").is_none());
+    assert_eq!(
+        resolver.resolve(&[], "test/second").unwrap().load_outcome(),
+        TextureLoadOutcome::QualityRejected
+    );
+    assert_eq!(
+        resolver.resolve(&[], "test/third").unwrap().load_outcome(),
+        TextureLoadOutcome::QualityRejected
+    );
 
     assert_eq!(budget.decoded_bytes(), 20);
     assert_eq!(budget.rejected_textures(), 2);
@@ -1030,7 +1149,7 @@ fn parallel_material_resolution_respects_atomic_texture_budget() {
             )
             .entry(
                 format!("materials/test/{index}.vtf"),
-                create_vtf_bytes(&[index; 16]),
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[index; 4], &[index; 16]]),
             );
     }
     let archive = PreviewArchive::from_gma(builder.build()).expect("fixture archive should load");
@@ -1048,10 +1167,28 @@ fn parallel_material_resolution_respects_atomic_texture_budget() {
         resolved
             .slots()
             .iter()
-            .filter(|slot| slot.texture.is_some())
+            .filter(|slot| slot
+                .texture
+                .as_ref()
+                .is_some_and(|texture| texture.load_outcome() == TextureLoadOutcome::Loaded))
             .count(),
         2
     );
+    assert_eq!(
+        resolved
+            .slots()
+            .iter()
+            .filter(|slot| slot.texture.as_ref().is_some_and(
+                |texture| texture.load_outcome() == TextureLoadOutcome::QualityRejected
+            ))
+            .count(),
+        2
+    );
+    assert!(resolved.slots().iter().all(|slot| {
+        slot.texture
+            .as_ref()
+            .is_some_and(|texture| texture.has_effective_base_texture())
+    }));
     assert_eq!(budget.rejected_textures(), 2);
 }
 
@@ -1247,6 +1384,8 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     materials.push(
         "door_skin",
         MaterialSlot {
+            resolution: Default::default(),
+            canonical_name: None,
             shader: Default::default(),
             name: "door_skin".to_owned(),
             texture: None,
@@ -1256,6 +1395,7 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         },
     );
     let door = gmpublished_domain::scene::map::MapDoor {
+        entity_index: 7,
         brush_collision: None,
         class: gmpublished_domain::scene::map::MapDoorClass::PropDoorRotating,
         origin: Vec3::splat(0.0),
@@ -1798,6 +1938,33 @@ fn missing_static_prop_model_is_skipped_and_counted() {
 }
 
 #[test]
+fn map_without_baked_lighting_uses_fullbright_independently_of_atlas_availability() {
+    use crate::media::preview_model::ShadingMode;
+    for (has_channel, expected) in [(false, ShadingMode::Fullbright), (true, ShadingMode::Scene)] {
+        let mut bytes = static_prop_bsp_fixture_bytes();
+        if has_channel {
+            let offset = bytes.len();
+            bytes.extend_from_slice(&[128, 128, 128, 0]);
+            write_bsp_lump_entry(&mut bytes, 8, offset, 4, 0);
+        }
+        let request = request("maps/test.bsp", &bytes);
+        let data = map_preview_data_with_prop_model_loader(
+            &request,
+            &bytes,
+            None,
+            None,
+            &mut |_| {},
+            &|_, _| None,
+        );
+        let PreviewContent::Map { scene, .. } = data.content else {
+            panic!("expected map preview");
+        };
+        assert!(scene.lightmap.is_none());
+        assert_eq!(scene.shading_mode, expected);
+    }
+}
+
+#[test]
 fn map_preview_with_panicking_static_prop_model_still_returns_map() {
     let bytes = static_prop_bsp_fixture_bytes();
     let request = request("maps/test.bsp", &bytes);
@@ -1829,6 +1996,8 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     let mut materials = (0..25)
         .rev()
         .map(|index| MaterialSlot {
+            resolution: Default::default(),
+            canonical_name: None,
             shader: Default::default(),
             name: format!("missing_{index:02}"),
             texture: None,
@@ -1838,6 +2007,8 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
         })
         .collect::<Vec<_>>();
     materials.push(MaterialSlot {
+        resolution: Default::default(),
+        canonical_name: None,
         shader: Default::default(),
         name: "missing_03".to_owned(),
         texture: None,
@@ -1878,6 +2049,7 @@ fn prop_placement_with_visibility(
 ) -> StaticPropPlacement {
     StaticPropPlacement {
         entity: false,
+        leaf_membership: gmpublished_domain::scene::map::MapPropLeafMembership::SpatialBounds,
         static_prop_index: None,
         lighting_origin: None,
         lighting_origin_reference: None,
@@ -1907,6 +2079,8 @@ pub(super) fn test_prop_asset(
             illumination_position: Vec3::ZERO,
             hull_min: Vec3::ZERO,
             hull_max: Vec3::splat(1.0),
+            view_min: Vec3::ZERO,
+            view_max: Vec3::ZERO,
             illumination_attachment_index: None,
             illumination_attachment_position: None,
             lighting: None,
@@ -1933,7 +2107,7 @@ pub(super) fn test_prop_asset(
             vertex_count: 3,
             triangle_count: 1,
         }),
-        material_indices,
+        material_indices: material_indices.into_iter().enumerate().collect(),
         default_triangle_count,
     }
 }
@@ -1951,6 +2125,8 @@ fn test_loaded_prop_model(
             illumination_position: Vec3::ZERO,
             hull_min: Vec3::ZERO,
             hull_max: Vec3::splat(1.0),
+            view_min: Vec3::ZERO,
+            view_max: Vec3::ZERO,
             illumination_attachment_index: None,
             illumination_attachment_position: None,
             lighting: None,
@@ -2251,6 +2427,7 @@ fn explicit_lightmap_source_survives_zero_uv_coordinates() {
         entity: false,
         vertices: vec![MapVertex {
             position: Vec3::ZERO,
+            base_position: Vec3::ZERO,
             normal: Vec3::new(0.0, 0.0, 1.0),
             tangent_s: Vec3::ZERO,
             tangent_t: Vec3::ZERO,
@@ -2280,6 +2457,22 @@ fn explicit_lightmap_source_survives_zero_uv_coordinates() {
     );
 }
 
+#[test]
+fn compiled_surfaces_without_samples_use_constant_light() {
+    let mut receiver = surface_mark_receiver();
+    for vertex in &mut receiver.vertices {
+        vertex.has_lightmap = false;
+    }
+    for entity in [false, true] {
+        receiver.entity = entity;
+        let mesh = map_preview::map_mesh_to_model_mesh(&receiver, &[]);
+        assert!(mesh.vertices.iter().all(|vertex| {
+            vertex.lighting_mode == crate::media::preview_model::vertex_lighting::WORLD_CONSTANT
+                && vertex.illumination == Vec3::splat(1.0)
+        }));
+    }
+}
+
 fn surface_mark_receiver() -> gmpublished_domain::scene::map::MapMesh {
     use gmpublished_domain::scene::map::{
         MapMesh, MapMeshIndexRange, MapMeshSurfaceOwner, MapMeshVisibility, MapSurfaceOwner,
@@ -2290,6 +2483,7 @@ fn surface_mark_receiver() -> gmpublished_domain::scene::map::MapMesh {
         vertices: [[-64.0, -64.0], [-64.0, 64.0], [64.0, 64.0], [64.0, -64.0]]
             .map(|[x, y]| MapVertex {
                 position: Vec3::new(x, y, 0.0),
+                base_position: Vec3::new(x, y, 0.0),
                 normal: Vec3::new(0.0, 0.0, 1.0),
                 tangent_s: Vec3::new(1.0, 0.0, 0.0),
                 tangent_t: Vec3::new(0.0, 1.0, 0.0),
@@ -2320,7 +2514,14 @@ fn surface_mark_receiver() -> gmpublished_domain::scene::map::MapMesh {
             allows_decals: true,
             plane_normal: Vec3::new(0.0, 0.0, 1.0),
             plane_distance: 0.0,
-            displacement: false,
+            displacement: None,
+            texture_projection: Some(
+                gmpublished_domain::scene::map::MapSurfaceTextureProjection {
+                    vectors: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+                    minimum: [-64; 2],
+                    extent: [128; 2],
+                },
+            ),
         }],
     }
 }
@@ -2333,10 +2534,18 @@ fn surface_mark() -> gmpublished_domain::scene::map::MapOverlay {
             &MapDecal {
                 id: 3,
                 material_name: "test/decal".to_owned(),
-                origin: Vec3::ZERO,
+                position: gmpublished_domain::scene::map::MapDecalPosition {
+                    authored_world: Vec3::ZERO,
+                    receiver_local: Vec3::ZERO,
+                },
                 owner: MapSurfaceOwner::World,
+                permanence: Default::default(),
+                projection_order: None,
             },
-            [32.0, 16.0],
+            gmpublished_domain::scene::map::MapDecalDimensions {
+                extent: [32.0, 16.0],
+                radius: 16.0,
+            },
             &[true],
         )
         .unwrap()
@@ -2369,17 +2578,32 @@ fn surface_marks_retain_receiver_geometry_lighting_and_draw_attachment() {
         assert_eq!(actual.uv, expected.uv);
         assert_eq!(
             actual.lighting_mode,
-            crate::media::preview_model::vertex_lighting::LIGHTMAP
+            crate::media::preview_model::vertex_lighting::RECEIVER_LIGHTMAP
+                | crate::media::preview_model::vertex_lighting::BATCHED_STATIC_DECAL
         );
     }
+    let mut compiled = mark;
+    compiled.source =
+        gmpublished_domain::scene::map::MapSurfaceMarkSource::Overlay { index: 0, id: 3 };
+    let primitive = materials::overlay_primitive(&compiled, 5);
+    assert!(primitive.vertices.iter().all(|vertex| vertex.lighting_mode
+        == crate::media::preview_model::vertex_lighting::RECEIVER_LIGHTMAP));
 }
 
 #[test]
-fn static_decal_mapping_uses_original_dimensions_after_texture_downsampling() {
+fn static_decal_mapping_uses_original_dimensions_after_stored_mip_selection() {
     use gmpublished_domain::scene::map::{MapDecal, MapSurfaceOwner, MapSurfaceProjector};
+    let mips = (0..7)
+        .rev()
+        .map(|mip| {
+            let pixels = (64_u32 >> mip).max(1) * (32_u32 >> mip).max(1);
+            [17, 31, 47, 255].repeat(pixels as usize)
+        })
+        .collect::<Vec<_>>();
+    let stored = mips.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("DecalDimensions")
         .entry("materials/test/decal.vmt",br#"LightmappedGeneric { "$basetexture" "test/decal" "$decal" "1" "$decalscale" "0.5" }"#.to_vec())
-        .entry("materials/test/decal.vtf",fixture_vtf_bytes(64,32,VtfFormat::Rgba8888,&[&vec![255;64*32*4]]))
+        .entry("materials/test/decal.vtf",fixture_vtf_bytes(64,32,VtfFormat::Rgba8888,&stored))
         .build()).unwrap();
     let resolver =
         MaterialResolver::new(Arc::new(archive), None).with_decoded_texture_max_dimension(1);
@@ -2389,17 +2613,25 @@ fn static_decal_mapping_uses_original_dimensions_after_texture_downsampling() {
     let decal = MapDecal {
         id: 3,
         material_name: "test/decal".to_owned(),
-        origin: Vec3::ZERO,
+        position: gmpublished_domain::scene::map::MapDecalPosition {
+            authored_world: Vec3::ZERO,
+            receiver_local: Vec3::ZERO,
+        },
         owner: MapSurfaceOwner::World,
+        permanence: Default::default(),
+        projection_order: None,
     };
     let (world, sky) =
-        materials::resolve_map_decals(&[decal], &projector, &[true], &resolver, &mut table);
+        materials::resolve_map_decals(&[decal], &projector, &[true], &resolver, &mut table, None);
     assert!(sky.overlays.is_empty());
     assert_eq!(world.skipped_count, 0);
     assert_eq!(world.overlays.len(), 1);
     let texture = table.slots()[0].texture.as_ref().unwrap();
-    assert_eq!([texture.width, texture.height], [1, 1]);
+    assert_eq!([texture.width(), texture.height()], [1, 1]);
     assert_eq!(texture.original_dimensions(), (64, 32));
+    assert_eq!(texture.load_outcome(), TextureLoadOutcome::Loaded);
+    assert_eq!(texture.resident().unwrap().id().first_source_mip, 6);
+    assert_eq!(texture.rgba_bytes(), Some(&[17, 31, 47, 255][..]));
     let vertices = &world.overlays[0].vertices;
     let max = vertices
         .iter()
@@ -2420,9 +2652,12 @@ fn surface_mark_statistics_count_authored_sources_instead_of_receiver_fragments(
     let mut first = materials::overlay_primitive(&surface_mark(), 0);
     first.source = MapSurfaceMarkSource::Overlay { index: 0, id: 11 };
     let mut second = first.clone();
-    second.receiver_face = 8;
+    second.receiver_range.face = 8;
     let mut third = first.clone();
-    third.source = MapSurfaceMarkSource::Decal { entity_index: 11 };
+    third.source = MapSurfaceMarkSource::Decal {
+        entity_index: 11,
+        permanence: Default::default(),
+    };
     let mut fourth = first.clone();
     fourth.source = MapSurfaceMarkSource::Overlay { index: 1, id: 11 };
     assert_eq!(
@@ -2433,13 +2668,20 @@ fn surface_mark_statistics_count_authored_sources_instead_of_receiver_fragments(
 
 #[test]
 fn unavailable_surface_mark_material_is_counted_once_across_fragments() {
+    let first = surface_mark();
     let resolver = MaterialResolver::new(
-        Arc::new(PreviewArchive::from_gma(GmaFixtureBuilder::new("MissingDecal").build()).unwrap()),
+        Arc::new(
+            PreviewArchive::from_gma(
+                GmaFixtureBuilder::new("UnavailableDecal")
+                    .entry(format!("materials/{}.vmt", first.material_name), Vec::new())
+                    .build(),
+            )
+            .unwrap(),
+        ),
         None,
     );
-    let first = surface_mark();
     let mut second = first.clone();
-    second.receiver_face = 8;
+    second.receiver_range.face = 8;
     let baked =
         materials::resolve_map_overlays(&[first, second], &resolver, &mut MaterialTable::default());
     assert_eq!(baked.skipped_count, 1);
@@ -2472,25 +2714,40 @@ fn compacted_door_indices_remap_surface_mark_geometry_and_omit_unavailable_owner
         meshes: Vec::new(),
     };
     let mut available = materials::overlay_primitive(&surface_mark(), 0);
-    available.owner = MapSurfaceOwner::Door { door_index: 5 };
+    available.owner = MapSurfaceOwner::Door {
+        door_index: 5,
+        model_index: gmpublished_domain::scene::map::ModelIndex::new(1),
+    };
     available.receiver_mesh = MapReceiverMesh::Door {
         door_index: 5,
         mesh_index: 2,
     };
     let mut missing = available.clone();
-    missing.owner = MapSurfaceOwner::Door { door_index: 1 };
+    missing.owner = MapSurfaceOwner::Door {
+        door_index: 1,
+        model_index: gmpublished_domain::scene::map::ModelIndex::new(1),
+    };
     missing.receiver_mesh = MapReceiverMesh::Door {
         door_index: 1,
         mesh_index: 0,
     };
-    missing.source = MapSurfaceMarkSource::Decal { entity_index: 20 };
+    missing.source = MapSurfaceMarkSource::Decal {
+        entity_index: 20,
+        permanence: Default::default(),
+    };
     let mut world = vec![available, missing.clone(), missing];
     assert_eq!(
         map_preview::remap_surface_mark_doors(&mut world, &mut Vec::new(), &[door]),
         1
     );
     assert_eq!(world.len(), 1);
-    assert_eq!(world[0].owner, MapSurfaceOwner::Door { door_index: 0 });
+    assert_eq!(
+        world[0].owner,
+        MapSurfaceOwner::Door {
+            door_index: 0,
+            model_index: gmpublished_domain::scene::map::ModelIndex::new(1)
+        }
+    );
     assert_eq!(
         world[0].receiver_mesh,
         MapReceiverMesh::Door {

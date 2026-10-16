@@ -4,13 +4,12 @@ use super::materials::{
     resolve_sun_materials, sky_log_status,
 };
 use super::{
-    MAP_FALLBACK_TEXTURE_DIMENSION, MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP,
-    MAP_TEXTURE_DECODE_BUDGET_BYTES, MAP_TEXTURE_MAX_DIMENSION, MAP_TOO_LARGE_BYTES,
-    PHY_DEBUG_TRIANGLE_CAP, PHY_DEBUG_VERTEX_COLOR, catch_asset_decode, entry_stem,
-    info_preview_data, load_model_companions,
+    MAP_PROP_PLACEMENT_CAP, MAP_PROP_TRIANGLE_CAP, MAP_TOO_LARGE_BYTES, PHY_DEBUG_TRIANGLE_CAP,
+    PHY_DEBUG_VERTEX_COLOR, catch_asset_decode, entry_stem, info_preview_data,
+    load_model_companions,
 };
 use crate::bridge::materials::{
-    ContentSourceTier, DecodedTextureBudget, MaterialResolver, RenderMode, ResolvedPrimaryMaterial,
+    ContentSourceTier, MaterialResolution, MaterialResolver, RenderMode, ResolvedPrimaryMaterial,
     ResolvedSoundReference, srgb_byte_to_linear,
 };
 use crate::media::preview_model::{
@@ -36,8 +35,13 @@ mod collision;
 mod compiled_lighting;
 mod cubemaps;
 mod diagnostics;
+mod displacement_batches;
 mod lighting;
+mod static_decals;
+mod surface_lighting;
+pub(super) use static_decals::StaticDecalRegistry;
 mod materials;
+mod prop_geometry;
 mod props;
 mod runtime_lighting;
 mod world_geometry;
@@ -53,8 +57,7 @@ use diagnostics::{
 #[cfg(test)]
 pub(super) use lighting::PropSunLighting;
 pub(super) use lighting::{
-    LegacyPropLightingFallback, SelectedPropPlacement, StaticPropLightingInputs,
-    legacy_prop_lighting_fallback,
+    LegacyPropLightingFallback, StaticPropLightingInputs, legacy_prop_lighting_fallback,
 };
 #[cfg(test)]
 pub(super) use materials::unresolved_material_names_for_debug;
@@ -67,15 +70,15 @@ pub(super) use materials::{
 pub(super) use props::load_prop_model_with_options;
 pub(super) use props::{
     DoorBakeResult, LoadedPhy, LoadedPropModel, LoadedPropPhysics, PropBakeResult,
-    PropBakeSkipStats, PropCollisionStats, PropModelAsset, bake_map_doors_with_prop_model_loader,
-    bake_static_props_from_loaded_model_cache, load_prop_model, load_unique_prop_models_parallel,
-    log_prop_door_material_resolution, parse_phy_bytes, pre_resolve_prop_materials,
-    refresh_entity_prop_aabb_visibility, transform_prop_position,
+    PropBakeSkipStats, PropCollisionStats, SelectedPropPlacement,
+    bake_static_props_from_loaded_model_cache, load_prop_model, log_prop_door_material_resolution,
+    parse_phy_bytes, refresh_entity_prop_aabb_visibility, transform_prop_position,
 };
 #[cfg(test)]
 pub(super) use props::{
-    bake_prop_placement, bake_static_props, bake_static_props_with_loaded_model_cache,
-    bake_static_props_with_loader, bake_static_props_with_loader_serial, transform_prop_normal,
+    PropModelAsset, bake_map_doors_with_prop_model_loader, bake_prop_placement, bake_static_props,
+    bake_static_props_with_loaded_model_cache, bake_static_props_with_loader,
+    bake_static_props_with_loader_serial, transform_prop_normal,
 };
 pub(super) use world_geometry::{
     bounds_from_model_meshes, map_fog_to_preview, map_mesh_to_model_mesh,
@@ -113,7 +116,7 @@ pub(super) fn remap_surface_mark_doors(
     let mut skipped = HashSet::new();
     for marks in [world, sky] {
         marks.retain_mut(|mark| {
-            let MapSurfaceOwner::Door { door_index } = &mut mark.owner else {
+            let MapSurfaceOwner::Door { door_index, .. } = &mut mark.owner else {
                 return true;
             };
             let Some(index) = indices.get(door_index).copied() else {
@@ -142,14 +145,35 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> PreviewData {
+    map_preview_data_with_prop_model_loader_and_textures(
+        request,
+        bsp_bytes,
+        gmod_dir,
+        map_pool,
+        emit_stage,
+        load_model,
+        &super::MapTextureResidency::default(),
+    )
+}
+
+pub(super) fn map_preview_data_with_prop_model_loader_and_textures(
+    request: &PreviewRequest,
+    bsp_bytes: &[u8],
+    gmod_dir: Option<std::path::PathBuf>,
+    map_pool: Option<&rayon::ThreadPool>,
+    emit_stage: &mut dyn FnMut(PreviewLoadStage),
+    load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
+    texture_residency: &super::MapTextureResidency,
+) -> PreviewData {
+    assert!(texture_residency.max_dimension > 0 && texture_residency.resources.resident_bytes > 0);
     if !request.bypass_size_limits && bsp_bytes.len() > MAP_TOO_LARGE_BYTES {
         return info_preview_data(request, InfoReason::TooLarge);
     }
 
     let bsp_started = Instant::now();
-    let map = match map_pool.map_or_else(
-        || gmpublished_domain::scene::map::load_map(bsp_bytes),
-        |pool| gmpublished_domain::scene::map::load_map_with_pool(bsp_bytes, pool),
+    let asset = match map_pool.map_or_else(
+        || gmpublished_domain::scene::map::decode_map(bsp_bytes),
+        |pool| gmpublished_domain::scene::map::decode_map_with_pool(bsp_bytes, pool),
     ) {
         Ok(map) => map,
         Err(error) => {
@@ -157,7 +181,49 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             return info_preview_data(request, InfoReason::DecodeFailed);
         }
     };
-    let bsp_timing = bsp_started.elapsed();
+    let decode_timing = bsp_started.elapsed();
+    emit_stage(PreviewLoadStage::ResolvingMaterials);
+    let materials_started = Instant::now();
+    let super::TexturePreparationResources {
+        resolver,
+        encoded_budget,
+        texture_budget,
+        ..
+    } = super::TexturePreparationResources::new(
+        &MaterialResolver::with_pakfile_source(
+            request.archive.clone(),
+            gmod_dir,
+            asset.pakfile().clone(),
+        ),
+        &texture_residency.resources,
+    );
+    let material_resolver =
+        resolver.with_decoded_texture_max_dimension(texture_residency.max_dimension);
+    let Some(lightmap_names) = asset.material_names().collect::<Option<Vec<_>>>() else {
+        log::warn!("map material preparation failed: invalid BSP texture data identity");
+        return info_preview_data(request, InfoReason::DecodeFailed);
+    };
+    let lightmap_materials = parallel_collect(&lightmap_names, |name| {
+        material_resolver.resolve_lightmap_layout_material(name)
+    });
+    let requirements = lightmap_materials
+        .iter()
+        .map(|material| material.requirement)
+        .collect::<Vec<_>>();
+    let effective_materials_timing = materials_started.elapsed();
+    let prepare_started = Instant::now();
+    let prepared = match map_pool {
+        Some(pool) => asset.prepare_with_pool(&requirements, pool),
+        None => asset.prepare(&requirements),
+    };
+    let map = match prepared {
+        Ok(map) => map,
+        Err(error) => {
+            log::warn!("map scene preparation failed: {error}");
+            return info_preview_data(request, InfoReason::DecodeFailed);
+        }
+    };
+    let bsp_timing = decode_timing + prepare_started.elapsed();
 
     let gmpublished_domain::scene::map::MapData {
         meshes: map_meshes,
@@ -185,9 +251,10 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         skybox_completion_bounds: _,
         visibility,
         walk_collision,
-        pakfile,
+        pakfile: _,
         water_volumes,
         lightmap,
+        lighting_source,
         skyname,
         sky_paint,
         suns,
@@ -197,23 +264,39 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     } = map;
     let fog = fog.map(map_fog_to_preview);
     let sky_camera = sky_camera.map(map_sky_camera_to_preview);
-    let resolver =
-        MaterialResolver::with_pakfile_source(request.archive.clone(), gmod_dir, pakfile);
-    let texture_budget = Arc::new(DecodedTextureBudget::new(MAP_TEXTURE_DECODE_BUDGET_BYTES));
-    let material_resolver = resolver
-        .with_decoded_texture_max_dimension(MAP_TEXTURE_MAX_DIMENSION)
-        .with_decoded_texture_budget(Arc::clone(&texture_budget));
-    emit_stage(PreviewLoadStage::ResolvingMaterials);
     let materials_started = Instant::now();
     let mut table = resolve_map_material_slots_parallel(&material_names, &material_resolver);
     let surface_materials = radiosity_surfaces
         .as_ref()
+        .filter(|surfaces| surfaces.lighting_source().is_some())
         .map_or_else(Vec::new, |surfaces| {
-            parallel_collect(
-                &(0..surfaces.texdatas.len()).collect::<Vec<_>>(),
-                |&index| material_resolver.resolve_surface_lighting(surfaces.material_name(index)?),
-            )
+            (0..surfaces.texdatas.len())
+                .map(|index| {
+                    material_resolver.resolve_surface_lighting(surfaces.material_name(index)?)
+                })
+                .collect()
         });
+    let surface_lighting =
+        match surface_lighting::prepare(radiosity_surfaces.as_ref(), &lightmap_materials) {
+            Ok(lighting) => Some(lighting),
+            Err(error) => {
+                log::warn!("map surface lighting unavailable: {error}");
+                None
+            }
+        };
+    let shading_mode = if lighting_source.is_none() {
+        crate::media::preview_model::ShadingMode::Fullbright
+    } else {
+        crate::media::preview_model::ShadingMode::Scene
+    };
+    let header_only_surface_materials = surface_materials
+        .iter()
+        .flatten()
+        .filter(|material| {
+            material.source_outcome
+                == crate::bridge::materials::TextureLoadOutcome::SourceBudgetRejected
+        })
+        .count();
     let model_lighting_inputs =
         Arc::new(crate::media::preview_model::ModelLightingSceneInputs::new(
             ambient,
@@ -223,8 +306,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             radiosity_surfaces,
             surface_materials,
         ));
-    // A compiled fog volume can name an underside material even when no
-    // visible face references it. Resolve that dependency independently.
+    // Fog volumes can reference underside materials absent from visible faces.
     let below_names = table
         .slots()
         .iter()
@@ -263,13 +345,16 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         &map_skybox_meshes,
         &map_doors,
     );
-    let surface_receivers = projector.receiver_metadata();
+    let mut surface_receivers = projector.receiver_metadata();
     let (decal_bake, skybox_decal_bake) = resolve_map_decals(
         &map_decals,
         &projector,
         &receiver_allowed,
         &material_resolver,
         &mut table,
+        surface_lighting
+            .as_ref()
+            .and_then(|lighting| lighting.layout.as_ref().ok()),
     );
     overlay_bake.overlays.extend(decal_bake.overlays);
     overlay_bake.skipped_count = overlay_bake
@@ -281,7 +366,36 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     skybox_overlay_bake.skipped_count = skybox_overlay_bake
         .skipped_count
         .saturating_add(skybox_decal_bake.skipped_count);
-    let materials_timing = materials_started.elapsed();
+    if surface_lighting
+        .as_ref()
+        .is_none_or(|lighting| lighting.layout.is_err())
+    {
+        if let Some(lighting) = &surface_lighting {
+            log::warn!(
+                "map surface marks omitted: Source lightmap layout unavailable: {}",
+                lighting.layout.as_ref().unwrap_err()
+            );
+        }
+        for bake in [&mut overlay_bake, &mut skybox_overlay_bake] {
+            bake.skipped_count = bake
+                .skipped_count
+                .saturating_add(authored_surface_mark_count(&bake.overlays));
+            bake.overlays.clear();
+        }
+    }
+    if let Some(lighting) = &surface_lighting {
+        lighting.bind_marks(
+            &mut overlay_bake.overlays,
+            table.slots(),
+            visibility.as_ref(),
+        );
+        lighting.bind_marks(
+            &mut skybox_overlay_bake.overlays,
+            table.slots(),
+            visibility.as_ref(),
+        );
+    }
+    let materials_timing = effective_materials_timing + materials_started.elapsed();
     let mut entity_meshes = map_meshes
         .iter()
         .map(|mesh| mesh.entity)
@@ -296,18 +410,31 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         .collect::<Vec<_>>();
     let mut meshes = map_meshes
         .iter()
-        .map(|mesh| map_mesh_to_model_mesh(mesh, table.slots()))
+        .map(|mesh| {
+            let mut converted = map_mesh_to_model_mesh(mesh, table.slots());
+            if let Some(lighting) = &surface_lighting {
+                lighting.bind_mesh(mesh, &mut converted);
+            }
+            converted
+        })
         .collect::<Vec<_>>();
     let mut map_skybox_meshes = map_skybox_meshes
         .iter()
-        .map(|mesh| map_mesh_to_model_mesh(mesh, table.slots()))
+        .map(|mesh| {
+            let mut converted = map_mesh_to_model_mesh(mesh, table.slots());
+            if let Some(lighting) = &surface_lighting {
+                lighting.bind_mesh(mesh, &mut converted);
+            }
+            converted
+        })
         .collect::<Vec<_>>();
     emit_stage(PreviewLoadStage::PlacingProps);
     let PropBuildPhase {
+        geometry: prop_geometry,
         loaded_models: loaded_model_cache,
         world: prop_bake,
         skybox: skybox_prop_bake,
-        doors: door_bake,
+        doors: mut door_bake,
         walk_collision,
         elapsed: props_timing,
     } = build_props(
@@ -328,16 +455,47 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             probes: &cubemap_probes,
         },
         environment_lighting.as_ref(),
-        lightmap.as_ref().map(|atlas| atlas.source),
+        lighting_source,
         &material_resolver,
         &mut table,
         load_model,
     );
+    if let Some(lighting) = &surface_lighting {
+        for door in &mut door_bake.doors {
+            if let gmpublished_domain::scene::map::MapDoorGeometry::Brush { meshes, .. } =
+                &map_doors[door.source_index].geometry
+            {
+                for (raw, mesh) in meshes.iter().zip(&mut door.meshes) {
+                    lighting.bind_mesh(raw, mesh);
+                }
+            }
+        }
+    }
     let skipped_door_marks = remap_surface_mark_doors(
         &mut overlay_bake.overlays,
         &mut skybox_overlay_bake.overlays,
         &door_bake.doors,
     );
+    let door_indices = door_bake
+        .doors
+        .iter()
+        .enumerate()
+        .map(|(index, door)| (door.source_index, index))
+        .collect::<HashMap<_, _>>();
+    surface_receivers.retain_mut(|receiver| {
+        use gmpublished_domain::scene::map::{MapReceiverMesh, MapSurfaceOwner};
+        let MapSurfaceOwner::Door { door_index, .. } = &mut receiver.owner else {
+            return true;
+        };
+        let Some(index) = door_indices.get(door_index).copied() else {
+            return false;
+        };
+        *door_index = index;
+        if let MapReceiverMesh::Door { door_index, .. } = &mut receiver.receiver_mesh {
+            *door_index = index;
+        }
+        true
+    });
     overlay_bake.skipped_count = overlay_bake
         .skipped_count
         .saturating_add(skipped_door_marks);
@@ -375,6 +533,18 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     model_lighting_inputs.seed_static(&mut model_lighting);
     entity_meshes.extend(prop_bake.entity_meshes);
     skybox_entity_meshes.extend(skybox_prop_bake.entity_meshes);
+    let mut renderables = prop_bake.renderables;
+    for renderable in &mut renderables {
+        for range in &mut renderable.ranges {
+            range.mesh_index += meshes.len();
+        }
+    }
+    let mut map_skybox_renderables = skybox_prop_bake.renderables;
+    for renderable in &mut map_skybox_renderables {
+        for range in &mut renderable.ranges {
+            range.mesh_index += map_skybox_meshes.len();
+        }
+    }
     meshes.extend(prop_bake.meshes);
     mesh_visibility.extend(prop_bake.mesh_visibility);
     map_skybox_meshes.extend(skybox_prop_bake.meshes);
@@ -424,8 +594,15 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     if texture_budget.rejected_textures() > 0 {
         log::debug!(
             "map preview texture budget {} MiB exhausted: dropped {} texture decodes",
-            format_mib(MAP_TEXTURE_DECODE_BUDGET_BYTES),
+            format_mib(texture_residency.resources.resident_bytes),
             texture_budget.rejected_textures()
+        );
+    }
+    if encoded_budget.rejected_textures() > 0 {
+        log::debug!(
+            "map preview source texture budget {} MiB exhausted: rejected {} sources",
+            format_mib(texture_residency.resources.source_encoded_bytes),
+            encoded_budget.rejected_textures()
         );
     }
     log_unresolved_materials(table.slots());
@@ -435,6 +612,8 @@ pub(super) fn map_preview_data_with_prop_model_loader(
     let render_mode_status = render_mode_log_suffix(table.slots());
     if !phy_debug_meshes.is_empty() {
         table.push_unindexed(MaterialSlot {
+            resolution: Default::default(),
+            canonical_name: None,
             shader: Default::default(),
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
@@ -443,8 +622,38 @@ pub(super) fn map_preview_data_with_prop_model_loader(
             alpha_policy: RenderMode::Translucent.texture_alpha_policy(),
         });
     }
+    let displacement_batches = visibility
+        .as_ref()
+        .zip(
+            surface_lighting
+                .as_ref()
+                .and_then(|lighting| lighting.layout.as_ref().ok()),
+        )
+        .map_or_else(HashMap::new, |(visibility, layout)| {
+            displacement_batches::prepare(visibility, layout)
+        });
     let scene = Arc::new(MapPreview {
+        texture_preparation: crate::media::preview_model::MapTexturePreparation {
+            admitted_source_bytes: encoded_budget.encoded_bytes(),
+            admitted_sources: encoded_budget.admitted_textures(),
+            admitted_resident_bytes: texture_budget.decoded_bytes(),
+            admitted_resident_images: texture_budget.admitted_images(),
+            source_rejections: encoded_budget.rejected_textures(),
+            resident_rejections: texture_budget.rejected_textures(),
+            header_only_surface_materials,
+            payload_working_peak_bytes: texture_residency.resources.working_budget.peak_bytes(),
+            source_working_peak_bytes: texture_residency
+                .resources
+                .source_working_budget
+                .peak_bytes(),
+        },
+        prop_geometry,
+        displacement_batches,
+        renderables,
+        map_skybox_renderables,
+        shading_mode,
         surface_receivers,
+        surface_lightmaps: surface_lighting.and_then(|lighting| lighting.layout.ok()),
         model_lighting,
         model_lighting_inputs: Some(model_lighting_inputs),
         water_volumes,
@@ -483,6 +692,7 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         walk_collision,
     });
     let stats = MapStats {
+        lightmap: raw_stats.lightmap,
         face_count: raw_stats.face_count,
         displacement_count: raw_stats.displacement_count,
         entity_count: raw_stats.entity_count,
@@ -500,6 +710,13 @@ pub(super) fn map_preview_data_with_prop_model_loader(
         skybox_overlay_count: map_skybox_overlay_count,
         version: raw_stats.version,
     };
+    if stats.lightmap.invalid_payloads > 0 || stats.lightmap.atlas_dropped_blocks > 0 {
+        log::warn!(
+            "map lightmap fallback: {} invalid payloads, {} blocks exceed the atlas budget",
+            stats.lightmap.invalid_payloads,
+            stats.lightmap.atlas_dropped_blocks
+        );
+    }
     log_map_preview_summary(
         &request.entry_path,
         &stats,

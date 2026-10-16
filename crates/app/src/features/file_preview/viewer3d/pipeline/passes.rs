@@ -102,24 +102,12 @@ fn render_opaque(
             "file_preview.view.skybox",
             wgpu::LoadOp::Clear(clear),
             Some(depth_clear()),
-            false,
+            true,
         );
         draw::configure_scene_pass(&mut pass, &bounds);
         if sky {
             draw::draw_sky_background(&mut pass, resources, upload, &view.sky.bind_group);
         }
-        draw::draw_scene_plan_opaque(
-            &mut pass,
-            resources,
-            upload,
-            plan,
-            DrawView {
-                uniforms: &view.skybox.bind_group,
-                visibility: &view.skybox_visibility,
-                skybox: true,
-                transparency: &view.skybox_transparency,
-            },
-        );
         drop(pass);
         let draw_view = DrawView {
             uniforms: &view.skybox.bind_group,
@@ -127,7 +115,25 @@ fn render_opaque(
             skybox: true,
             transparency: &view.skybox_transparency,
         };
-        render_marks(encoder, targets, resources, upload, plan, draw_view);
+        render_world_batches(
+            encoder,
+            targets,
+            resources,
+            upload,
+            plan,
+            draw_view,
+            super::transparency::WorldDrawGroups::ALL,
+        );
+        render_opaque_items(encoder, targets, resources, upload, plan, draw_view);
+        render_marks(
+            encoder,
+            targets,
+            resources,
+            upload,
+            &plan.surface_marks,
+            draw_view,
+        );
+        render_opaque_brushes(encoder, targets, resources, upload, plan, draw_view);
         render_transparent(encoder, targets, resources, upload, &plan.planar, draw_view);
         if sky && let Some(sun) = sun {
             view.sun.query(encoder, sun, true);
@@ -149,35 +155,46 @@ fn render_opaque(
     if sky && plans.map_skybox.is_none() {
         draw::draw_sky_background(&mut pass, resources, upload, &view.sky.bind_group);
     }
-    draw::draw_scene_plan_opaque(
-        &mut pass,
-        resources,
-        upload,
-        &plans.world,
-        DrawView {
-            uniforms: &view.world.bind_group,
-            visibility: &view.visibility,
-            skybox: false,
-            transparency: &view.transparency,
-        },
-    );
     drop(pass);
-    render_marks(
+    render_world_opaque(view, resources, upload, encoder, targets);
+}
+
+fn render_world_opaque(
+    view: &SceneView,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+) {
+    let plans = view.plans.as_ref().expect("prepared view plans");
+    let draw_view = DrawView {
+        uniforms: &view.world.bind_group,
+        visibility: &view.visibility,
+        skybox: false,
+        transparency: &view.transparency,
+    };
+    render_world_batches(
         encoder,
         targets,
         resources,
         upload,
         &plans.world,
-        DrawView {
-            uniforms: &view.world.bind_group,
-            visibility: &view.visibility,
-            skybox: false,
-            transparency: &view.transparency,
-        },
+        draw_view,
+        view.world_groups,
     );
+    render_opaque_items(encoder, targets, resources, upload, &plans.world, draw_view);
+    render_marks(
+        encoder,
+        targets,
+        resources,
+        upload,
+        &plans.world.surface_marks,
+        draw_view,
+    );
+    render_opaque_brushes(encoder, targets, resources, upload, &plans.world, draw_view);
 }
 
-fn render_marks(
+fn render_opaque_items(
     encoder: &mut wgpu::CommandEncoder,
     targets: &RenderTargets,
     resources: &super::resources::ViewPipelines,
@@ -185,14 +202,35 @@ fn render_marks(
     plan: &super::DrawPlan,
     view: DrawView<'_>,
 ) {
+    if plan.opaque.is_empty() {
+        return;
+    }
+    let mut pass = pass(
+        encoder,
+        targets,
+        "file_preview.view.opaque_items",
+        wgpu::LoadOp::Load,
+        Some(depth_load()),
+        true,
+    );
+    draw::configure_scene_pass(&mut pass, &local_bounds(targets));
+    draw::draw_scene_plan_opaque(&mut pass, resources, upload, plan, view);
+}
+
+fn render_marks(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    marks: &[super::OverlayDrawItem],
+    view: DrawView<'_>,
+) {
     let mut start = 0;
-    while start < plan.surface_marks.len() {
-        let transfer = SurfaceBlend::from(plan.surface_marks[start].blend).color_transfer();
-        let end = (start + 1..plan.surface_marks.len())
-            .find(|&index| {
-                SurfaceBlend::from(plan.surface_marks[index].blend).color_transfer() != transfer
-            })
-            .unwrap_or(plan.surface_marks.len());
+    while start < marks.len() {
+        let transfer = SurfaceBlend::from(marks[start].blend).color_transfer();
+        let end = (start + 1..marks.len())
+            .find(|&index| SurfaceBlend::from(marks[index].blend).color_transfer() != transfer)
+            .unwrap_or(marks.len());
         let mut pass = pass_transfer(
             encoder,
             targets,
@@ -204,12 +242,71 @@ fn render_marks(
         );
         draw::configure_scene_pass(&mut pass, &local_bounds(targets));
         pass.set_bind_group(0, view.uniforms, &[]);
-        for &item in &plan.surface_marks[start..end] {
+        for &item in &marks[start..end] {
             draw::draw_surface_mark(&mut pass, resources, upload, item);
         }
         drop(pass);
         start = end;
     }
+}
+
+fn render_opaque_brushes(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    plan: &super::DrawPlan,
+    view: DrawView<'_>,
+) {
+    for brush in &plan.brushes {
+        render_opaque_surfaces(encoder, targets, resources, upload, &brush.opaque, view);
+    }
+}
+
+fn render_world_batches(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    plan: &super::DrawPlan,
+    view: DrawView<'_>,
+    groups: super::transparency::WorldDrawGroups,
+) {
+    for batch in &plan.world_batches {
+        if groups.allows(batch.material_group) {
+            render_opaque_surfaces(encoder, targets, resources, upload, &batch.surfaces, view);
+        }
+    }
+}
+
+fn render_opaque_surfaces(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    batch: &super::super::draw_plan::SurfaceBatch,
+    view: DrawView<'_>,
+) {
+    if !batch.meshes.is_empty() {
+        let mut pass = pass(
+            encoder,
+            targets,
+            "file_preview.surface.opaque",
+            wgpu::LoadOp::Load,
+            Some(depth_load()),
+            true,
+        );
+        draw::configure_scene_pass(&mut pass, &local_bounds(targets));
+        draw::draw_opaque_surfaces(&mut pass, resources, upload, batch, view);
+    }
+    render_marks(
+        encoder,
+        targets,
+        resources,
+        upload,
+        &batch.surface_marks,
+        view,
+    );
 }
 
 fn render_transparent(
@@ -382,11 +479,11 @@ pub fn render_frame(
         );
         draw::configure_scene_pass(&mut pass, &local_bounds(targets));
         if let Some(pipeline) = resources.refractive_water_pipeline.as_ref() {
-            // Near-plane water composes the opposite medium at near depth.
             for optical in &frame.planar_views {
                 let surface = &upload.assets.reflectors[optical.surface_index];
-                if optical.refraction.is_none()
-                    || !surface.plane.intersects_near_plane(primitive.uniforms)
+                if !primitive.submerged
+                    || optical.refraction.is_none()
+                    || !surface.plane.intersects_near_plane(&primitive.uniforms)
                     || primitive.preview.render_scene().materials[surface.material_slot]
                         .shader
                         .water()
@@ -402,7 +499,7 @@ pub fn render_frame(
                 );
                 pass.set_bind_group(
                     1,
-                    &upload.assets.material_bind_groups[surface.material_slot],
+                    &upload.assets.water_material_bind_groups[surface.material_slot],
                     &[],
                 );
                 pass.set_vertex_buffer(0, upload.meshes[surface.mesh_index].vertices().slice(..));
@@ -425,7 +522,7 @@ pub fn render_frame(
                 );
                 pass.set_bind_group(
                     1,
-                    &upload.assets.material_bind_groups[surface.material_slot],
+                    &upload.assets.water_material_bind_groups[surface.material_slot],
                     &[],
                 );
                 pass.set_vertex_buffer(0, upload.meshes[surface.mesh_index].vertices().slice(..));
@@ -466,6 +563,28 @@ pub fn render_frame(
             transparency: &view.transparency,
         },
     );
+    if let Some(intersection) = frame
+        .water_intersection
+        .as_ref()
+        .filter(|view| view.selection.is_some())
+    {
+        let intersection = &intersection.view;
+        let resources = resources.for_view(ViewKind::Main);
+        render_world_opaque(intersection, resources, upload, encoder, targets);
+        render_transparent(
+            encoder,
+            targets,
+            resources,
+            upload,
+            &intersection.plans.as_ref().unwrap().world.planar,
+            DrawView {
+                uniforms: &intersection.world.bind_group,
+                visibility: &intersection.visibility,
+                skybox: false,
+                transparency: &intersection.transparency,
+            },
+        );
+    }
     if !primitive.submerged {
         view.sun.query(encoder, &resources.sun, false);
         view.sun.draw(encoder, &resources.sun, upload, targets);

@@ -302,6 +302,12 @@ impl PreviewArchive {
             .map_err(|_| GmaError::EntryNotFound)
     }
 
+    pub(crate) fn entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, GmaError> {
+        let entry = self.entry(path)?;
+        self.view
+            .read_payload_bytes(entry.data_offset, entry.size.min(max_bytes as u64))
+    }
+
     pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
         let entry = self.entry(entry_path)?;
         self.view.read_payload_bytes(entry.data_offset, entry.size)

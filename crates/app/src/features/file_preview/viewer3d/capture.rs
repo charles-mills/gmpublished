@@ -3,7 +3,9 @@ mod isolation;
 use super::{FlyCamera, FlyPose, FlyViewer, Message, ModelPrimitive, MovementMode, Vec3, shader};
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::generation::Generation;
-use crate::media::file_preview_decode::load_map_for_capture_with_model_options;
+use crate::media::file_preview_decode::{
+    MapTextureResidency, TextureResourcePolicy, load_map_for_capture_with_model_options,
+};
 use crate::media::preview_model::{MaterialSlot, PreviewContent, PreviewRequest};
 use iced::advanced::renderer::Headless as _;
 use iced::{Color, Length, Rectangle, Size, mouse};
@@ -72,7 +74,68 @@ struct CaptureSuite {
     verify_view_isolation: bool,
     #[serde(default)]
     model_vertex_compression: CaptureModelVertexCompression,
+    #[serde(default)]
+    texture_residency: CaptureTextureResidency,
     maps: Vec<CaptureMap>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureTextureResidency {
+    max_dimension: u32,
+    resident_bytes: usize,
+    #[serde(default = "CaptureTextureResidency::default_resident_images")]
+    resident_images: usize,
+    #[serde(default = "CaptureTextureResidency::default_source_decoder_bytes")]
+    source_decoder_bytes: usize,
+    #[serde(default = "CaptureTextureResidency::default_source_working_bytes")]
+    source_working_bytes: usize,
+    #[serde(default = "CaptureTextureResidency::default_source_encoded_bytes")]
+    source_encoded_bytes: usize,
+    #[serde(default = "CaptureTextureResidency::default_resource_resident_bytes")]
+    resource_resident_bytes: usize,
+    #[serde(default = "CaptureTextureResidency::default_payload_working_bytes")]
+    payload_working_bytes: usize,
+}
+
+impl CaptureTextureResidency {
+    fn default_resident_images() -> usize {
+        TextureResourcePolicy::default().resident_images
+    }
+    fn default_source_decoder_bytes() -> usize {
+        TextureResourcePolicy::default().source_decoder_bytes
+    }
+    fn default_source_working_bytes() -> usize {
+        TextureResourcePolicy::default()
+            .source_working_budget
+            .capacity()
+    }
+
+    fn default_source_encoded_bytes() -> usize {
+        TextureResourcePolicy::default().source_encoded_bytes
+    }
+    fn default_resource_resident_bytes() -> usize {
+        TextureResourcePolicy::default().resource_resident_bytes
+    }
+    fn default_payload_working_bytes() -> usize {
+        TextureResourcePolicy::default().working_budget.capacity()
+    }
+}
+
+impl Default for CaptureTextureResidency {
+    fn default() -> Self {
+        let defaults = MapTextureResidency::default();
+        Self {
+            max_dimension: defaults.max_dimension,
+            resident_bytes: defaults.resources.resident_bytes,
+            resident_images: defaults.resources.resident_images,
+            source_decoder_bytes: defaults.resources.source_decoder_bytes,
+            source_working_bytes: defaults.resources.source_working_budget.capacity(),
+            source_encoded_bytes: defaults.resources.source_encoded_bytes,
+            resource_resident_bytes: defaults.resources.resource_resident_bytes,
+            payload_working_bytes: defaults.resources.working_budget.capacity(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize)]
@@ -261,6 +324,12 @@ struct CaptureCamera {
     /// Source degrees: positive pitch looks downward; yaw zero faces +X.
     angles: [f32; 2],
     #[serde(default)]
+    clip_near: Option<f32>,
+    #[serde(default)]
+    clip_far: Option<f32>,
+    #[serde(default)]
+    horizontal_fov_degrees: Option<f32>,
+    #[serde(default)]
     animation_time: Option<f32>,
     #[serde(default)]
     model_lighting_timeline: Option<ModelLightingTimeline>,
@@ -275,7 +344,6 @@ struct CaptureCamera {
     frame_visualization_linear_output: bool,
     #[serde(default)]
     frame_probe: Option<FrameProbe>,
-    /// Replay the production widget update path for two seconds without input.
     #[serde(default)]
     live_animation: bool,
     #[serde(default)]
@@ -313,6 +381,10 @@ enum FrameVisualization {
     UnitNormal,
     UnitTangentS,
     UnitEye,
+    SurfacePosition,
+    SurfaceUv,
+    SurfaceAlpha,
+    SurfaceBaseColor,
 }
 
 impl FrameVisualization {
@@ -326,6 +398,10 @@ impl FrameVisualization {
             (Self::UnitNormal, true, false) => DiagnosticMode::UnitNormal,
             (Self::UnitTangentS, true, false) => DiagnosticMode::UnitTangentS,
             (Self::UnitEye, true, false) => DiagnosticMode::UnitEye,
+            (Self::SurfacePosition, true, false) => DiagnosticMode::SurfacePosition,
+            (Self::SurfaceUv, true, false) => DiagnosticMode::SurfaceUv,
+            (Self::SurfaceAlpha, true, false) => DiagnosticMode::SurfaceAlpha,
+            (Self::SurfaceBaseColor, true, false) => DiagnosticMode::SurfaceBaseColor,
             (Self::Normal, false, false) => DiagnosticMode::VertexNormalColor,
             (Self::TangentS, false, false) => DiagnosticMode::VertexTangentSColor,
             (Self::TangentT, false, false) => DiagnosticMode::VertexTangentTColor,
@@ -355,6 +431,26 @@ enum CaptureTarget {
     Refraction,
 }
 impl CaptureCamera {
+    fn horizontal_fov_degrees(&self) -> Option<f32> {
+        self.horizontal_fov_degrees.inspect(|&fov| {
+            assert!(
+                fov.is_finite() && fov > 0.0 && fov < 180.0,
+                "capture horizontal FOV requires finite 0 < horizontal_fov_degrees < 180"
+            );
+        })
+    }
+
+    fn clip_distances(&self) -> Option<super::camera::CaptureClipDistances> {
+        match (self.clip_near, self.clip_far) {
+            (None, None) => None,
+            (Some(near), Some(far)) => Some(
+                super::camera::CaptureClipDistances::new(near, far)
+                    .expect("capture clipping requires finite 0 < clip_near < clip_far"),
+            ),
+            _ => panic!("capture clipping requires both clip_near and clip_far"),
+        }
+    }
+
     fn lighting_timeline(&self) -> Option<Arc<ModelLightingTimeline>> {
         self.model_lighting_timeline.as_ref().map(|timeline| {
             assert!(
@@ -414,6 +510,8 @@ impl shader::Program<Message> for FixedView {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
+        state.capture_clip_distances = self.camera.capture_clip_distances;
+        state.capture_horizontal_fov_degrees = self.camera.capture_horizontal_fov_degrees;
         self.live_animation
             .then(|| self.viewer.update(state, event, bounds, cursor))
             .flatten()
@@ -534,11 +632,19 @@ fn executable_identity(output: &std::path::Path) -> Value {
         "workspace_snapshot_scope":"capture-time workspace; source.patch and untracked-source do not identify a frozen executable's build inputs"})
 }
 
+fn texture_metadata_info(metadata: &crate::bridge::materials::TextureMetadata) -> Value {
+    json!({"flags":metadata.flags, "dimensions":metadata.original_dimensions,
+        "frames":metadata.frame_count, "faces":metadata.face_count, "mips":metadata.mip_count,
+        "format":metadata.format.map(|format|format!("{format:?}")), "first_frame":metadata.first_frame,
+        "version_minor":metadata.version_minor,"reflectivity_bits":metadata.reflectivity_bits,
+        "bumpmap_scale_bits":metadata.bumpmap_scale_bits})
+}
+
 fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
     let mut hash = crc32fast::Hasher::new();
     let format = if let Some((format, mips)) = texture.bc_payload() {
         for mip in mips {
-            hash.update(&mip.data);
+            hash.update(mip.bytes.as_slice());
         }
         format!("{format:?}")
     } else {
@@ -548,29 +654,37 @@ fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
         "RGBA8".to_owned()
     };
     json!({
-        "dimensions": [texture.width, texture.height],
+        "dimensions": [texture.width(), texture.height()],
         "original_dimensions": texture.original_dimensions(),
+        "mapping_dimensions": texture.mapping_dimensions(),
+        "effective_base_texture": texture.has_effective_base_texture(),
         "mip_levels": texture.bc_payload().map_or_else(|| texture.mip_chain().count(), |(_, mips)| mips.len()),
         "format": format,
         "payload_crc32": format!("{:08x}", hash.finalize()),
         "water_fallback": texture.is_water_fallback(),
-        "vtf_flags": texture.flags,
+        "vtf_flags": texture.flags(),
+        "load_outcome": format!("{:?}",texture.load_outcome()),
+        "effective_reflectivity_bits":texture.reflectivity_bits(),
+        "source_metadata":texture.source_metadata().map(texture_metadata_info),
+        "resident": texture.resident().map(|resident|json!({"frames":[resident.id().frames.start,resident.id().frames.end],
+            "faces":[resident.id().faces.start,resident.id().faces.end],
+            "first_source_mip":resident.id().first_source_mip,
+            "mip_count":resident.id().mip_count,"bytes":resident.byte_len()})),
     })
 }
 
 fn material_info(slot: &MaterialSlot) -> Value {
     let water = slot.shader.water().map(|water| {
         let frames = water.normal_map.as_ref().map(|normal| {
-            normal
-                .frames
-                .iter()
+            (0..normal.frame_count())
+                .filter_map(|index| normal.frame(index))
                 .map(|mips| {
                     mips.iter()
                         .map(|mip| {
                             json!({
-                                "dimensions": [mip.width, mip.height],
-                                "payload_crc32": format!("{:08x}", crc32fast::hash(&mip.rgba)),
-                                "bytes": mip.rgba.len(),
+                                "dimensions": mip.dimensions,
+                                "payload_crc32": format!("{:08x}", crc32fast::hash(mip.bytes.as_slice())),
+                                "bytes": mip.bytes.as_slice().len(),
                             })
                         })
                         .collect::<Vec<_>>()
@@ -582,6 +696,7 @@ fn material_info(slot: &MaterialSlot) -> Value {
             "parameters": water.parameters,
             "normal_map_path": water.normal_map_path,
             "normal_frames_linear_rgba": frames,
+            "normal_source_metadata":water.normal_map.as_ref().and_then(|normal| normal.source_metadata().map(texture_metadata_info)),
             "bump_transform": water.bump_transform,
             "proxy_scroll": water.proxy_scroll,
             "scroll1": water.scroll1, "scroll2": water.scroll2,
@@ -604,13 +719,18 @@ fn material_info(slot: &MaterialSlot) -> Value {
     });
     json!({
         "name": slot.name,
+        "resolution":format!("{:?}",slot.resolution),
+        "canonical_name":slot.canonical_name,
         "shader": slot.shader.shader_name(),
+        "mapping_dimensions": slot.shader.mapping_dimensions(slot.texture.as_deref()),
         "water": water,
         "surface": slot.shader.surface().map(|surface|json!({
             "family":format!("{:?}",surface.family),
             "parameters":surface.parameters,
             "color":surface.color,"color2":surface.color2,"alpha":surface.alpha,
+            "base_frame":surface.base_frame,"base2_frame":surface.base2_frame,
             "base_transform":surface.base_transform,"base2_transform":surface.base2_transform,
+            "base_blend": format!("{:?}",surface.base_blend),
             "detail":surface.detail.as_ref().map(|detail|json!({"path":detail.path,"frame":detail.frame,"scale":detail.scale,"mode":detail.mode,"effective_mode":surface.effective_detail_mode(),"factor":detail.factor,"tint":detail.tint,"transform":detail.transform,"texture_available":detail.texture.is_some()})),
             "emission":surface.emission.as_ref().map(|emission|json!({"self_illumination":emission.self_illumination,"envmap_mask_alpha":emission.envmap_mask_alpha,"tint":emission.tint,"mask":emission.mask_path,"fresnel":emission.fresnel})),
             "envmap":surface.envmap.as_ref().map(|envmap|json!({"path":envmap.path,"frame":envmap.frame,"mask":format!("{:?}",envmap.mask),"tint":envmap.tint})),
@@ -662,9 +782,9 @@ fn sky_info(sky: &crate::media::preview_model::Skybox) -> Value {
                 "star_fade": paint.star_fade,
                 "star_position": paint.star_position,
                 "star_speed": paint.star_speed,
-                "frames": paint.texture.as_ref().map(|texture| texture.frames.iter().map(|mips|mips.iter().map(|mip|json!({
-                    "dimensions": [mip.width,mip.height],
-                    "rgba_crc32": format!("{:08x}",crc32fast::hash(&mip.rgba)),
+                "frames": paint.texture.as_ref().map(|texture| (0..texture.frame_count()).filter_map(|index| texture.frame(index)).map(|mips|mips.iter().map(|mip|json!({
+                    "dimensions": mip.dimensions,
+                    "rgba_crc32": format!("{:08x}",crc32fast::hash(mip.bytes.as_slice())),
                 })).collect::<Vec<_>>()).collect::<Vec<_>>()),
             })),
         }))).collect::<Vec<_>>(),
@@ -709,6 +829,7 @@ fn git_output(args: &[&str]) -> Option<String> {
 }
 
 pub fn capture_map_reference_frames() {
+    let texture_upload_policy = super::pipeline::capture_texture_upload_policy();
     let suite_path = std::env::var_os("GMPUBLISHED_MAP_CAPTURE_SUITE").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/map-capture/cameras.json"),
         PathBuf::from,
@@ -716,6 +837,9 @@ pub fn capture_map_reference_frames() {
     let suite_bytes = fs::read(&suite_path).expect("read camera suite");
     let suite: CaptureSuite = serde_json::from_slice(&suite_bytes).expect("parse camera suite");
     assert!((1..=4096).contains(&suite.width) && (1..=4096).contains(&suite.height));
+    assert!(
+        suite.texture_residency.max_dimension > 0 && suite.texture_residency.resident_bytes > 0
+    );
     assert!(suite.animation_time.is_finite() && suite.animation_time >= 0.0);
     assert!(suite.benchmark_frames <= 1000);
     assert!(!suite.maps.is_empty());
@@ -723,6 +847,22 @@ pub fn capture_map_reference_frames() {
     for map in &suite.maps {
         assert!(valid_name(&map.name) && names.insert(map.name.clone()));
         assert!(!map.cameras.is_empty());
+        if suite.verify_view_isolation {
+            assert!(
+                map.cameras
+                    .iter()
+                    .filter(|camera| {
+                        !camera.reflection_target
+                            && !camera.refraction_target
+                            && !camera.live_animation
+                    })
+                    .take(2)
+                    .count()
+                    == 2,
+                "isolation gate needs two fixed main cameras for {}",
+                map.name
+            );
+        }
         let mut camera_names = std::collections::HashSet::new();
         let mut trace_names = std::collections::HashSet::new();
         for trace in &map.traces {
@@ -738,6 +878,7 @@ pub fn capture_map_reference_frames() {
             assert!(trace.half_extents.iter().all(|v| *v >= 0.0));
         }
         for camera in &map.cameras {
+            let _ = camera.clip_distances();
             assert!(valid_name(&camera.name) && camera_names.insert(camera.name.clone()));
             assert!(
                 camera
@@ -759,6 +900,15 @@ pub fn capture_map_reference_frames() {
     );
     let maps_directory = std::env::var_os("GMPUBLISHED_MAP_CAPTURE_MAPS")
         .map_or_else(|| game.join("garrysmod/maps"), PathBuf::from);
+    let game_vpks = gmpublished_backend::vpk::discover_game_vpks(&game);
+    assert!(
+        game_vpks.contains(&game.join("garrysmod/garrysmod_dir.vpk")),
+        "the game asset resolver must discover the primary Garry's Mod VPK"
+    );
+    for map in &suite.maps {
+        let path = maps_directory.join(format!("{}.bsp", map.name));
+        assert!(path.is_file(), "capture map is missing: {}", path.display());
+    }
     let output = PathBuf::from(
         std::env::var_os("GMPUBLISHED_MAP_CAPTURE_DIR")
             .expect("set GMPUBLISHED_MAP_CAPTURE_DIR to a new output directory"),
@@ -820,10 +970,26 @@ pub fn capture_map_reference_frames() {
         "git_revision": git_output(&["rev-parse", "HEAD"]),
         "git_status": git_output(&["status", "--short"]),
         "game_installation_directory": game,
+        "discovered_game_vpks": game_vpks,
         "maps_directory": maps_directory,
         "viewport": [suite.width, suite.height],
         "scene_msaa_samples": super::scene_sample_count(),
         "optical_msaa_samples": 1,
+        "requested_bc_upload": super::pipeline::capture_bc_upload(),
+        "texture_upload_policy": texture_upload_policy,
+        "texture_residency": {
+            "max_dimension": suite.texture_residency.max_dimension,
+            "resident_bytes": suite.texture_residency.resident_bytes,
+            "resident_images": suite.texture_residency.resident_images,
+            "source_decoder_bytes": suite.texture_residency.source_decoder_bytes,
+            "source_working_bytes": suite.texture_residency.source_working_bytes,
+            "source_working_scope": "map",
+            "source_encoded_bytes": suite.texture_residency.source_encoded_bytes,
+            "resource_resident_bytes": suite.texture_residency.resource_resident_bytes,
+            "payload_working_bytes": suite.texture_residency.payload_working_bytes,
+            "payload_working_scope": "map",
+            "host_limits": crate::bridge::materials::MaterialResolver::texture_host_limits(),
+        },
         "scale_factor": 1.0,
         "vertical_fov_degrees": super::FOV_Y.to_degrees(),
         "animation_time_seconds": suite.animation_time,
@@ -883,6 +1049,25 @@ pub fn capture_map_reference_frames() {
             game.clone(),
             &pool,
             suite.model_vertex_compression.options(),
+            &MapTextureResidency {
+                max_dimension: suite.texture_residency.max_dimension,
+                resources: TextureResourcePolicy {
+                    resident_bytes: suite.texture_residency.resident_bytes,
+                    resident_images: suite.texture_residency.resident_images,
+                    source_decoder_bytes: suite.texture_residency.source_decoder_bytes,
+                    source_encoded_bytes: suite.texture_residency.source_encoded_bytes,
+                    resource_resident_bytes: suite.texture_residency.resource_resident_bytes,
+                    working_budget: Arc::new(crate::bridge::materials::TextureWorkingBudget::new(
+                        suite.texture_residency.payload_working_bytes,
+                    )),
+                    source_working_budget: Arc::new(
+                        crate::bridge::materials::TextureWorkingBudget::new(
+                            suite.texture_residency.source_working_bytes,
+                        ),
+                    ),
+                    ..TextureResourcePolicy::default()
+                },
+            },
         )
         .expect("load map preview");
         let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
@@ -925,6 +1110,16 @@ pub fn capture_map_reference_frames() {
             "bsp_crc32": format!("{:08x}", request.crc32),
             "load_wall_time_ms": load_ms,
             "stats": format!("{stats:?}"),
+            "prop_geometry": scene.prop_geometry,
+            "texture_preparation": scene.texture_preparation,
+            "prop_geometry_totals": scene.prop_geometry.admitted_totals(),
+            "lightmap_diagnostics": {
+                "valid_payloads":stats.lightmap.valid_payloads,
+                "missing_payloads":stats.lightmap.missing_payloads,
+                "invalid_payloads":stats.lightmap.invalid_payloads,
+                "atlas_dropped_blocks":stats.lightmap.atlas_dropped_blocks,
+                "unlightmapped_surfaces":stats.lightmap.unlightmapped_surfaces,
+            },
             "sky_camera": format!("{sky_camera:?}"),
             "fog": format!("{fog:?}"),
             "world_meshes": scene.scene.meshes.len(),
@@ -943,6 +1138,12 @@ pub fn capture_map_reference_frames() {
                         "ambient":seed.ambient_cube.colors.map(Vec3::to_array),"diagnostics":format!("{:?}",seed.diagnostics)}),
                     crate::media::preview_model::ModelLightingSource::Explicit(_)=>Value::Null,
                     crate::media::preview_model::ModelLightingSource::DiagnosedFallback {reason,..}=>json!({"error":format!("{reason:?}")}),
+                },
+                "compiled_supplement":match &context.compiled_supplement {
+                    None=>Value::Null,
+                    Some(Ok(seed))=>json!({"sample_point":seed.sample_point.to_array(),"leaf":seed.leaf,
+                        "ambient":seed.ambient_cube.colors.map(Vec3::to_array),"diagnostics":format!("{:?}",seed.diagnostics)}),
+                    Some(Err(error))=>json!({"error":format!("{error:?}")}),
                 },
                 "runtime_vertices":scene.scene.meshes.iter().chain(&scene.map_skybox_meshes)
                     .flat_map(|mesh|&mesh.vertices).filter(|vertex|vertex.lighting_context as usize==index+1 && vertex.lighting_mode & crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT != 0).count(),
@@ -963,6 +1164,21 @@ pub fn capture_map_reference_frames() {
             })).collect::<Vec<_>>(),
             "baked_lighting": scene.lightmap.as_ref().map(|atlas| serde_json::json!({"source":format!("{:?}",atlas.source),"dimensions":[atlas.width,atlas.height],"animated":atlas.is_animated(),"active_styles":atlas.active_styles(),"initial_weights":atlas.active_styles().into_iter().map(|index|(index.to_string(),atlas.style_values(0.0)[usize::from(index)])).collect::<std::collections::BTreeMap<_,_>>()})),
             "lightmap_crc32": scene.lightmap.as_ref().map(|atlas| format!("{:08x}", crc32fast::hash(&atlas.rgba))),
+            "source_lightmap_layout": scene.surface_lightmaps.as_ref().map(|layout| json!({
+                "profile": [layout.profile.width, layout.profile.height],
+                "physical_pages": layout.physical_page_count,
+                "surfaces": layout.surfaces.iter().enumerate().map(|(face, allocation)| json!({
+                    "face": face, "lightmap_page": allocation.page.native_id(),
+                    "offset": allocation.offset, "material_group": allocation.material_group,
+                })).collect::<Vec<_>>(),
+            })),
+            "surface_mark_lighting": scene.overlays.iter().chain(&scene.map_skybox_overlays).map(|mark| json!({
+                "source":format!("{:?}",mark.source), "receiver_face":mark.receiver_range.face,
+                "material":scene.scene.materials[mark.material_index].name,
+                "lighting_mode":mark.vertices.first().map(|vertex|vertex.lighting_mode),
+                "directional_step":mark.vertices.first().map(|vertex|vertex.lightmap_bump_step),
+                "decal_sort":mark.decal_sort.map(|sort|json!({"pass":format!("{:?}",sort.pass),"format_group":sort.format_group,"bucket":sort.material_page_bucket})),
+            })).collect::<Vec<_>>(),
             "captures": [],
         });
         let mut trace_camera = FlyCamera::default();
@@ -983,7 +1199,11 @@ pub fn capture_map_reference_frames() {
                 pitch: -shot.angles[0].to_radians(),
                 speed: 1.0,
             };
-            let mut camera = FlyCamera::default();
+            let mut camera = FlyCamera {
+                capture_clip_distances: shot.clip_distances(),
+                capture_horizontal_fov_degrees: shot.horizontal_fov_degrees(),
+                ..FlyCamera::default()
+            };
             camera.ensure_spawn(
                 &scene,
                 spawn,
@@ -1008,7 +1228,6 @@ pub fn capture_map_reference_frames() {
                 "{} / {} eye is inside solid collision",
                 map.name, shot.name
             );
-            // Fixed fly poses need immersion before their first movement.
             camera.water = if submerged {
                 super::camera::WaterLevel::Eyes
             } else {
@@ -1162,6 +1381,14 @@ pub fn capture_map_reference_frames() {
                 })
             });
             let filename = format!("{}.png", shot.name);
+            assert!(
+                diagnostics
+                    .lock()
+                    .expect("capture diagnostics lock")
+                    .get("upload_error")
+                    .is_none(),
+                "scene GPU residency preparation failed"
+            );
             image::save_buffer(
                 directory.join(&filename),
                 &rgba,
@@ -1188,7 +1415,9 @@ pub fn capture_map_reference_frames() {
             map_record["captures"].as_array_mut().unwrap().push(json!({
                 "file": filename,
                 "render_diagnostics": diagnostics.lock().unwrap().clone(),
-                "door_progress_override":shot.door_progress_override,"raster_offset": shot.raster_offset.unwrap_or([0.5; 2]), "fullbright": shot.fullbright, "phy_debug": shot.phy_debug, "sky_animation_time": shot.sky_animation_time.unwrap_or(if shot.live_animation { 2.0 } else { animation_time }), "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
+                "door_progress_override":shot.door_progress_override,"raster_offset": shot.raster_offset.unwrap_or([0.5; 2]), "authored_fullbright": shot.fullbright,
+                "fullbright": shot.fullbright || scene.shading_mode == crate::media::preview_model::ShadingMode::Fullbright,
+                "phy_debug": shot.phy_debug, "sky_animation_time": shot.sky_animation_time.unwrap_or(if shot.live_animation { 2.0 } else { animation_time }), "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
                 "frame_visualization":shot.frame_visualization,"frame_visualization_linear_output":shot.frame_visualization_linear_output,
                 "frame_probe":shot.frame_probe,
                 "model_lighting_timeline":shot.model_lighting_timeline,
@@ -1204,8 +1433,10 @@ pub fn capture_map_reference_frames() {
                 })),
                 "eye": shot.eye,
                 "source_angles_degrees": [shot.angles[0], shot.angles[1], 0.0],
+                "capture_horizontal_fov_degrees": shot.horizontal_fov_degrees(),
                 "clip_near": clip_distances[0],
                 "clip_far": clip_distances[1],
+                "capture_clip_override": shot.clip_distances().map(|clip| json!({"near":clip.near,"far":clip.far,"scope":"base renderer camera; native sky/optical projections require separate observations"})),
                 "source_camera_commands": format!("setpos {} {} {}; setang {} {} 0", player_origin[0], player_origin[1], player_origin[2], shot.angles[0], shot.angles[1]),
                 "skybox": shot.skybox,
                 "fog": shot.fog,
@@ -1226,7 +1457,11 @@ pub fn capture_map_reference_frames() {
                 pitch: -shot.angles[0].to_radians(),
                 speed: 1.0,
             };
-            let mut camera = FlyCamera::default();
+            let mut camera = FlyCamera {
+                capture_clip_distances: shot.clip_distances(),
+                capture_horizontal_fov_degrees: shot.horizontal_fov_degrees(),
+                ..FlyCamera::default()
+            };
             camera.ensure_spawn(
                 &scene,
                 spawn,
@@ -1319,4 +1554,52 @@ fn write_manifest(output: &std::path::Path, manifest: &Value) {
         serde_json::to_vec_pretty(manifest).expect("serialize capture manifest"),
     )
     .expect("write capture manifest");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera(extra: &Value) -> CaptureCamera {
+        let mut value = json!({"name":"projection","eye":[0,0,0],"angles":[0,0]});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn capture_horizontal_fov_is_optional_and_validated() {
+        assert_eq!(camera(&json!({})).horizontal_fov_degrees(), None);
+        assert_eq!(
+            camera(&json!({"horizontal_fov_degrees":72.73435974121094})).horizontal_fov_degrees(),
+            Some(72.734_36)
+        );
+        for invalid in [0.0, -1.0, 180.0, f32::NAN, f32::INFINITY] {
+            let mut camera = camera(&json!({}));
+            camera.horizontal_fov_degrees = Some(invalid);
+            assert!(std::panic::catch_unwind(|| camera.horizontal_fov_degrees()).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_capture_pair_survives_camera_decoding() {
+        let camera = camera(&json!({"clip_near":4,"clip_far":32768}));
+        let clip = camera.clip_distances().unwrap();
+        assert_eq!((clip.near, clip.far), (4.0, 32768.0));
+        assert_eq!(self::camera(&json!({})).clip_distances(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "both clip_near and clip_far")]
+    fn partial_capture_pair_is_rejected() {
+        let _ = camera(&json!({"clip_near":4})).clip_distances();
+    }
+
+    #[test]
+    #[should_panic(expected = "finite 0 < clip_near < clip_far")]
+    fn unordered_capture_pair_is_rejected() {
+        let _ = camera(&json!({"clip_near":4,"clip_far":2})).clip_distances();
+    }
 }

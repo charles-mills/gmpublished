@@ -9,7 +9,7 @@ pub(super) fn gather(
     view: &SceneView,
 ) {
     let Some(plans) = &view.plans else { return };
-    for (plan, skybox) in std::iter::once((&plans.world, false))
+    for (plan, skybox) in std::iter::once((plans.world.as_ref(), false))
         .chain(plans.map_skybox.as_ref().map(|plan| (plan, true)))
     {
         for item in plan

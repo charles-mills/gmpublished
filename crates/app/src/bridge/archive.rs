@@ -162,6 +162,38 @@ impl PreviewArchiveSource {
         matches!(self, Self::Gma(_))
     }
 
+    pub(crate) fn folder_entry_file(
+        &self,
+        path: &str,
+    ) -> Result<Option<std::fs::File>, PreviewArchiveSourceError> {
+        let Self::Folder(folder) = self else {
+            return Ok(None);
+        };
+        let entry = folder
+            .entries
+            .get(path)
+            .ok_or_else(|| PreviewArchiveSourceError::EntryNotFound(path.to_owned()))?;
+        std::fs::File::open(&entry.disk_path)
+            .map(Some)
+            .map_err(|error| PreviewArchiveSourceError::FolderRead {
+                path: path.to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    pub(crate) fn entry_prefix(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, PreviewArchiveSourceError> {
+        match self {
+            Self::Gma(archive) => archive
+                .entry_prefix(path, max_bytes)
+                .map_err(PreviewArchiveSourceError::Gma),
+            Self::Folder(_) => unreachable!("folder entries use their opened handle"),
+        }
+    }
+
     pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
         match self {
             Self::Gma(archive) => archive

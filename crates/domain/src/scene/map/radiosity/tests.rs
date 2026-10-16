@@ -14,7 +14,6 @@ fn surface(bumped: bool) -> MapRadiositySurfaces {
         })
         .collect();
     MapRadiositySurfaces {
-        source: LightmapSource::Ldr,
         world_head_node: -1,
         world_face_range: 0..1,
         planes: Vec::new(),
@@ -45,11 +44,99 @@ fn surface(bumped: bool) -> MapRadiositySurfaces {
         }],
         texdatas: Vec::new(),
         texture_names: Vec::new(),
-        samples,
+        lighting: Some(MapRadiosityLighting {
+            source: LightmapSource::Ldr,
+            samples,
+        }),
         displacements: Vec::new(),
         triangles: Vec::new(),
         triangle_tree: BoundsTree::new(std::iter::empty()),
     }
+}
+
+#[test]
+fn unlit_bsp_retains_surface_metadata_and_logical_lightmap_allocation() {
+    use crate::scene::map::{
+        SourceLightmapLayout, SourceLightmapMaterial, SourceLightmapPage,
+        SourceLightmapPageProfile, SourceLightmapRequirement, SourceLightmapSurface,
+    };
+
+    let mut bsp = super::super::tests::brush_collision_bsp("");
+    bsp.lighting.clear();
+    bsp.lighting_hdr.clear();
+    for face in &mut bsp.faces {
+        face.light_offset = -1;
+        face.styles = [255; 4];
+        face.lightmap_size = [1; 2];
+    }
+    let surfaces = MapRadiositySurfaces::from_bsp(&bsp).unwrap();
+    assert!(surfaces.lighting_source().is_none());
+    assert!(surfaces.lighting.is_none());
+    assert!(!surfaces.faces.is_empty());
+    assert_eq!(surfaces.faces, bsp.faces);
+    assert_eq!(surfaces.texinfos, bsp.texinfos);
+    assert_eq!(surfaces.texdatas, bsp.texdatas);
+    assert_eq!(surfaces.texture_names, bsp.texdata_strings);
+    assert_eq!(
+        surfaces.face_vertices[0],
+        bsp.face_vertex_positions(&bsp.faces[0])
+    );
+    assert!(
+        surfaces
+            .sample_luxel(0, [0; 2], &[1.0; 128], MapRadiosityStyles::First)
+            .is_none()
+    );
+    assert!(
+        surfaces
+            .sample_face_average(0, &[1.0; 128], MapRadiosityStyles::All)
+            .is_none()
+    );
+
+    let materials = (0..surfaces.texdatas.len())
+        .map(|index| SourceLightmapMaterial {
+            canonical_name: surfaces.material_name(index).unwrap(),
+            requirement: SourceLightmapRequirement::Lightmapped,
+        })
+        .collect::<Vec<_>>();
+    let faces = surfaces
+        .faces
+        .iter()
+        .map(|face| {
+            let info = &surfaces.texinfos[face.texinfo as usize];
+            SourceLightmapSurface {
+                material: info.texdata as usize,
+                extents: face.lightmap_size,
+                no_light: info.flags & vformats::bsp::texture_flags::NOLIGHT != 0,
+                styles: face.styles,
+            }
+        })
+        .collect::<Vec<_>>();
+    let layout =
+        SourceLightmapLayout::allocate(&faces, &materials, SourceLightmapPageProfile::DX9).unwrap();
+    assert_eq!(layout.surfaces.len(), bsp.faces.len());
+    assert!(
+        layout
+            .surfaces
+            .iter()
+            .any(|allocation| matches!(allocation.page, SourceLightmapPage::Physical(_)))
+    );
+}
+
+#[test]
+fn unavailable_lighting_never_produces_zero_as_a_successful_sample() {
+    let mut surface = surface(false);
+    surface.lighting = None;
+    assert!(surface.lighting_source().is_none());
+    assert!(
+        surface
+            .sample_luxel(0, [0; 2], &[1.0; 128], MapRadiosityStyles::First)
+            .is_none()
+    );
+    assert!(
+        surface
+            .sample_face_average(0, &[1.0; 128], MapRadiosityStyles::First)
+            .is_none()
+    );
 }
 
 #[test]
@@ -138,7 +225,7 @@ fn both_zero_extents_use_projected_vertices_but_single_zero_extent_keeps_the_rec
 fn authored_face_averages_use_reverse_style_prefix_not_luxel_mean() {
     let mut surface = surface(true);
     surface.faces[0].light_offset = 8;
-    surface.samples.splice(
+    surface.lighting.as_mut().unwrap().samples.splice(
         0..0,
         [
             ColorRgbExp {

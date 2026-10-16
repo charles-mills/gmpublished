@@ -1,18 +1,103 @@
+#[cfg(test)]
+use super::ResidentTextureMip;
 use super::parameters::{scalar, texture_transform};
 use super::{
-    Arc, ContentPath, DecodedTextureFrames, EffectiveMaterial, Limits, MaterialResolver,
-    ResolvedTextureMip, normalize_texture_name, parse_material_color, texture_path, vmt_bool,
+    Arc, DecodedTextureFrames, EffectiveMaterial, MaterialResolver, ResidentTexture,
+    ResolvedTextureMip, TextureAssetError, TextureLoadOutcome, TextureMetadata,
+    normalize_texture_name, parse_material_color, texture_path, vmt_bool,
 };
-use vformats::vtf::{Vtf, VtfError, VtfFormat, texture_flags};
 
-const MAX_DECODED_CUBEMAP_BYTES: u64 = 64 * 1024 * 1024;
+use vformats::vtf::{VtfError, VtfFormat, texture_flags};
+
+#[cfg(test)]
+use vformats::Limits;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCubemap {
-    /// Native VTF face order; each face has largest-first stored mip levels.
-    pub faces: [Vec<ResolvedTextureMip>; 6],
-    pub flags: u32,
+    resident: super::TextureResidency,
+    source_metadata: Option<Arc<TextureMetadata>>,
+    load_outcome: TextureLoadOutcome,
     pub frame: u32,
+}
+
+impl ResolvedCubemap {
+    pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
+        self.resident.resident()
+    }
+    #[cfg(test)]
+    pub(crate) fn face(&self, face: u32) -> Option<&[ResidentTextureMip]> {
+        Some(&self.resident()?.layer(self.frame, face)?.mips)
+    }
+    pub(crate) fn source_metadata(&self) -> Option<&TextureMetadata> {
+        self.source_metadata.as_deref()
+    }
+    pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
+        self.load_outcome
+    }
+    fn unavailable(metadata: Option<Arc<TextureMetadata>>, outcome: TextureLoadOutcome) -> Self {
+        let mut cube = Self::from_rgba(
+            0,
+            0,
+            std::array::from_fn(|_| {
+                vec![ResolvedTextureMip {
+                    rgba: vec![0, 0, 0, 255],
+                    width: 1,
+                    height: 1,
+                }]
+            }),
+        )
+        .expect("fallback cube has valid dimensions");
+        cube.source_metadata = metadata;
+        cube.load_outcome = outcome;
+        cube
+    }
+    pub(crate) fn from_rgba(
+        flags: u32,
+        frame: u32,
+        faces: [Vec<ResolvedTextureMip>; 6],
+    ) -> Result<Self, TextureAssetError> {
+        let first = faces[0].first().ok_or(TextureAssetError::Selection)?;
+        let count = frame.checked_add(1).ok_or(TextureAssetError::Selection)?;
+        let metadata = super::texture_asset::generated_metadata(
+            [first.width, first.height],
+            Some(flags),
+            count,
+            6,
+            u8::try_from(faces[0].len()).map_err(|_| TextureAssetError::Selection)?,
+        );
+        let layers = faces
+            .into_iter()
+            .enumerate()
+            .map(|(face, mips)| super::ResidentTextureLayer {
+                frame,
+                face: face as u32,
+                mips: mips
+                    .into_iter()
+                    .enumerate()
+                    .map(|(level, mip)| super::ResidentTextureMip {
+                        source_mip: level as u8,
+                        dimensions: [mip.width, mip.height],
+                        bytes: super::TextureBytes::owned(mip.rgba),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let resident = ResidentTexture::generated(
+            "material-cube-fallback",
+            metadata,
+            frame..count,
+            0..6,
+            layers,
+            super::TextureStorage::Rgba8,
+        )?;
+        let source_metadata = resident.metadata_arc();
+        Ok(Self {
+            resident: super::TextureResidency::Resident(resident),
+            source_metadata: Some(source_metadata),
+            load_outcome: TextureLoadOutcome::Generated,
+            frame,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,98 +130,63 @@ pub struct EnvironmentMapMaterial {
     pub fresnel: f32,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(super) struct CubemapCacheKey {
-    path: ContentPath,
-    frame: u32,
-    max_dimension: Option<u32>,
-}
-
 #[derive(Debug, thiserror::Error)]
 enum CubemapDecodeError {
     #[error(transparent)]
-    Vtf(#[from] VtfError),
+    Texture(#[from] TextureAssetError),
     #[error("expected a square six-face cubemap")]
     NotCubemap,
     #[error("HDR cubemaps require a floating-point scene mode")]
     UnsupportedHdr,
-    #[error("no stored cubemap mip satisfies the dimension limit")]
-    DimensionLimit,
-    #[error("decoded cubemap size {size} exceeds {max} bytes")]
-    DecodedTooLarge { size: u64, max: u64 },
 }
 
-fn mip_dimension(base: u32, level: u8) -> u32 {
-    base.checked_shr(u32::from(level)).unwrap_or(0).max(1)
+fn validate_cubemap(metadata: &TextureMetadata, frame: u32) -> Result<(), CubemapDecodeError> {
+    if metadata.flags.unwrap_or(0) & texture_flags::ENVMAP == 0
+        || metadata.face_count < 6
+        || metadata.original_dimensions[0] != metadata.original_dimensions[1]
+    {
+        return Err(CubemapDecodeError::NotCubemap);
+    }
+    if matches!(
+        metadata.format,
+        Some(VtfFormat::Rgba16161616F | VtfFormat::Rgba16161616)
+    ) {
+        return Err(CubemapDecodeError::UnsupportedHdr);
+    }
+    if frame >= metadata.frame_count {
+        return Err(TextureAssetError::Vtf(VtfError::OutOfRange).into());
+    }
+    Ok(())
 }
 
+#[cfg(test)]
 fn decode_cubemap(
     bytes: &[u8],
     frame: u32,
     max_dimension: Option<u32>,
     limits: &Limits,
 ) -> Result<ResolvedCubemap, CubemapDecodeError> {
-    let vtf = vformats::vtf::parse(bytes, limits)?;
-    let (first_mip, _) = cubemap_plan(&vtf, frame, max_dimension, limits)?;
-    let mut faces: [Vec<ResolvedTextureMip>; 6] = std::array::from_fn(|_| Vec::new());
-    for (face, mips) in faces.iter_mut().enumerate() {
-        for mip in first_mip..vtf.mip_count() {
-            let image = vtf.decode_rgba(frame, face as u32, mip, limits)?;
-            mips.push(ResolvedTextureMip {
-                rgba: image.rgba,
-                width: image.width,
-                height: image.height,
-            });
-        }
-    }
+    let asset = super::texture_asset::TextureAsset::from_bytes(Arc::from(bytes), limits)?;
+    validate_cubemap(asset.metadata(), frame)?;
+    let first = asset.first_mip(max_dimension)?;
+    let end = if asset.metadata().flags.unwrap_or(0) & texture_flags::NOMIP != 0 {
+        first + 1
+    } else {
+        asset.metadata().mip_count
+    };
+    let resident = asset.materialize(
+        0..asset.metadata().frame_count,
+        0..6,
+        first..end,
+        super::TextureStorage::Rgba8,
+        limits,
+    )?;
     Ok(ResolvedCubemap {
-        faces,
-        flags: vtf.flags(),
+        resident: super::TextureResidency::Resident(resident),
+        source_metadata: Some(asset.metadata_arc()),
+        load_outcome: TextureLoadOutcome::Loaded,
         frame,
     })
-}
-
-fn cubemap_plan(
-    vtf: &Vtf<'_>,
-    frame: u32,
-    max_dimension: Option<u32>,
-    limits: &Limits,
-) -> Result<(u8, usize), CubemapDecodeError> {
-    if vtf.flags() & texture_flags::ENVMAP == 0
-        || vtf.face_count() < 6
-        || vtf.width() != vtf.height()
-    {
-        return Err(CubemapDecodeError::NotCubemap);
-    }
-    if matches!(
-        vtf.format(),
-        VtfFormat::Rgba16161616F | VtfFormat::Rgba16161616
-    ) {
-        return Err(CubemapDecodeError::UnsupportedHdr);
-    }
-    if frame >= vtf.frame_count() {
-        return Err(VtfError::OutOfRange.into());
-    }
-    if u32::from(vtf.mip_count()) > u32::BITS - vtf.width().leading_zeros() {
-        return Err(VtfError::BadHeader.into());
-    }
-    let max = max_dimension.unwrap_or(u32::MAX).max(1);
-    let first_mip = (0..vtf.mip_count())
-        .find(|&mip| mip_dimension(vtf.width(), mip) <= max)
-        .ok_or(CubemapDecodeError::DimensionLimit)?;
-    let estimate = (first_mip..vtf.mip_count()).try_fold(0_u64, |sum, mip| {
-        let side = u64::from(mip_dimension(vtf.width(), mip));
-        side.checked_mul(side)?.checked_mul(4 * 6)?.checked_add(sum)
-    });
-    let max_bytes = MAX_DECODED_CUBEMAP_BYTES.min(limits.max_entry_bytes);
-    let estimate = estimate.unwrap_or(u64::MAX);
-    if estimate > max_bytes {
-        return Err(CubemapDecodeError::DecodedTooLarge {
-            size: estimate,
-            max: max_bytes,
-        });
-    }
-    Ok((first_mip, estimate as usize))
 }
 
 fn authored_tint(value: Option<&str>) -> [f32; 3] {
@@ -168,14 +218,14 @@ impl MaterialResolver {
             EnvironmentMapSource::Named(self.resolve_cubemap(&path, frame)?)
         };
         let mask_texture = material
-            .parameter("$envmapmask")
+            .effective_envmap_mask()
             .and_then(normalize_texture_name)
             .and_then(|name| self.resolve_raw_texture_frames(&name));
         let mask = if vmt_bool(material.parameter("$normalmapalphaenvmapmask")) {
             EnvironmentMapMask::NormalAlpha
         } else if vmt_bool(material.parameter("$basealphaenvmapmask")) {
             EnvironmentMapMask::BaseAlpha
-        } else if material.parameter("$envmapmask").is_some() {
+        } else if material.effective_envmap_mask().is_some() {
             EnvironmentMapMask::Texture
         } else {
             EnvironmentMapMask::None
@@ -207,54 +257,73 @@ impl MaterialResolver {
             return None;
         }
         let path = texture_path(&normalized)?;
-        let key = CubemapCacheKey {
-            path: path.clone(),
-            frame,
-            max_dimension: self.config.decoded_texture_max_dimension,
-        };
-        if let Some(cached) = self.shared.cubemap_cache.lock().get(&key).cloned() {
-            return Some(cached);
-        }
-        // The first mounted source owns this name. An invalid packed map cube
-        // must not silently fall through to another map/addon's same-name file.
-        let bytes = self.entry_bytes_from_sources(&path)?;
-        let limits = Limits::default();
-        let plan = vformats::vtf::parse(&bytes, &limits)
-            .map_err(CubemapDecodeError::from)
-            .and_then(|vtf| cubemap_plan(&vtf, frame, key.max_dimension, &limits));
-        let (_, byte_len) = match plan {
-            Ok(plan) => plan,
+        let selected = match self.selected_texture_asset(&path) {
+            Ok(selected) => selected,
+            Err(super::TextureSourceError::Preparation { .. }) => {
+                return Some(Arc::new(ResolvedCubemap::unavailable(
+                    None,
+                    TextureLoadOutcome::Unplanned,
+                )));
+            }
+            Err(
+                super::TextureSourceError::EncodedBudget { metadata, .. }
+                | super::TextureSourceError::WorkingBudget { metadata, .. },
+            ) => {
+                return Some(Arc::new(ResolvedCubemap::unavailable(
+                    metadata,
+                    TextureLoadOutcome::SourceBudgetRejected,
+                )));
+            }
             Err(error) => {
                 log::warn!("cubemap {name}: {error}");
                 return None;
             }
         };
-        let mut cache = self.shared.cubemap_cache.lock();
-        if let Some(cached) = cache.get(&key) {
-            return Some(Arc::clone(cached));
-        }
-        if let Some(budget) = &self.config.decoded_texture_budget
-            && !budget.try_reserve(byte_len)
-        {
-            log::warn!("cubemap {name}: texture budget exhausted");
+        let source_metadata = selected.asset.metadata_arc();
+        if let Err(error) = validate_cubemap(&source_metadata, frame) {
+            log::warn!("cubemap {name}: {error}");
             return None;
         }
-        let cube = match decode_cubemap(&bytes, frame, key.max_dimension, &limits) {
-            Ok(cube) => cube,
+        let (resident, load_outcome, frame) = match self.resident_texture(
+            &selected,
+            0..6,
+            !self.bc_textures_enabled(),
+        ) {
+            Ok(resident) => {
+                let outcome = resident.load_outcome();
+                (resident, outcome, frame)
+            }
             Err(error) => {
-                if let Some(budget) = &self.config.decoded_texture_budget {
-                    budget
-                        .decoded_bytes
-                        .fetch_sub(byte_len, std::sync::atomic::Ordering::AcqRel);
-                }
                 log::warn!("cubemap {name}: {error}");
-                return None;
+                if matches!(&error,TextureAssetError::Vtf(error) if super::native_invalid_texture(error))
+                {
+                    return None;
+                }
+                let outcome = match error {
+                    TextureAssetError::DimensionLimit(_)
+                    | TextureAssetError::Budget
+                    | TextureAssetError::ResidentImageBudget { .. }
+                    | TextureAssetError::WorkingLimit { .. }
+                    | TextureAssetError::ImageCount(_)
+                    | TextureAssetError::Vtf(VtfError::DecodedTooLarge { .. }) => {
+                        TextureLoadOutcome::QualityRejected
+                    }
+                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
+                        TextureLoadOutcome::Unplanned
+                    }
+                    _ => TextureLoadOutcome::Unsupported,
+                };
+                let fallback =
+                    ResolvedCubemap::unavailable(Some(Arc::clone(&source_metadata)), outcome);
+                (fallback.resident, outcome, 0)
             }
         };
-        let cube = Arc::new(cube);
-        cache.insert(key, Arc::clone(&cube));
-        drop(cache);
-        Some(cube)
+        Some(Arc::new(ResolvedCubemap {
+            resident,
+            source_metadata: Some(source_metadata),
+            load_outcome,
+            frame,
+        }))
     }
 }
 
@@ -294,13 +363,20 @@ mod tests {
         for count in [6, 7] {
             let cube = decode_cubemap(&fixture(count, 2, 3), 1, None, &Limits::default()).unwrap();
             assert_eq!(cube.frame, 1);
-            assert_eq!(cube.flags, texture_flags::ENVMAP);
-            for (face, mips) in cube.faces.iter().enumerate() {
+            assert_eq!(
+                cube.source_metadata().unwrap().flags,
+                Some(texture_flags::ENVMAP)
+            );
+            for face in 0..6 {
+                let mips = cube.face(face).unwrap();
                 assert_eq!(mips.len(), 3);
                 for (mip, image) in mips.iter().enumerate() {
-                    assert_eq!((image.width, image.height), (4 >> mip, 4 >> mip));
                     assert_eq!(
-                        image.rgba[..4],
+                        (image.dimensions[0], image.dimensions[1]),
+                        (4 >> mip, 4 >> mip)
+                    );
+                    assert_eq!(
+                        image.bytes.as_slice()[..4],
                         [face as u8 * 20, 70, mip as u8 * 30, 37 + face as u8]
                     );
                 }
@@ -312,11 +388,13 @@ mod tests {
     fn cubemap_limits_select_stored_mips_and_reject_malformed_resources() {
         let bytes = fixture(6, 1, 3);
         let cube = decode_cubemap(&bytes, 0, Some(2), &Limits::default()).unwrap();
-        assert_eq!(cube.faces[0][0].width, 2);
-        assert_eq!(cube.faces[0].len(), 2);
+        assert_eq!(cube.face(0).unwrap()[0].dimensions[0], 2);
+        assert_eq!(cube.face(0).unwrap().len(), 2);
         assert!(matches!(
             decode_cubemap(&bytes, 1, None, &Limits::default()),
-            Err(CubemapDecodeError::Vtf(VtfError::OutOfRange))
+            Err(CubemapDecodeError::Texture(TextureAssetError::Vtf(
+                VtfError::OutOfRange
+            )))
         ));
         assert!(decode_cubemap(&bytes[..bytes.len() - 1], 0, None, &Limits::default()).is_err());
         let small = Limits {
@@ -325,7 +403,9 @@ mod tests {
         };
         assert!(matches!(
             decode_cubemap(&bytes, 0, None, &small),
-            Err(CubemapDecodeError::DecodedTooLarge { .. })
+            Err(CubemapDecodeError::Texture(TextureAssetError::Vtf(
+                VtfError::DecodedTooLarge { .. }
+            )))
         ));
         let mut noncube = bytes.clone();
         noncube[20..24].copy_from_slice(&0_u32.to_le_bytes());
@@ -351,20 +431,28 @@ mod tests {
         let other = MaterialResolver::prop_lighting_fixture(vec![(path, other_bytes)], Vec::new());
         let a = first.resolve_cubemap("maps/shared/c0_0_0", 0).unwrap();
         assert!(Arc::ptr_eq(
-            &a,
-            &first.resolve_cubemap("maps/shared/c0_0_0", 0).unwrap()
+            a.resident().unwrap(),
+            first
+                .resolve_cubemap("maps/shared/c0_0_0", 0)
+                .unwrap()
+                .resident()
+                .unwrap()
         ));
         let b = other.resolve_cubemap("maps/shared/c0_0_0", 0).unwrap();
-        assert_ne!(a.faces[0][2], b.faces[0][2]);
-        assert!(!Arc::ptr_eq(
-            &a,
-            &first.resolve_cubemap("maps/shared/c0_0_0", 1).unwrap()
+        assert_ne!(a.face(0).unwrap()[2], b.face(0).unwrap()[2]);
+        assert!(Arc::ptr_eq(
+            a.resident().unwrap(),
+            first
+                .resolve_cubemap("maps/shared/c0_0_0", 1)
+                .unwrap()
+                .resident()
+                .unwrap()
         ));
         let capped = first
             .with_decoded_texture_max_dimension(2)
             .resolve_cubemap("maps/shared/c0_0_0", 0)
             .unwrap();
-        assert_eq!(capped.faces[0][0].width, 2);
+        assert_eq!(capped.face(0).unwrap()[0].dimensions[0], 2);
         let invalid = MaterialResolver::prop_lighting_fixture(
             vec![(path, vec![0])],
             vec![(path, fixture(6, 1, 3))],
@@ -394,24 +482,35 @@ mod tests {
     }
 
     #[test]
-    fn cubemap_budget_reserves_before_decode_and_rolls_back_failed_streams() {
+    fn cubemap_budget_charges_shared_frames_once_and_keeps_quality_separate() {
         let path = "materials/maps/shared/c0_0_0.vtf";
-        let budget = Arc::new(super::super::DecodedTextureBudget::new(504));
+        let budget = Arc::new(super::super::DecodedTextureBudget::new(1008));
         let resolver =
             MaterialResolver::prop_lighting_fixture(vec![(path, fixture(6, 2, 3))], Vec::new())
                 .with_decoded_texture_budget(Arc::clone(&budget));
-        assert!(resolver.resolve_cubemap("maps/shared/c0_0_0", 0).is_some());
-        assert_eq!(budget.decoded_bytes(), 504);
-        assert!(resolver.resolve_cubemap("maps/shared/c0_0_0", 0).is_some());
-        assert_eq!(budget.decoded_bytes(), 504);
-        assert!(resolver.resolve_cubemap("maps/shared/c0_0_0", 1).is_none());
-        assert_eq!(budget.rejected_textures(), 1);
+        let first = resolver.resolve_cubemap("maps/shared/c0_0_0", 0).unwrap();
+        let second = resolver.resolve_cubemap("maps/shared/c0_0_0", 1).unwrap();
+        assert!(Arc::ptr_eq(
+            first.resident().unwrap(),
+            second.resident().unwrap()
+        ));
+        assert_eq!(budget.decoded_bytes(), 1008);
+        assert_eq!(budget.rejected_textures(), 0);
+        let small = Arc::new(super::super::DecodedTextureBudget::new(504));
+        let rejected = resolver
+            .with_decoded_texture_budget(Arc::clone(&small))
+            .resolve_cubemap("maps/shared/c0_0_0", 0)
+            .unwrap();
+        assert_eq!(rejected.load_outcome(), TextureLoadOutcome::QualityRejected);
+        assert_eq!(rejected.source_metadata().unwrap().frame_count, 2);
+        assert_eq!(small.decoded_bytes(), 0);
+        assert_eq!(small.rejected_textures(), 1);
         let mut malformed = fixture(6, 1, 3);
         malformed.pop();
-        let budget = Arc::new(super::super::DecodedTextureBudget::new(504));
+        let failed = Arc::new(super::super::DecodedTextureBudget::new(504));
         let resolver = MaterialResolver::prop_lighting_fixture(vec![(path, malformed)], Vec::new())
-            .with_decoded_texture_budget(Arc::clone(&budget));
+            .with_decoded_texture_budget(Arc::clone(&failed));
         assert!(resolver.resolve_cubemap("maps/shared/c0_0_0", 0).is_none());
-        assert_eq!(budget.decoded_bytes(), 0);
+        assert_eq!(failed.decoded_bytes(), 0);
     }
 }

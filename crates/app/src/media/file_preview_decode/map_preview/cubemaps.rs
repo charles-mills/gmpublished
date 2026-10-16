@@ -20,7 +20,6 @@ fn nearest_probe(
     for &probe in probes {
         let offset = probe.position() - sample;
         let distance = offset.dot(offset);
-        // Native midpoint controls retain the first directory entry on ties.
         if distance < best_distance {
             best_distance = distance;
             best = Some(probe);
@@ -76,8 +75,7 @@ fn prop_sample_position(
 ) -> gmpublished_domain::math::Vec3 {
     placement.lighting_origin.unwrap_or_else(|| {
         if placement.entity {
-            // Native three-way controls distinguish this from both origin
-            // and scaled illumination position for runtime model entities.
+            // Entity illumination positions ignore model scale.
             illumination_position.rotate_source(placement.angles) + placement.origin
         } else {
             super::props::transform_prop_position(illumination_position, placement)
@@ -91,43 +89,41 @@ pub(super) fn bind_prop_materials(
     inputs: PropEnvironmentMapInputs<'_>,
     resolver: &MaterialResolver,
     table: &mut super::materials::MaterialTable,
-) -> Vec<usize> {
+) -> std::collections::BTreeMap<usize, usize> {
     let sample = prop_sample_position(model.model.illumination_position, placement);
     model
         .material_indices
         .iter()
-        .map(|&index| {
+        .map(|(&raw_slot, &index)| {
             let source = &table.slots()[index];
             let Some(environment) = source
                 .shader
                 .surface()
                 .and_then(|surface| surface.envmap.as_ref())
             else {
-                return index;
+                return (raw_slot, index);
             };
             if !matches!(environment.source, EnvironmentMapSource::LocalProbe) {
-                return index;
+                return (raw_slot, index);
             }
             let Some(bound) = bind_local_environment(environment, inputs, sample, resolver) else {
                 log::debug!(
                     "model environment unavailable in {} at {sample:?}",
                     inputs.map_name
                 );
-                return index;
+                return (raw_slot, index);
             };
             let key = format!("prop_environment\0{index}\0{}", bound.path);
             if let Some(existing) = table.index_of(&key) {
-                return existing;
+                return (raw_slot, existing);
             }
             let mut slot = source.clone();
             slot.shader.bind_environment_map(bound);
-            table.push(&key, slot)
+            (raw_slot, table.push(&key, slot))
         })
         .collect()
 }
 
-/// Resolves an explicitly selected native probe without choosing a spatial
-/// heuristic. Engine probe selection requires independent native calibration.
 pub(super) fn bind_selected_probe(
     authored: &Arc<EnvironmentMapMaterial>,
     map_name: &str,
@@ -296,11 +292,20 @@ mod tests {
         assert!(bind_selected_probe(&local(), "gm_example", probe, &resolver).is_none());
         assert!(bind_selected_probe(&local(), "../othermap", probe, &resolver).is_none());
         let mut named = (*local()).clone();
-        named.source = EnvironmentMapSource::Named(Arc::new(ResolvedCubemap {
-            faces: std::array::from_fn(|_| Vec::new()),
-            flags: 0,
-            frame: 3,
-        }));
+        named.source = EnvironmentMapSource::Named(Arc::new(
+            ResolvedCubemap::from_rgba(
+                0,
+                3,
+                std::array::from_fn(|_| {
+                    vec![crate::bridge::materials::ResolvedTextureMip {
+                        rgba: vec![0, 0, 0, 255],
+                        width: 1,
+                        height: 1,
+                    }]
+                }),
+            )
+            .unwrap(),
+        ));
         named.path = "maps/explicit/c1_2_3".to_owned();
         let named = Arc::new(named);
         assert!(Arc::ptr_eq(

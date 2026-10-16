@@ -29,22 +29,28 @@ const DIAGNOSTIC_POSITION:u32=10u;
 const DIAGNOSTIC_UNIT_NORMAL:u32=11u;
 const DIAGNOSTIC_UNIT_TANGENT_S:u32=12u;
 const DIAGNOSTIC_UNIT_EYE:u32=13u;
+const DIAGNOSTIC_SURFACE_POSITION:u32=14u;
+const DIAGNOSTIC_SURFACE_UV:u32=15u;
+const DIAGNOSTIC_SURFACE_ALPHA:u32=16u;
+const DIAGNOSTIC_SURFACE_BASE_COLOR:u32=17u;
 
 struct Diagnostic {
     mode:u32, padding0:u32, padding1:u32, padding2:u32,
     transform:vec4<f32>,
 }
 
+struct RasterClip {
+    view_projection:mat4x4<f32>,
+    plane:vec4<f32>,
+}
+
 struct Uniforms {
     view_proj: mat4x4<f32>,
-    // Standalone preview direction and ambient strength.
     light: vec4<f32>,
     camera_position: vec4<f32>,
     fog_color: vec4<f32>,
     fog: FogUniform,
-    // x: animation time, yzw: sky tint.
     water_time_sky_tint: vec4<f32>,
-    // xy: near and far clip distances.
     water_depth_params: vec4<f32>,
     clip_plane: vec4<f32>,
     medium_plane: vec4<f32>,
@@ -53,4 +59,15 @@ struct Uniforms {
     shading_mode:u32,
     raster_params: vec4<f32>,
     diagnostic:Diagnostic,
+    raster_clip:RasterClip,
+}
+
+fn view_clip_distance(world_position:vec3<f32>)->f32 {
+    return dot(uniforms.raster_clip.view_projection*vec4<f32>(world_position,1.0),uniforms.raster_clip.plane);
+}
+
+const HARDWARE_CLIPPING:bool=false;
+
+fn view_fragment_is_clipped(distance:f32)->bool {
+    return !HARDWARE_CLIPPING && distance<0.0;
 }

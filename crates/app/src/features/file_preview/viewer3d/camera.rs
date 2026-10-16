@@ -112,6 +112,7 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            view_camera: None,
             model_lighting_time: 0.0,
             view_id: camera.view_id,
             air_fog: None,
@@ -222,6 +223,10 @@ impl WaterLevel {
     reason = "ground, jump, duck-reconcile, and exit-assist states change independently"
 )]
 pub struct FlyCamera {
+    #[cfg(any(test, feature = "map-capture"))]
+    pub(super) capture_clip_distances: Option<CaptureClipDistances>,
+    #[cfg(any(test, feature = "map-capture"))]
+    pub(super) capture_horizontal_fov_degrees: Option<f32>,
     pub(super) view_id: ViewId,
     pub(super) content_id: Option<u64>,
     pub(super) position: Option<Vec3>,
@@ -250,6 +255,21 @@ pub struct FlyCamera {
     pub(super) duck_view_animation: Option<DuckViewAnimation>,
     pub(super) duck_reconcile_requested: bool,
     pub(super) doors: Vec<DoorRuntime>,
+}
+
+#[cfg(any(test, feature = "map-capture"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct CaptureClipDistances {
+    pub near: f32,
+    pub far: f32,
+}
+
+#[cfg(any(test, feature = "map-capture"))]
+impl CaptureClipDistances {
+    pub(super) fn new(near: f32, far: f32) -> Option<Self> {
+        (near.is_finite() && far.is_finite() && near > 0.0 && far > near)
+            .then_some(Self { near, far })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -836,6 +856,17 @@ impl shader::Program<Message> for FlyViewer {
             camera.water_time,
         );
         ModelPrimitive {
+            view_camera: Some(super::pipeline::view_camera::ViewCamera::fly(
+                camera,
+                bounds,
+                Vec3::new(
+                    uniforms.camera_position[0],
+                    uniforms.camera_position[1],
+                    uniforms.camera_position[2],
+                ),
+                uniforms.water_depth_params[0],
+                uniforms.water_depth_params[1],
+            )),
             model_lighting_time: camera.model_lighting_time,
             view_id: camera.view_id,
             air_fog: self.fog.filter(|_| self.fog_enabled),
@@ -1149,12 +1180,15 @@ mod tests {
             .build()).unwrap();
         let resolved = MaterialResolver::new(Arc::new(archive), None)
             .resolve_primary(&[], "water")
+            .into_material()
             .unwrap();
         let mut scene = empty_preview(Vec3::ZERO, Vec3::splat(1024.0));
         Arc::get_mut(&mut scene.scene)
             .unwrap()
             .materials
             .push(super::super::MaterialSlot {
+                resolution: crate::bridge::materials::MaterialResolutionOutcome::Loaded,
+                canonical_name: Some("water".into()),
                 name: "water".into(),
                 shader: resolved.shader,
                 texture: Some(resolved.texture),

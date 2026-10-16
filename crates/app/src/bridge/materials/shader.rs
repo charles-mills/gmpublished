@@ -11,6 +11,47 @@ pub enum MaterialShader {
 }
 
 impl MaterialShader {
+    pub(crate) fn mapping_dimensions(
+        &self,
+        base: Option<&super::ResolvedTexture>,
+    ) -> Option<(u32, u32)> {
+        if matches!(self, Self::Unknown | Self::Unsupported(_)) {
+            return None;
+        }
+        if let Some(base) = base {
+            if let Some(dimensions) = base.mapping_dimensions() {
+                return Some(dimensions);
+            }
+            if base.load_outcome() == super::TextureLoadOutcome::SourceBudgetRejected {
+                return None;
+            }
+        }
+        let dimensions = |texture: &super::DecodedTextureFrames| {
+            let [width, height] = texture.source_metadata()?.original_dimensions;
+            Some((width.max(1), height.max(1)))
+        };
+        match self {
+            Self::Unknown | Self::Unsupported(_) => None,
+            Self::Surface(surface) => {
+                if let Some(mask) = surface
+                    .envmap
+                    .as_ref()
+                    .and_then(|environment| environment.mask_texture.as_deref())
+                {
+                    return dimensions(mask);
+                }
+                surface.normal.as_deref().map_or(Some((32, 32)), dimensions)
+            }
+            Self::Water(water) => water
+                .normal_map
+                .as_deref()
+                .map_or(Some((32, 32)), dimensions),
+            Self::Mirror(mirror) => mirror
+                .normal_map
+                .as_deref()
+                .map_or(Some((32, 32)), dimensions),
+        }
+    }
     #[cfg(feature = "map-capture")]
     pub(crate) fn shader_name(&self) -> &str {
         match self {
@@ -79,6 +120,7 @@ impl MaterialResolver {
         &self,
         material: &EffectiveMaterial,
         has_base_texture: bool,
+        has_secondary_base_texture: bool,
     ) -> MaterialShader {
         if super::mirror::is_mirror_shader(&material.shader) {
             return MaterialShader::Mirror(Arc::new(self.resolve_mirror(material)));
@@ -87,7 +129,12 @@ impl MaterialResolver {
             return MaterialShader::Water(self.resolve_water(material, has_base_texture));
         }
         if let Some(family) = surface_family(&material.shader) {
-            return MaterialShader::Surface(self.resolve_surface(material, family));
+            let base_blend = family.base_blend(
+                has_base_texture && material.effective_base_texture().is_some(),
+                has_secondary_base_texture,
+                super::vmt_bool(material.parameter("$maskedblending")),
+            );
+            return MaterialShader::Surface(self.resolve_surface(material, family, base_blend));
         }
         MaterialShader::Unsupported(material.shader.clone())
     }
@@ -126,11 +173,5 @@ pub(super) fn surface_family(shader: &str) -> Option<super::SurfaceFamily> {
             .iter()
             .any(|alias| shader.eq_ignore_ascii_case(alias))
             .then_some(*family)
-    })
-}
-
-pub(super) fn base_read_transfer(shader: &str) -> super::TextureReadTransfer {
-    surface_family(shader).map_or(super::TextureReadTransfer::SrgbToLinear, |family| {
-        super::TextureRole::Base { family }.read_transfer()
     })
 }

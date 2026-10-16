@@ -2,7 +2,7 @@ use super::parameters::{self, MaterialProxy};
 use std::{borrow::Cow, collections::BTreeMap};
 use vformats::keyvalues::{KvDocument, KvPair, KvValue};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct HardwareProfile {
     dx_level: u32,
     ps20b: bool,
@@ -18,6 +18,12 @@ impl HardwareProfile {
         hdr: false,
         srgb: true,
         gpu_level: 3,
+    };
+
+    #[cfg(test)]
+    pub(super) const HDR: Self = Self {
+        hdr: true,
+        ..Self::LDR
     };
 
     fn blocks(self) -> Vec<&'static str> {

@@ -1,6 +1,3 @@
-//! Legacy `.bin` downloads are LZMA-compressed. Cache the decompressed prefix
-//! so reading one entry does not require inflating the whole archive.
-
 use std::{
     collections::HashMap,
     fs::File,
@@ -30,6 +27,81 @@ impl SiblingGmaIndex {
         self.entries.keys().for_each(|path| visit(path));
     }
 
+    pub(super) fn entry_size(&self, path: &ContentPath) -> Option<u64> {
+        self.entries
+            .get(path.as_str())
+            .map(|entry| match entry.location {
+                SiblingGmaEntryLocation::Plain { len, .. }
+                | SiblingGmaEntryLocation::LegacyBin { len, .. } => len,
+            })
+    }
+
+    pub(super) fn texture_decoder_working_bytes(
+        &self,
+        path: &ContentPath,
+    ) -> Result<usize, SourceError> {
+        let entry = self
+            .entries
+            .get(path.as_str())
+            .ok_or_else(|| SourceError::SiblingGma("entry vanished".to_owned()))?;
+        let archive = &self.archives[entry.archive_index];
+        match &archive.kind {
+            SiblingGmaArchiveKind::Plain { .. } => Ok(0),
+            SiblingGmaArchiveKind::LegacyBin { path, .. } => legacy_bin_working_bytes(path)
+                .map_err(|error| SourceError::SiblingGma(error.to_string())),
+        }
+    }
+
+    pub(super) fn texture_entry_range(
+        &self,
+        path: &ContentPath,
+        max_bytes: u64,
+        decoder_limit: usize,
+    ) -> Result<Vec<u8>, SourceError> {
+        let entry = self
+            .entries
+            .get(path.as_str())
+            .ok_or_else(|| SourceError::SiblingGma("entry vanished".to_owned()))?;
+        let archive = self
+            .archives
+            .get(entry.archive_index)
+            .ok_or_else(|| SourceError::SiblingGma("archive vanished".to_owned()))?;
+        let result = match (&archive.kind, &entry.location) {
+            (
+                SiblingGmaArchiveKind::Plain { path },
+                SiblingGmaEntryLocation::Plain { offset, len },
+            ) => {
+                return GmaView::open(path)
+                    .and_then(|view| view.read_payload_bytes(*offset, (*len).min(max_bytes)))
+                    .map_err(|error| SourceError::SiblingGma(error.to_string()));
+            }
+            (
+                SiblingGmaArchiveKind::LegacyBin { path, .. },
+                SiblingGmaEntryLocation::LegacyBin { offset, len },
+            ) => {
+                let mut reader = legacy_bin_decoder_with_limit(path, decoder_limit)
+                    .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
+                let skipped = io::copy(&mut reader.by_ref().take(*offset), &mut io::sink())
+                    .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
+                if skipped != *offset {
+                    return Err(SourceError::SiblingGma(
+                        "truncated archive prefix".to_owned(),
+                    ));
+                }
+                let count = usize::try_from((*len).min(max_bytes))
+                    .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
+                let mut bytes = vec![0; count];
+                reader.read_exact(&mut bytes).map(|()| bytes)
+            }
+            _ => {
+                return Err(SourceError::SiblingGma(
+                    "inconsistent entry location".to_owned(),
+                ));
+            }
+        };
+        result.map_err(|error| SourceError::SiblingGma(error.to_string()))
+    }
+
     pub(super) fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
         let Some(entry) = self.entries.get(path.as_str()) else {
             return Ok(None);
@@ -56,8 +128,6 @@ impl SiblingGmaIndex {
                 *offset,
                 *len,
             )),
-            // The index records a location shape its archive cannot serve;
-            // treated as absent rather than broken, since nothing was read.
             _ => Ok(None),
         }
     }
@@ -194,8 +264,7 @@ pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaInd
         );
     }
 
-    // This runs inside OnceLock initialization. Nested Rayon work could execute
-    // another material request that waits on the same lock before this returns.
+    // Nested Rayon requests can deadlock this OnceLock.
     type IndexedArchive = (SiblingGmaArchive, Vec<(String, SiblingGmaEntryLocation)>);
     let indexed: Vec<Option<IndexedArchive>> = paths[..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
         .iter()
@@ -352,8 +421,7 @@ pub(super) fn read_legacy_bin_index(path: &Path) -> io::Result<LegacyBinIndex> {
         }
     }
 
-    // `BufReader` may have decompressed part of the payload while filling its
-    // buffer. Only bytes already handed to the parser belong to the table.
+    // Buffered payload bytes do not belong to the table.
     let data_start = reader
         .get_ref()
         .bytes_read()
@@ -372,6 +440,34 @@ pub(super) fn read_legacy_bin_index(path: &Path) -> io::Result<LegacyBinIndex> {
 pub(super) fn legacy_bin_decoder(
     path: &Path,
 ) -> io::Result<lzma_rust2::LzmaReader<BufReader<File>>> {
+    legacy_bin_decoder_with_limit(
+        path,
+        usize::try_from(vformats::Limits::default().max_input_bytes).unwrap_or(usize::MAX),
+    )
+}
+
+pub(super) fn legacy_bin_working_bytes(path: &Path) -> io::Result<usize> {
+    let mut input = File::open(path)?;
+    let header = read_array::<13, _>(&mut input)?;
+    let dict = u32::from_le_bytes(header[1..5].try_into().expect("4 bytes"));
+    legacy_decoder_working_bytes(dict, header[0])
+}
+
+fn legacy_decoder_working_bytes(dict: u32, props: u8) -> io::Result<usize> {
+    lzma_rust2::lzma_get_memory_usage_by_props(dict, props)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        .and_then(|kib| {
+            (kib as usize)
+                .checked_mul(1024)
+                .and_then(|bytes| bytes.checked_add(8192))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "decoder cost overflow"))
+        })
+}
+
+fn legacy_bin_decoder_with_limit(
+    path: &Path,
+    limit: usize,
+) -> io::Result<lzma_rust2::LzmaReader<BufReader<File>>> {
     let mut input = File::open(path)?;
     let header = read_array::<13, _>(&mut input)?;
     let props = header[0];
@@ -385,8 +481,15 @@ pub(super) fn legacy_bin_decoder(
             .try_into()
             .expect("slice length was checked above"),
     );
+    let required = legacy_decoder_working_bytes(dict_size, props)?;
+    if required > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            format!("LZMA decoder requires {required} bytes; limit {limit}"),
+        ));
+    }
     lzma_rust2::LzmaReader::new_with_props(
-        BufReader::new(input),
+        BufReader::with_capacity(8192, input),
         unpacked_size,
         props,
         dict_size,

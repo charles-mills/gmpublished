@@ -126,10 +126,10 @@ mod tests {
         state.advance(&contexts, &[1.0; 128], 10.2, &[false]);
         assert_eq!(state.histories[0], first);
         state.advance(&contexts, &[1.0; 128], 10.4, &[true]);
-        assert!(state.data[1].ambient[0][0] > 0.0);
-        assert!(state.data[1].ambient[0][0] < 1.0);
+        assert!(state.data[1].full.ambient[0][0] > 0.0);
+        assert!(state.data[1].full.ambient[0][0] < 1.0);
         state.advance(&contexts, &[1.0; 128], 2.0, &[true]);
-        assert_eq!(state.data[1].ambient[0][0], 0.0);
+        assert_eq!(state.data[1].full.ambient[0][0], 0.0);
         assert!(!state.histories[0].has_pending());
     }
 
@@ -141,11 +141,11 @@ mod tests {
         first.advance(&contexts, &[1.0; 128], 0.0, &[true]);
         contexts[0] = ModelLightingContext::ambient_fixture(0.0);
         first.advance(&contexts, &[1.0; 128], 0.1, &[true]);
-        let previous = first.data[1].ambient[0][0];
+        let previous = first.data[1].full.ambient[0][0];
         assert!(first.advance(&contexts, &[1.0; 128], 0.2, &[true]));
-        assert!(first.data[1].ambient[0][0] < previous);
+        assert!(first.data[1].full.ambient[0][0] < previous);
         second.advance(&contexts, &[1.0; 128], 0.2, &[true]);
-        assert_eq!(second.data[1].ambient[0][0], 0.0);
+        assert_eq!(second.data[1].full.ambient[0][0], 0.0);
         assert_ne!(first.histories, second.histories);
     }
 }

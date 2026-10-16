@@ -20,10 +20,10 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) world_position: vec3<f32>,
+    @location(2) clip_distance:f32,
 }
 
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
+fn transform_detail_vertex(input: VertexInput) -> VertexOutput {
     let to_camera_xy = uniforms.camera_position.xy - input.center.xy;
     var facing = vec2<f32>(1.0, 0.0);
     if dot(to_camera_xy, to_camera_xy) > 0.0001 {
@@ -45,6 +45,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.clip_position = uniforms.view_proj * vec4<f32>(world_position, 1.0);
     out.uv = input.uv;
     out.world_position = world_position;
+    out.clip_distance=view_clip_distance(world_position);
     return out;
 }
 
@@ -76,6 +77,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     var lit = albedo.rgb;
     lit = mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position,1.0/input.clip_position.w));
-    if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
+    if view_fragment_is_clipped(input.clip_distance) { discard; }
     return vec4<f32>(lit, albedo.a);
 }

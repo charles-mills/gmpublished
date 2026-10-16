@@ -66,7 +66,7 @@ impl WaterMaterial {
             || self.normal_map.as_ref().is_some_and(|normal| {
                 self.proxy_scroll != [0.0; 2]
                     || (self.scroll1[0] != 0.0 && !self.has_base_texture)
-                    || (normal.frames.len() > 1 && self.frame_rate > 0.0)
+                    || (normal.frame_count() > 1 && self.frame_rate > 0.0)
             })
     }
 }
@@ -74,58 +74,55 @@ impl WaterMaterial {
 impl MaterialResolver {
     fn resolve_screen_refraction(&self, name: &str) -> Option<Arc<ScreenRefraction>> {
         let paths = super::material_paths(&[], name);
-        self.find_entry_by_source(&paths, |path, bytes| {
-            let mut visited = vec![path.clone()];
-            let material =
-                self.effective_material(&String::from_utf8_lossy(&bytes), 0, &mut visited)?;
-            if !material.shader.eq_ignore_ascii_case("Refract")
-                && !material.shader.eq_ignore_ascii_case("Refract_DX90")
+        let definition = self.material_definition(&paths)?;
+        let material = &definition.material;
+        if !material.shader.eq_ignore_ascii_case("Refract")
+            && !material.shader.eq_ignore_ascii_case("Refract_DX90")
+        {
+            log::warn!("unsupported underwater overlay shader {}", material.shader);
+            return None;
+        }
+        let get = |key| material.parameter(key);
+        if ["$normalmap2", "$envmap", "$refracttinttexture"]
+            .iter()
+            .any(|key| get(key).is_some())
+            || vmt_bool(get("$masked"))
+            || vmt_bool(get("$fadeoutonsilhouette"))
+            || scalar(get("$bluramount"), 0.0) > 1.0
+        {
+            log::warn!("unsupported underwater Refract overlay variant: {name}");
+            return None;
+        }
+        let normal_name = get("$normalmap").and_then(normalize_texture_name)?;
+        let normal_map = self.resolve_water_normal(&normal_name)?;
+        let mut bump_transform = texture_transform(get("$bumptransform"));
+        let mut proxy_scroll = [0.0; 2];
+        for proxy in &material.proxies {
+            let value = |key: &str| proxy.values.get(key).map(String::as_str);
+            if proxy.name == "texturescroll"
+                && value("texturescrollvar")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("$bumptransform"))
             {
-                log::warn!("unsupported underwater overlay shader {}", material.shader);
+                let angle = scalar(value("texturescrollangle"), 0.0).to_radians();
+                let rate = scalar(value("texturescrollrate"), 1.0);
+                let scale = scalar(value("texturescale"), 1.0);
+                proxy_scroll = [angle.cos() * rate, angle.sin() * rate];
+                bump_transform = [[scale, 0.0, 0.0, 0.0], [0.0, scale, 0.0, 0.0]];
+            } else {
+                log::warn!("unsupported underwater overlay proxy {}", proxy.name);
                 return None;
             }
-            let get = |key| material.parameter(key);
-            if ["$normalmap2", "$envmap", "$refracttinttexture"]
-                .iter()
-                .any(|key| get(key).is_some())
-                || vmt_bool(get("$masked"))
-                || vmt_bool(get("$fadeoutonsilhouette"))
-                || scalar(get("$bluramount"), 0.0) > 1.0
-            {
-                log::warn!("unsupported underwater Refract overlay variant: {name}");
-                return None;
-            }
-            let normal_name = get("$normalmap").and_then(normalize_texture_name)?;
-            let normal_map = self.resolve_water_normal(&normal_name)?;
-            let mut bump_transform = texture_transform(get("$bumptransform"));
-            let mut proxy_scroll = [0.0; 2];
-            for proxy in &material.proxies {
-                let value = |key: &str| proxy.values.get(key).map(String::as_str);
-                if proxy.name == "texturescroll"
-                    && value("texturescrollvar")
-                        .is_some_and(|v| v.eq_ignore_ascii_case("$bumptransform"))
-                {
-                    let angle = scalar(value("texturescrollangle"), 0.0).to_radians();
-                    let rate = scalar(value("texturescrollrate"), 1.0);
-                    let scale = scalar(value("texturescale"), 1.0);
-                    proxy_scroll = [angle.cos() * rate, angle.sin() * rate];
-                    bump_transform = [[scale, 0.0, 0.0, 0.0], [0.0, scale, 0.0, 0.0]];
-                } else {
-                    log::warn!("unsupported underwater overlay proxy {}", proxy.name);
-                    return None;
-                }
-            }
-            Some(Arc::new(ScreenRefraction {
-                name: name.to_owned(),
-                normal_map,
-                bump_transform,
-                proxy_scroll,
-                bump_frame: scalar(get("$bumpframe"), 0.0).max(0.0),
-                refract_amount: scalar(get("$refractamount"), 2.0),
-                tint_linear: tint(get("$refracttint"), [1.0; 3]),
-                blur: scalar(get("$bluramount"), 0.0) > 0.0,
-            }))
-        })
+        }
+        Some(Arc::new(ScreenRefraction {
+            name: name.to_owned(),
+            normal_map,
+            bump_transform,
+            proxy_scroll,
+            bump_frame: scalar(get("$bumpframe"), 0.0).max(0.0),
+            refract_amount: scalar(get("$refractamount"), 2.0),
+            tint_linear: tint(get("$refracttint"), [1.0; 3]),
+            blur: scalar(get("$bluramount"), 0.0) > 0.0,
+        }))
     }
 
     pub(super) fn resolve_water(

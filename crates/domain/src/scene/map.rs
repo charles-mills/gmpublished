@@ -22,15 +22,25 @@ use vformats::{
 
 use crate::scene::QAngle;
 
+mod asset;
+pub use asset::{MapAsset, decode_map, decode_map_with_pool};
 mod brushes;
 mod cubemaps;
 mod data;
 mod decals;
-pub use decals::{MapDecal, MapSurfaceProjector};
+pub use decals::{
+    MapDecal, MapDecalDimensions, MapDecalPermanence, MapDecalPosition, MapSurfaceProjector,
+};
 mod doors;
 mod entities;
 mod frames;
 mod lighting;
+mod lightmap_layout;
+pub use lightmap_layout::{
+    SourceLightmapAllocation, SourceLightmapLayout, SourceLightmapLayoutError,
+    SourceLightmapMaterial, SourceLightmapPage, SourceLightmapPageProfile,
+    SourceLightmapRequirement, SourceLightmapSurface,
+};
 mod lighting_trace;
 mod lumps;
 mod mesh;
@@ -53,9 +63,11 @@ pub use world_lights::{MapLightStyleEntity, MapWorldLight, MapWorldLightSet, Map
 
 pub use cubemaps::MapCubemapProbe;
 pub use data::{
-    MapBounds, MapData, MapMesh, MapMeshClusterRanges, MapMeshIndexRange, MapMeshSurfaceOwner,
-    MapMeshVisibility, MapPropSolid, MapPropVisibility, MapReceiverMesh, MapSkyboxPartitionStats,
-    MapStatsRaw, MapSurfaceOwner, MapVertex, MapVisibilityBucket, StaticPropPlacement,
+    MapBounds, MapData, MapDisplacementProjection, MapLightmapStats, MapMesh, MapMeshClusterRanges,
+    MapMeshIndexRange, MapMeshSurfaceOwner, MapMeshVisibility, MapPropLeafMembership, MapPropSolid,
+    MapPropVisibility, MapReceiverMesh, MapSkyboxPartitionStats, MapStatsRaw, MapSurfaceOwner,
+    MapSurfaceOwnerId, MapSurfaceTextureProjection, MapVertex, MapVisibilityBucket,
+    StaticPropPlacement,
 };
 #[cfg(test)]
 use doors::linear_door_distance;
@@ -103,7 +115,7 @@ use overlays::{OverlayBasis, overlay_quad_positions};
 use pakfile::pakfile_error;
 pub use pakfile::{MAX_PAKFILE_ENTRY_BYTES, MapPakFile, MapPakFileEntry};
 #[cfg(test)]
-use pakfile::{is_pakfile_entry_oversized, is_pakfile_retained_entry, normalize_pakfile_path};
+use pakfile::{is_pakfile_retained_entry, normalize_pakfile_path};
 use paths::{
     is_preview_material_visible, normalize_entity_prop_model_path, normalize_material_name,
     normalize_skyname, normalize_source_path, normalize_static_prop_model_path,
@@ -115,7 +127,7 @@ use placements::{
     partitioned_detail_sprite_placements, partitioned_entity_prop_placements,
     partitioned_static_prop_placements,
 };
-pub use projection::{MapSurfaceReceiver, MapSurfaceVertex};
+pub use projection::{MapSurfacePlane, MapSurfaceReceiver, MapSurfaceVertex};
 pub use radiosity::{
     MapRadiosityDisplacement, MapRadiosityHit, MapRadiosityMaterialFlags, MapRadiosityStyles,
     MapRadiositySurfaces, MapRadiosityTraceError,
@@ -123,11 +135,14 @@ pub use radiosity::{
 pub use sky::{MapSkyPaint, MapSun};
 use sky::{map_sky_paint, map_suns};
 pub use vformats::bsp::OverlayFade as MapOverlayFade;
-pub use visibility::MapVisibility;
 use visibility::{
     FaceAttributions, MapFaceVisibility, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT,
     PROP_AABB_MAX_LEAVES, SkyboxPartition, cluster_in_range, model_face_range,
     point_visibility_bucket,
+};
+pub use visibility::{
+    MapBrushModelRendering, MapBrushSurfaceGroup, MapDecalProjection, MapDisplacementRendering,
+    MapVisibility, MapWorldMaterialGroup, MapWorldSurfaceGroup, MapWorldSurfaceRendering,
 };
 use walk::{
     BoundsBuilder, MapLeafLocator, SKYBOX_COMPLETION_AABB_EXPANSION,
@@ -160,6 +175,8 @@ pub enum BspError {
     UnsupportedVersion { version: u32 },
     #[error("BSP {item} exceeds the supported limit")]
     TooLarge { item: &'static str },
+    #[error("map material requirements have {actual} entries; expected {expected}")]
+    MaterialRequirementCount { expected: usize, actual: usize },
 }
 
 pub fn load_map(bytes: &[u8]) -> Result<MapData, BspError> {
@@ -182,16 +199,27 @@ fn load_map_impl(
     partition_skybox: bool,
     pool: Option<&rayon::ThreadPool>,
 ) -> Result<MapData, BspError> {
-    let version = bsp_version(bytes)?;
-    if !matches!(version, 19 | 20) {
-        return Err(BspError::UnsupportedVersion { version });
-    }
-
-    let limits = Limits {
-        max_input_bytes: u64::MAX,
-        ..Limits::default()
+    let asset = match pool {
+        Some(pool) => decode_map_with_pool(bytes, pool)?,
+        None => decode_map(bytes)?,
     };
-    let bsp = MapBsp::parse(bytes, &limits, pool)?;
+    match pool {
+        Some(pool) => pool.install(|| prepare_map(asset, partition_skybox, None)),
+        None => prepare_map(asset, partition_skybox, None),
+    }
+}
+
+fn prepare_map(
+    asset: MapAsset,
+    partition_skybox: bool,
+    lightmap_requirements: Option<&[SourceLightmapRequirement]>,
+) -> Result<MapData, BspError> {
+    let MapAsset {
+        bsp,
+        version,
+        pakfile,
+    } = asset;
+    let lighting_source = selected_lightmap_samples(&bsp).1;
     let mut stats = MapStatsRaw {
         face_count: count_to_u32(bsp.faces.len()),
         displacement_count: count_to_u32(bsp.displacements.len()),
@@ -205,6 +233,7 @@ fn load_map_impl(
         skybox_entity_prop_count: 0,
         cluster_count: bsp.cluster_count(),
         version,
+        lightmap: MapLightmapStats::default(),
     };
     let player_start = info_player_start(&bsp.entities);
     let sky_camera = map_sky_camera(&bsp.entities);
@@ -226,9 +255,9 @@ fn load_map_impl(
     let brush_instances = brushes::brush_instances(&bsp);
     let brush_locator = MapLeafLocator::from_bsp(&bsp);
     let pending_doors = pending_map_doors(&bsp);
-    let door_model_indices = pending_doors
+    let door_entity_indices = pending_doors
         .iter()
-        .filter_map(PendingMapDoor::brush_model_index)
+        .filter_map(PendingMapDoor::brush_entity_index)
         .collect::<BTreeSet<_>>();
 
     let mut material_names = Vec::<String>::new();
@@ -252,11 +281,17 @@ fn load_map_impl(
             material_names: &mut material_names,
             material_indexes: &mut material_indexes,
             lightmap_samples,
+            lightmap_requirements,
             lightmap_sample_ends: &lightmap_sample_ends,
             lightmap_blocks: &mut lightmap_blocks,
+            lightmap_stats: &mut stats.lightmap,
         };
         for instance in &brush_instances {
-            if !instance.visible || door_model_indices.contains(&instance.model_index) {
+            if !instance.visible
+                || instance
+                    .entity_index
+                    .is_some_and(|index| door_entity_indices.contains(&index))
+            {
                 continue;
             }
             let model = &bsp.models[instance.model_index.get()];
@@ -304,10 +339,15 @@ fn load_map_impl(
             }
         }
         for pending in pending_doors {
+            let instance = brush_instances
+                .iter()
+                .find(|instance| instance.entity_index == Some(pending.entity_index))
+                .copied();
             door_builds.push(extract_pending_door_meshes(
                 pending,
                 &bsp,
                 &face_attributions,
+                instance,
                 &mut face_context,
             )?);
         }
@@ -342,6 +382,7 @@ fn load_map_impl(
         &lightmap_blocks,
         lightmap_source,
         &bsp.entities,
+        &mut stats.lightmap,
     );
     let doors = door_builds
         .into_iter()
@@ -378,16 +419,16 @@ fn load_map_impl(
             surface_owners: mesh.surface_owners,
         })
         .collect::<Vec<_>>();
-    let (overlays, skybox_overlays) =
-        partitioned_map_overlays(&bsp, &meshes, &skybox_meshes, &doors)?;
-    let decals = decals::map_decals(&bsp, &meshes, &skybox_meshes, &doors);
+    let projector = MapSurfaceProjector::new(&meshes, &skybox_meshes, &doors);
+    let (overlays, skybox_overlays) = partitioned_map_overlays(&bsp, &projector)?;
+    let visibility = MapVisibility::from_bsp(&bsp, projector.displacement_bounds());
+    let decals = decals::map_decals(&bsp, &projector, &doors, visibility.as_ref());
     let MapBounds {
         min: bounds_min,
         max: bounds_max,
     } = bounds_from_meshes(&meshes);
-    let visibility = MapVisibility::from_bsp(&bsp);
     let walk_collision =
-        MapWalkCollision::from_bsp_instances(&bsp, &brush_instances, &door_model_indices);
+        MapWalkCollision::from_bsp_instances(&bsp, &brush_instances, &door_entity_indices);
     let water_volumes = MapWaterVolumes::from_bsp(&bsp);
     let lighting_collision = MapLightingCollision::from_bsp(&bsp);
     let radiosity_surfaces = MapRadiositySurfaces::from_bsp(&bsp);
@@ -398,7 +439,6 @@ fn load_map_impl(
             }
         }
     }
-    let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes);
     let skybox_completion_bounds = skybox_partition.completion_bounds();
     let skybox_partition = MapSkyboxPartitionStats {
         sky_camera_present: skybox_partition.sky_camera_present(),
@@ -418,6 +458,7 @@ fn load_map_impl(
     };
 
     Ok(MapData {
+        lighting_source,
         meshes,
         skybox_meshes,
         material_names,

@@ -36,7 +36,7 @@ impl Frame {
         std::iter::once(GpuSurfaceMark::default())
             .chain(scene.assets.overlays.iter().map(|mark| {
                 let mut origin = mark.fade_origin;
-                if let MapSurfaceOwner::Door { door_index } = mark.owner
+                if let MapSurfaceOwner::Door { door_index, .. } = mark.owner
                     && let Some(door) = map.and_then(|map| map.doors.get(door_index))
                 {
                     let pose = poses
@@ -65,7 +65,7 @@ impl Frame {
             return;
         };
         for (index, mark) in scene.assets.overlays.iter().enumerate() {
-            let MapSurfaceOwner::Door { door_index } = mark.owner else {
+            let MapSurfaceOwner::Door { door_index, .. } = mark.owner else {
                 continue;
             };
             let door = &map.doors[door_index];

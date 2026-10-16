@@ -147,19 +147,36 @@ impl ModelLightingSceneInputs {
             if context.source.is_explicit() {
                 continue;
             }
+            context.compiled_supplement = None;
             let point = match &context.sample_point {
                 Ok(point) => *point,
                 Err(error) => {
-                    context.set_fallback(ModelLightingFallbackReason::Origin(error.clone()));
+                    let reason = ModelLightingFallbackReason::Origin(error.clone());
+                    if context.compiled_lighting {
+                        context.set_compiled_supplement(Err(ModelLightingFailure::InvalidPosition));
+                    }
+                    context.set_fallback(reason);
                     continue;
                 }
             };
+            if context.compiled_lighting {
+                let supplement = context
+                    .static_world_bounds
+                    .ok_or(ModelLightingFailure::InvalidPosition)
+                    .and_then(|bounds| {
+                        factory
+                            .as_ref()
+                            .map_err(|error| *error)?
+                            .seed_compiled_supplement(point, bounds)
+                    });
+                context.set_compiled_supplement(supplement);
+            }
             let seed = context
                 .static_world_bounds
                 .ok_or(ModelLightingFailure::InvalidPosition)
                 .and_then(|bounds| {
                     let factory = factory.as_ref().map_err(|error| *error)?;
-                    factory.seed_static(point, bounds, spherical_ambient(point)?)
+                    factory.seed_static_runtime(point, bounds, spherical_ambient(point)?)
                 });
             context.set_prepared_seed(seed);
         }
@@ -237,6 +254,7 @@ pub struct ModelLocalLight {
 pub struct ModelLightingContext {
     pub mdl_flags: u32,
     pub compiled_lighting: bool,
+    pub compiled_supplement: Option<Result<Arc<ModelLightingSeed>, ModelLightingFailure>>,
     pub model_path: String,
     pub origin: Vec3,
     pub lighting_origin: Vec3,
@@ -259,6 +277,7 @@ impl ModelLightingContext {
         Self {
             mdl_flags: 0,
             compiled_lighting: false,
+            compiled_supplement: None,
             model_path: "models/test/ambient.mdl".into(),
             origin: Vec3::ZERO,
             lighting_origin: Vec3::ZERO,
@@ -296,6 +315,36 @@ impl ModelLightingContext {
             }
             Err(error) => self.set_fallback(ModelLightingFallbackReason::Preparation(error)),
         }
+    }
+
+    fn set_compiled_supplement(
+        &mut self,
+        seed: Result<Arc<ModelLightingSeed>, ModelLightingFailure>,
+    ) {
+        if let Err(error) = &seed {
+            log::warn!("compiled model lighting {:?}: {error:?}", self.model_path);
+        }
+        self.compiled_supplement = Some(seed);
+    }
+
+    pub fn evaluate_compiled_supplement(
+        &self,
+        styles: &[f32; 128],
+    ) -> Result<ModelLightingSnapshot, ModelLightingFailure> {
+        let Some(seed) = &self.compiled_supplement else {
+            return Ok(ModelLightingSnapshot {
+                ambient_cube: AmbientCube {
+                    colors: [Vec3::ZERO; 6],
+                },
+                lights: Vec::new(),
+            });
+        };
+        let evaluated = seed.as_ref().map_err(|error| *error)?.evaluate(
+            styles,
+            MODEL_LOCAL_LIGHT_LIMIT,
+            MODEL_LIGHT_MINIMUM,
+        )?;
+        Ok(Self::snapshot(&evaluated, evaluated.ambient_cube))
     }
 
     pub fn evaluate(
@@ -337,6 +386,13 @@ impl ModelLightingContext {
             evaluated.ambient_cube,
             &evaluated.selected,
         );
+        Self::snapshot(evaluated, ambient)
+    }
+
+    fn snapshot(
+        evaluated: &cpu::factory::ModelLightingEvaluation,
+        ambient: AmbientCube,
+    ) -> ModelLightingSnapshot {
         let lights = evaluated
             .selected
             .iter()

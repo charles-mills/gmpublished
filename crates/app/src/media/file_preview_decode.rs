@@ -17,7 +17,9 @@ use iced::widget::image as iced_image;
 use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
 
-use crate::bridge::materials::{MaterialResolver, RenderMode, ResolvedMaterialTextures};
+use crate::bridge::materials::{
+    MaterialResolution, MaterialResolver, RenderMode, ResolvedMaterialTextures,
+};
 use crate::media::preview_model::{
     DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot, ModelPreview, ModelStats,
     OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot, ParticlePreview,
@@ -30,6 +32,9 @@ mod map_preview;
 mod materials;
 mod routing;
 mod syntax;
+mod texture_preparation;
+use texture_preparation::TexturePreparationResources;
+pub use texture_preparation::{MapTextureResidency, TextureResourcePolicy};
 
 #[cfg(test)]
 use crate::media::preview_model::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
@@ -66,9 +71,6 @@ const FONT_TOO_LARGE_BYTES: usize = 8 * 1024 * 1024;
 const AUDIO_TOO_LARGE_BYTES: usize = 64 * 1024 * 1024;
 const MAP_TOO_LARGE_BYTES: usize = gmpublished_domain::scene::map::MAX_BSP_BYTES;
 const PARTICLE_TOO_LARGE_BYTES: usize = 16 * 1024 * 1024;
-const MAP_TEXTURE_DECODE_BUDGET_BYTES: usize = 1024 * 1024 * 1024;
-const MAP_TEXTURE_MAX_DIMENSION: u32 = 512;
-const MAP_FALLBACK_TEXTURE_DIMENSION: u32 = MAP_TEXTURE_MAX_DIMENSION;
 const MAP_PROP_PLACEMENT_CAP: usize = 65_536;
 const MAP_PROP_TRIANGLE_CAP: usize = 7_000_000;
 const PHY_DEBUG_TRIANGLE_CAP: usize = 1_000_000;
@@ -142,19 +144,25 @@ pub fn load_map_for_capture_with_model_options(
     gmod_dir: std::path::PathBuf,
     pool: &rayon::ThreadPool,
     options: vformats::mdl::ModelAssemblyOptions,
+    texture_residency: &MapTextureResidency,
 ) -> Result<PreviewData, PreviewLoadError> {
     pool.install(|| {
         let bytes = request.archive.entry_bytes(&request.entry_path)?;
         let mut stage = |stage| println!("map capture: {stage:?}");
         stage(PreviewLoadStage::ReadingBsp);
-        Ok(map_preview::map_preview_data_with_prop_model_loader(
-            request,
-            &bytes,
-            Some(gmod_dir),
-            Some(pool),
-            &mut stage,
-            &|path, resolver| map_preview::load_prop_model_with_options(path, resolver, options),
-        ))
+        Ok(
+            map_preview::map_preview_data_with_prop_model_loader_and_textures(
+                request,
+                &bytes,
+                Some(gmod_dir),
+                Some(pool),
+                &mut stage,
+                &|path, resolver| {
+                    map_preview::load_prop_model_with_options(path, resolver, options)
+                },
+                texture_residency,
+            ),
+        )
     })
 }
 
@@ -527,15 +535,24 @@ fn particle_preview_data(
     material_names.sort();
     material_names.dedup();
 
-    let resolver =
-        MaterialResolver::new(request.archive.clone(), gmod_dir).with_bc_textures_disabled();
+    let preparation = TexturePreparationResources::new(
+        &MaterialResolver::new(request.archive.clone(), gmod_dir),
+        &TextureResourcePolicy::default(),
+    );
+    let resolver = preparation.resolver.with_bc_textures_disabled();
     let materials = material_names
         .into_iter()
         .map(|name| {
-            let resolved = resolver.resolve_primary(&[], &name);
-            let sheet = resolved
-                .as_ref()
-                .and_then(|_| particle_sprite_sheet(&resolver, &name));
+            let resolved = resolver.resolve_primary(&[], &name).into_material();
+            let (sheet, sheet_error) = resolved.as_ref().map_or((None, None), |_| {
+                match resolver.resolve_particle_sprite_sheet(&name) {
+                    Ok(sheet) => (sheet, None),
+                    Err(error) => {
+                        log::debug!("particle sheet {name}: {error}");
+                        (None, Some(error))
+                    }
+                }
+            });
             ParticleMaterialSlot {
                 name,
                 texture: resolved
@@ -545,6 +562,7 @@ fn particle_preview_data(
                     .as_ref()
                     .is_some_and(|material| material.render_mode == RenderMode::Additive),
                 sheet,
+                sheet_error,
             }
         })
         .collect();
@@ -555,23 +573,9 @@ fn particle_preview_data(
             file,
             systems,
             materials,
+            sheet_stats: preparation.sheet_budget.stats(),
         })),
     )
-}
-
-fn particle_sprite_sheet(
-    resolver: &MaterialResolver,
-    material: &str,
-) -> Option<Arc<vformats::vtf::SpriteSheet>> {
-    let vmt_bytes = resolver.entry_bytes(&format!("materials/{material}.vmt"))?;
-    let vmt_text = String::from_utf8_lossy(&vmt_bytes);
-    let document = vformats::vmt::parse(&vmt_text, &vformats::Limits::default()).ok()?;
-    let base = document.basetexture()?;
-    let vtf_bytes = resolver.entry_bytes(&format!("materials/{base}.vtf"))?;
-    let texture = vformats::vtf::parse(&vtf_bytes, &vformats::Limits::default()).ok()?;
-    texture
-        .sprite_sheet(&vformats::Limits::default())
-        .map(Arc::new)
 }
 
 fn model_preview_data(
@@ -597,7 +601,11 @@ fn model_preview_data(
         return info_preview_data(request, InfoReason::DecodeFailed);
     };
 
-    let resolver = MaterialResolver::new(request.archive.clone(), gmod_dir);
+    let resolver = TexturePreparationResources::new(
+        &MaterialResolver::new(request.archive.clone(), gmod_dir),
+        &TextureResourcePolicy::default(),
+    )
+    .resolver;
     let mut resolved_material_count = 0_u32;
     let mut materials = model
         .material_names
@@ -605,23 +613,29 @@ fn model_preview_data(
         .map(|name| {
             let resolved = resolver.resolve_primary(&model.material_dirs, name);
             let texture = resolved
-                .as_ref()
+                .material()
                 .map(|material| Arc::clone(&material.texture));
-            if texture.is_some() {
+            if resolved.outcome() == crate::bridge::materials::MaterialResolutionOutcome::Loaded
+                && texture.is_some()
+            {
                 resolved_material_count = resolved_material_count.saturating_add(1);
             }
             MaterialSlot {
+                resolution: resolved.outcome(),
+                canonical_name: resolved.canonical_name().map(str::to_owned),
                 shader: resolved
-                    .as_ref()
+                    .material()
                     .map_or_else(Default::default, |material| material.shader.clone()),
                 name: name.clone(),
                 texture,
-                texture2: None,
+                texture2: resolved
+                    .material()
+                    .and_then(|material| material.texture2.as_ref().map(Arc::clone)),
                 render_mode: resolved
-                    .as_ref()
+                    .material()
                     .map_or(RenderMode::Opaque, |material| material.render_mode),
                 alpha_policy: resolved
-                    .as_ref()
+                    .material()
                     .map_or(RenderMode::Opaque, |material| material.render_mode)
                     .texture_alpha_policy(),
             }
@@ -630,6 +644,8 @@ fn model_preview_data(
     let phy_debug_meshes = model_phy_debug_mesh(stem, &resolver, materials.len());
     if phy_debug_meshes.is_some() {
         materials.push(MaterialSlot {
+            resolution: Default::default(),
+            canonical_name: None,
             shader: Default::default(),
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,

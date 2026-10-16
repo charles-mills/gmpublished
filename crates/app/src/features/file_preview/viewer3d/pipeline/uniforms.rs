@@ -1,9 +1,10 @@
+use super::view_camera::{RasterClip, ViewCamera};
 use super::{
     AMBIENT, Camera, FOV_Y, FlyCamera, MapFog, MapPreview, MapSkyCamera, Rectangle, RenderMode,
-    RenderScene, ResolvedTexture, SOURCE_UP, Skybox, decode_bc_texture, half_extent, look_at,
-    look_to, mat_mul, mid, perspective, skybox_eye,
+    RenderScene, ResolvedTexture, SOURCE_UP, Skybox, half_extent, look_at, mat_mul, mid,
+    perspective, skybox_eye,
 };
-use crate::media::preview_model::ModelPreview;
+use crate::media::preview_model::{ModelPreview, ShadingMode};
 use gmpublished_domain::math::Vec3;
 
 #[repr(u32)]
@@ -75,15 +76,6 @@ pub enum LightmapMode {
     HdrFallback = 1,
 }
 
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ShadingMode {
-    #[default]
-    Scene = 0,
-    #[cfg(any(test, feature = "map-capture"))]
-    Fullbright = 1,
-}
-
 #[cfg(any(test, feature = "map-capture"))]
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -103,6 +95,10 @@ pub enum DiagnosticMode {
     UnitNormal = 11,
     UnitTangentS = 12,
     UnitEye = 13,
+    SurfacePosition = 14,
+    SurfaceUv = 15,
+    SurfaceAlpha = 16,
+    SurfaceBaseColor = 17,
 }
 
 #[repr(C)]
@@ -144,6 +140,7 @@ pub struct Uniforms {
     /// Physical clip-space bias, retained separately from projected texture UVs.
     pub raster_params: [f32; 4],
     pub diagnostic: Diagnostic,
+    pub raster_clip: RasterClip,
 }
 
 #[repr(u32)]
@@ -233,7 +230,7 @@ impl MaterialUniform {
             mirror
                 .normal_map
                 .as_ref()
-                .map_or(1.0, |normal| normal.frames.len() as f32),
+                .map_or(1.0, |normal| normal.frame_count() as f32),
             0.0,
             0.0,
             0.0,
@@ -315,7 +312,7 @@ impl MaterialUniform {
             water
                 .normal_map
                 .as_ref()
-                .map_or(1.0, |map| map.frames.len() as f32),
+                .map_or(1.0, |map| map.frame_count() as f32),
             f32::from(water.scroll1[0].abs() > 0.0 && !water.has_base_texture),
             f32::from(water.above_water),
             f32::from(water.no_fresnel),
@@ -326,9 +323,29 @@ impl MaterialUniform {
 }
 
 impl Uniforms {
-    /// Source/ToGL shifts clip-space vertices by half a physical pixel. Apply
-    /// after selecting each render target, independently of logical widget DPI.
-    /// https://github.com/ValveSoftware/ToGL/blob/master/public/togl/linuxwin/cglmprogram.h
+    pub(super) fn with_clip_camera(mut self, camera: Option<ViewCamera>) -> Self {
+        self.raster_clip = camera.map_or_else(
+            || RasterClip::world_space(self.clip_plane),
+            |camera| {
+                RasterClip::new(camera, self.clip_plane).unwrap_or_else(|error| {
+                    log::error!(
+                        "Source clip transform failed: {error:?}; rejecting clipped geometry"
+                    );
+                    RasterClip::world_space([0.0, 0.0, 0.0, -1.0])
+                })
+            },
+        );
+        self
+    }
+
+    pub fn intersects_bounds(&self, bounds: gmpublished_domain::scene::map::MapBounds) -> bool {
+        if !super::reflections::bounds_intersect_view(bounds.min, bounds.max, self.view_proj) {
+            return false;
+        }
+        self.raster_clip.intersects_bounds(bounds)
+    }
+
+    /// Source's half-pixel shift uses physical render-target coordinates.
     pub fn with_raster_offset(mut self, size: (u32, u32), offset: [f32; 2]) -> Self {
         let clip_offset = [
             2.0 * offset[0] / size.0.max(1) as f32,
@@ -351,7 +368,7 @@ impl Uniforms {
         water_time: f32,
     ) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
-        let view = look_to(frame.eye, frame.forward, SOURCE_UP);
+        let view = frame.view_camera.view().expect("finite fly camera pose");
         let liquid = scene
             .water_volumes
             .as_ref()
@@ -396,7 +413,19 @@ impl Uniforms {
                 .as_ref()
                 .filter(|_| water.is_some_and(|w| w.refract_enabled && !w.force_cheap))
                 .map_or([0.0; 4], |sample| {
-                    [0.0, 0.0, -1.0, sample.body.surface_z + 2.0]
+                    let clip = super::water_clip::world_plane(
+                        super::reflections::Plane {
+                            normal: Vec3::new(0.0, 0.0, -1.0),
+                            distance: -sample.body.surface_z,
+                        },
+                        super::water_clip::WorldWaterPass::Main,
+                    );
+                    [
+                        clip.normal[0],
+                        clip.normal[1],
+                        clip.normal[2],
+                        -clip.distance,
+                    ]
                 }),
             medium_plane: liquid.map_or([0.0; 4], |sample| [0.0, 0.0, 1.0, -sample.body.surface_z]),
             viewport_size: [0.0; 2],
@@ -407,15 +436,17 @@ impl Uniforms {
             } else {
                 LightmapMode::Ldr as u32
             },
-            shading_mode: ShadingMode::Scene as u32,
+            shading_mode: scene.shading_mode as u32,
             diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
+            raster_clip: RasterClip::default(),
         }
+        .with_clip_camera(Some(frame.view_camera))
     }
 
     pub fn for_fly_sky(scene: &MapPreview, camera: &FlyCamera, bounds: Rectangle) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
-        let mut view = look_to(frame.eye, frame.forward, SOURCE_UP);
+        let mut view = frame.view_camera.view().expect("finite fly camera pose");
         view[3][0] = 0.0;
         view[3][1] = 0.0;
         view[3][2] = 0.0;
@@ -432,9 +463,10 @@ impl Uniforms {
             medium_plane: [0.0; 4],
             viewport_size: [0.0; 2],
             lightmap_mode: LightmapMode::Ldr as u32,
-            shading_mode: ShadingMode::Scene as u32,
+            shading_mode: scene.shading_mode as u32,
             diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
+            raster_clip: RasterClip::default(),
         }
     }
 
@@ -447,7 +479,10 @@ impl Uniforms {
     ) -> Self {
         let frame = FlyCameraFrame::new(&scene.scene, camera, bounds);
         let eye = skybox_eye(frame.eye, sky_camera.origin, sky_camera.scale);
-        let view = look_to(eye, frame.forward, SOURCE_UP);
+        let view_camera = frame
+            .view_camera
+            .skybox(sky_camera.origin, sky_camera.scale);
+        let view = view_camera.view().expect("finite sky camera pose");
 
         let fog_scale = if sky_camera.scale > 0.0 {
             1.0 / sky_camera.scale
@@ -455,7 +490,12 @@ impl Uniforms {
             1.0
         };
         Self {
-            view_proj: mat_mul(frame.proj, view),
+            view_proj: mat_mul(
+                view_camera
+                    .raster_projection()
+                    .expect("valid sky camera projection"),
+                view,
+            ),
             light: [0.4, 0.6, 0.8, AMBIENT],
             camera_position: [eye[0], eye[1], eye[2], 0.0],
             fog_color: fog.map_or([0.0; 4], |fog| {
@@ -468,7 +508,7 @@ impl Uniforms {
             }),
             fog: FogUniform::for_map(fog, fog_scale),
             water_time_sky_tint: [0.0; 4],
-            water_depth_params: [frame.near, frame.far, 0.0, 0.0],
+            water_depth_params: [view_camera.near, view_camera.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
             viewport_size: [0.0; 2],
@@ -479,9 +519,10 @@ impl Uniforms {
             } else {
                 LightmapMode::Ldr as u32
             },
-            shading_mode: ShadingMode::Scene as u32,
+            shading_mode: scene.shading_mode as u32,
             diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
+            raster_clip: RasterClip::default(),
         }
     }
 
@@ -495,7 +536,6 @@ impl Uniforms {
             center[1] + distance * camera.orbit.pitch().cos() * camera.orbit.yaw().cos(),
             center[2] + distance * camera.orbit.pitch().sin(),
         ];
-        // Source models are Z-up.
         let view = look_at(Vec3::from(eye), center, SOURCE_UP);
         let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
         let proj = perspective(FOV_Y, aspect, radius * 0.01, radius * 20.0 + distance);
@@ -515,6 +555,7 @@ impl Uniforms {
             shading_mode: ShadingMode::Scene as u32,
             diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
+            raster_clip: RasterClip::default(),
         }
     }
 }
@@ -522,7 +563,7 @@ impl Uniforms {
 #[derive(Clone, Copy, Debug)]
 pub struct FlyCameraFrame {
     pub eye: Vec3,
-    pub forward: Vec3,
+    pub(super) view_camera: ViewCamera,
     pub proj: [[f32; 4]; 4],
     pub near: f32,
     pub far: f32,
@@ -542,13 +583,19 @@ impl FlyCameraFrame {
                     ])
             },
         );
-        let aspect = (bounds.width / bounds.height.max(1.0)).max(0.1);
         let near = 4.0;
         let far = (radius * 6.0).max(30_000.0);
+        #[cfg(any(test, feature = "map-capture"))]
+        let (near, far) = camera
+            .capture_clip_distances
+            .map_or((near, far), |clip| (clip.near, clip.far));
+        let view_camera = ViewCamera::fly(camera, bounds, eye, near, far);
         Self {
             eye,
-            forward: camera.forward(),
-            proj: perspective(FOV_Y, aspect, near, far),
+            view_camera,
+            proj: view_camera
+                .raster_projection()
+                .expect("valid fly camera projection"),
             near,
             far,
         }
@@ -585,11 +632,32 @@ pub fn scene_sky_tint(skybox: Option<&Skybox>) -> Vec3 {
 fn texture_smallest_mip_average(texture: &ResolvedTexture) -> Option<Vec3> {
     if let Some((format, mips)) = texture.bc_payload() {
         let mip = mips.last()?;
-        let rgba = decode_bc_texture(format, mip.width, mip.height, &mip.data)?;
-        return average_srgb_rgba(&rgba, mip.width, mip.height);
+        return average_bc_rgba(
+            format,
+            mip.dimensions[0],
+            mip.dimensions[1],
+            mip.bytes.as_slice(),
+        );
     }
     let mip = texture.mip_chain().last()?;
     average_srgb_rgba(mip.rgba, mip.width, mip.height)
+}
+
+fn average_bc_rgba(
+    format: super::super::BcFormat,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> Option<Vec3> {
+    let mut sum = Vec3::ZERO;
+    let count = super::super::texture::visit_bc_rgba(format, width, height, bytes, |row| {
+        for pixel in row.chunks_exact(4) {
+            for channel in 0..3 {
+                sum[channel] += srgb_channel_to_linear(pixel[channel]);
+            }
+        }
+    })?;
+    Some(sum * (1.0 / count as f32))
 }
 
 pub fn average_srgb_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Vec3> {
@@ -669,7 +737,7 @@ mod uniform_layout_tests {
         assert_eq!(offset_of!(Uniforms, viewport_size), 192);
         assert_eq!(offset_of!(Uniforms, raster_params), 208);
         assert_eq!(offset_of!(Uniforms, diagnostic), 224);
-        assert_eq!(size_of::<Uniforms>(), 256);
+        assert_eq!(size_of::<Uniforms>(), 336);
         for (name, expected) in [
             ("FOG_DISABLED", FogMode::Disabled as u32),
             ("FOG_AXIAL", FogMode::Axial as u32),
@@ -721,6 +789,19 @@ mod uniform_layout_tests {
                 DiagnosticMode::UnitTangentS as u32,
             ),
             ("DIAGNOSTIC_UNIT_EYE", DiagnosticMode::UnitEye as u32),
+            (
+                "DIAGNOSTIC_SURFACE_POSITION",
+                DiagnosticMode::SurfacePosition as u32,
+            ),
+            ("DIAGNOSTIC_SURFACE_UV", DiagnosticMode::SurfaceUv as u32),
+            (
+                "DIAGNOSTIC_SURFACE_ALPHA",
+                DiagnosticMode::SurfaceAlpha as u32,
+            ),
+            (
+                "DIAGNOSTIC_SURFACE_BASE_COLOR",
+                DiagnosticMode::SurfaceBaseColor as u32,
+            ),
         ] {
             let (_, constant) = module
                 .constants
@@ -777,7 +858,7 @@ mod uniform_layout_tests {
             normal: Vec3::new(0.0, 0.0, 1.0),
             distance: 3.0,
         };
-        let reflected = plane.reflect_uniforms(original, true);
+        let reflected = plane.reflect_uniforms(original, Some(plane));
         let shifted = reflected.with_raster_offset((512, 288), [0.5; 2]);
         let point = [2.0, 3.0, -32.0, 1.0];
         let before = pixel_position(reflected.view_proj, point, (512, 288));
@@ -805,7 +886,10 @@ mod uniform_layout_tests {
             Vec::new(),
             vec![("materials/pool.vmt", b"Water {}".to_vec())],
         );
-        let resolved = resolver.resolve_primary(&[], "pool").unwrap();
+        let resolved = resolver
+            .resolve_primary(&[], "pool")
+            .into_material()
+            .unwrap();
         let mut water = resolved.shader.water().unwrap().clone();
         water.animation_wrap = false;
         let material = MaterialUniform::new(
@@ -993,6 +1077,7 @@ mod uniform_layout_tests {
             ("shading_mode", offset_of!(Uniforms, shading_mode)),
             ("raster_params", offset_of!(Uniforms, raster_params)),
             ("diagnostic", offset_of!(Uniforms, diagnostic)),
+            ("raster_clip", offset_of!(Uniforms, raster_clip)),
         ];
         for (name, source) in [
             ("model_viewer", super::super::super::MODEL_SHADER_SOURCE),
@@ -1067,6 +1152,26 @@ mod uniform_layout_tests {
                 ("end", offset_of!(FogUniform, end)),
                 ("max_density", offset_of!(FogUniform, max_density)),
                 ("mode", offset_of!(FogUniform, mode)),
+            ]) {
+                assert_eq!(member.name.as_deref(), Some(field));
+                assert_eq!(member.offset as usize, offset);
+            }
+            let clip = module
+                .types
+                .iter()
+                .find_map(|(_, ty)| (ty.name.as_deref() == Some("RasterClip")).then_some(&ty.inner))
+                .unwrap();
+            let TypeInner::Struct { members, span } = clip else {
+                panic!("RasterClip must be a struct")
+            };
+            assert_eq!(*span as usize, size_of::<super::RasterClip>());
+            assert_eq!(members.len(), 2);
+            for (member, (field, offset)) in members.iter().zip([
+                (
+                    "view_projection",
+                    offset_of!(super::RasterClip, view_projection),
+                ),
+                ("plane", offset_of!(super::RasterClip, plane)),
             ]) {
                 assert_eq!(member.name.as_deref(), Some(field));
                 assert_eq!(member.offset as usize, offset);
@@ -1147,8 +1252,101 @@ mod tests {
 
     use super::super::super::test_support::empty_preview;
     use super::{
-        FlyCamera, FogMode, FogUniform, MapFog, Rectangle, Uniforms, Vec3, average_srgb_rgba,
+        FlyCamera, FogMode, FogUniform, MapFog, MapSkyCamera, Rectangle, Uniforms, Vec3,
+        average_srgb_rgba,
     };
+
+    #[test]
+    fn capture_clip_distances_are_view_local_and_defaults_are_preserved() {
+        use super::super::super::camera::CaptureClipDistances;
+        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(1280.0, 720.0));
+        let first = FlyCamera {
+            capture_clip_distances: CaptureClipDistances::new(4.0, 32768.0),
+            ..FlyCamera::default()
+        };
+        let second = FlyCamera {
+            capture_clip_distances: CaptureClipDistances::new(2.0, 65536.0),
+            ..FlyCamera::default()
+        };
+        for (camera, expected) in [
+            (&first, [4.0, 32768.0]),
+            (&second, [2.0, 65536.0]),
+            (&FlyCamera::default(), [4.0, 30000.0]),
+        ] {
+            let frame = super::FlyCameraFrame::new(&scene.scene, camera, bounds);
+            assert_eq!([frame.near, frame.far], expected);
+            assert_eq!(
+                frame.proj,
+                super::perspective(super::FOV_Y, 1280.0 / 720.0, expected[0], expected[1])
+            );
+            assert_eq!(
+                Uniforms::for_fly(&scene, camera, bounds, None, 0.0).water_depth_params[..2],
+                expected
+            );
+        }
+        for (near, far) in [
+            (0.0, 32768.0),
+            (4.0, 4.0),
+            (f32::NAN, 32768.0),
+            (4.0, f32::INFINITY),
+        ] {
+            assert_eq!(CaptureClipDistances::new(near, far), None);
+        }
+    }
+
+    #[test]
+    fn map_shading_mode_is_shared_by_main_and_sky_views() {
+        let mut scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
+        let camera = FlyCamera {
+            position: Some(Vec3::ZERO),
+            ..FlyCamera::default()
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(1280.0, 720.0));
+        let sky = MapSkyCamera {
+            origin: Vec3::ZERO,
+            scale: 16.0,
+            fog: None,
+        };
+        for mode in [super::ShadingMode::Scene, super::ShadingMode::Fullbright] {
+            scene.shading_mode = mode;
+            assert_eq!(
+                Uniforms::for_fly(&scene, &camera, bounds, None, 0.0).shading_mode,
+                mode as u32
+            );
+            assert_eq!(
+                Uniforms::for_fly_sky(&scene, &camera, bounds).shading_mode,
+                mode as u32
+            );
+            assert_eq!(
+                Uniforms::for_fly_skybox_composite(&scene, &camera, bounds, sky, None).shading_mode,
+                mode as u32
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_bc_sky_reduction_preserves_full_decode_average_exactly() {
+        use vformats::vtf::BcFormat;
+        for format in [BcFormat::Bc1, BcFormat::Bc2, BcFormat::Bc3] {
+            let [width, height] = [130_u32, 9];
+            let bytes = (0..width.div_ceil(4) * height.div_ceil(4) * format.block_bytes())
+                .map(|value| value as u8)
+                .collect::<Vec<_>>();
+            let decoded = vformats::vtf::decode_bc_rgba(
+                format,
+                width,
+                height,
+                &bytes,
+                &vformats::Limits::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                super::average_bc_rgba(format, width, height, &bytes),
+                average_srgb_rgba(&decoded.rgba, width, height)
+            );
+        }
+    }
 
     #[test]
     fn sky_tint_averages_known_2x2_texture() {
@@ -1182,11 +1380,13 @@ mod tests {
             "pool".into(),
         ));
         for name in ["pool", "pool_beneath"] {
-            let r = resolver.resolve_primary(&[], name).unwrap();
+            let r = resolver.resolve_primary(&[], name).into_material().unwrap();
             Arc::get_mut(&mut scene.scene)
                 .unwrap()
                 .materials
                 .push(MaterialSlot {
+                    resolution: crate::bridge::materials::MaterialResolutionOutcome::Loaded,
+                    canonical_name: Some(name.into()),
                     name: name.into(),
                     shader: r.shader,
                     texture: Some(r.texture),

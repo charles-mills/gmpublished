@@ -135,8 +135,10 @@ pub(super) struct FaceAppendContext<'a> {
     pub(super) material_names: &'a mut Vec<String>,
     pub(super) material_indexes: &'a mut HashMap<String, usize>,
     pub(super) lightmap_samples: Option<&'a [ColorRgbExp]>,
+    pub(super) lightmap_requirements: Option<&'a [super::SourceLightmapRequirement]>,
     pub(super) lightmap_sample_ends: &'a HashMap<i32, usize>,
     pub(super) lightmap_blocks: &'a mut Vec<PendingLightmapBlock>,
+    pub(super) lightmap_stats: &'a mut super::MapLightmapStats,
 }
 
 pub(super) fn append_face(
@@ -175,23 +177,60 @@ pub(super) fn append_face(
         index
     };
 
-    let lightmap_block = context.lightmap_samples.and_then(|samples| {
-        let end = context
-            .lightmap_sample_ends
-            .get(&face.light_offset)
-            .copied()?;
-        let block = extract_face_lightmap(face, samples.get(..end)?, texinfo.flags & 0x0800 != 0)?;
+    let sample_basis = super::lighting::LightmapBasis::from_bumped(texinfo.flags & 0x0800 != 0);
+    let output_basis = match context.lightmap_requirements {
+        Some(requirements) => match requirements.get(texinfo.texdata as usize) {
+            Some(super::SourceLightmapRequirement::None) => None,
+            Some(super::SourceLightmapRequirement::Lightmapped) => {
+                Some(super::lighting::LightmapBasis::Scalar)
+            }
+            Some(super::SourceLightmapRequirement::Bumped) => {
+                Some(super::lighting::LightmapBasis::Directional)
+            }
+            None => {
+                return Err(BspError::Malformed {
+                    message: "face material has no lightmap requirement",
+                });
+            }
+        },
+        None => Some(sample_basis),
+    };
+    let extraction = output_basis.map(|output_basis| {
+        if face.light_offset == -1 || context.lightmap_samples.is_none() {
+            Ok(None)
+        } else {
+            context
+                .lightmap_samples
+                .and_then(|samples| {
+                    let end = context.lightmap_sample_ends.get(&face.light_offset)?;
+                    samples.get(..*end)
+                })
+                .ok_or(super::lighting::LightmapExtractionError::InvalidPayload)
+                .and_then(|samples| {
+                    extract_face_lightmap(face, samples, sample_basis, output_basis)
+                })
+        }
+    });
+    if let Some(extraction) = &extraction {
+        context.lightmap_stats.record_extraction(extraction);
+    } else {
+        context.lightmap_stats.unlightmapped_surfaces = context
+            .lightmap_stats
+            .unlightmapped_surfaces
+            .saturating_add(1);
+    }
+    let lightmap_block = extraction.and_then(Result::ok).flatten().map(|block| {
         let index = context.lightmap_blocks.len();
         context.lightmap_blocks.push(block);
-        Some(index)
+        index
     });
     let mesh = context
         .meshes
         .get_or_insert(material_index, partition, context.entity);
     let index_start = mesh.indices.len();
     let vertex_start = mesh.vertices.len();
-    if let Some(displacement) = bsp.face_displacement(face) {
-        append_displacement(
+    let displacement_projection = if let Some(displacement) = bsp.face_displacement(face) {
+        let mut projection = append_displacement(
             bsp,
             face,
             displacement,
@@ -200,9 +239,17 @@ pub(super) fn append_face(
             mesh,
             lightmap_block,
         )?;
+        projection.base_corners = projection
+            .base_corners
+            .map(|point| context.transform.point(point));
+        for point in std::sync::Arc::make_mut(&mut projection.positions) {
+            *point = context.transform.point(*point);
+        }
+        Some(projection)
     } else {
         append_brush_face(bsp, face, face_index, texinfo, normal, mesh, lightmap_block)?;
-    }
+        None
+    };
     // UV transforms use compiled model space, before entity placement.
     for vertex in &mut mesh.vertices[vertex_start..] {
         vertex.vertex.texture_size = bsp.texinfo_texdata(texinfo).map_or([0; 2], |data| {
@@ -212,6 +259,7 @@ pub(super) fn append_face(
             ]
         });
         vertex.vertex.position = context.transform.point(vertex.vertex.position);
+        vertex.vertex.base_position = context.transform.point(vertex.vertex.base_position);
         vertex.vertex.normal = context.transform.vector(vertex.vertex.normal);
         vertex.vertex.tangent_s = context.transform.vector(vertex.vertex.tangent_s);
         vertex.vertex.tangent_t = context.transform.vector(vertex.vertex.tangent_t);
@@ -232,22 +280,24 @@ pub(super) fn append_face(
                 count,
             },
         );
+        let positions = bsp.face_vertex_positions(face);
         mesh.surface_owners.push(MapMeshSurfaceOwner {
             index_start: start,
             owner: context.receiver_owner,
             solid: context.receiver_solid,
             allows_decals: texinfo.flags & super::texture_flags::NODECALS == 0,
             plane_normal: context.transform.vector(normal),
-            plane_distance: bsp
-                .face_vertex_positions(face)
-                .first()
-                .map_or(0.0, |position| {
-                    context
-                        .transform
-                        .point(*position)
-                        .dot(context.transform.vector(normal))
-                }),
-            displacement: bsp.face_displacement(face).is_some(),
+            plane_distance: positions.first().map_or(0.0, |position| {
+                context
+                    .transform
+                    .point(*position)
+                    .dot(context.transform.vector(normal))
+            }),
+            displacement: displacement_projection,
+            texture_projection: super::MapSurfaceTextureProjection::from_points(
+                texinfo.texture_vecs,
+                &positions,
+            ),
         });
     }
 
@@ -304,7 +354,7 @@ pub(super) fn append_displacement(
     normal: Vec3,
     mesh: &mut BuildMesh,
     lightmap_block: Option<usize>,
-) -> Result<(), BspError> {
+) -> Result<super::MapDisplacementProjection, BspError> {
     let fallback;
     let normals = if let Some(normals) = usize::try_from(face.displacement)
         .ok()
@@ -320,7 +370,8 @@ pub(super) fn append_displacement(
                 message: "missing displacement normal grid",
             })?
     };
-    for vertex in displacement_vertices(bsp, face, displacement)? {
+    let (grid, steps) = displacement_build_grid(bsp, face, displacement)?;
+    for vertex in displacement_vertices_from_grid(&grid, steps, &displacement.allowed_vertices) {
         let grid_index = vertex.column * (vertex.steps + 1) + vertex.row;
         let vertex_normal = normals.normals.get(grid_index).copied().unwrap_or(normal);
         let stage = normals.stages.get(grid_index).copied().unwrap_or_default();
@@ -353,7 +404,11 @@ pub(super) fn append_displacement(
         });
         mesh.indices.push(index);
     }
-    Ok(())
+    Ok(super::MapDisplacementProjection {
+        base_corners: displacement_corner_positions(bsp, face, displacement)?,
+        steps,
+        positions: grid.iter().map(|vertex| vertex.position).collect(),
+    })
 }
 
 pub(super) fn map_vertex(
@@ -366,6 +421,7 @@ pub(super) fn map_vertex(
     let (tangent_s, tangent_t) = super::frames::texture_frame(normal, normal, texinfo);
     MapVertex {
         position,
+        base_position: position,
         normal,
         tangent_s,
         tangent_t,
@@ -392,6 +448,19 @@ pub(super) fn displacement_vertices(
     face: &Face,
     displacement: &DispInfo,
 ) -> Result<Vec<DisplacementBuildVertex>, BspError> {
+    let (grid, steps) = displacement_build_grid(bsp, face, displacement)?;
+    Ok(displacement_vertices_from_grid(
+        &grid,
+        steps,
+        &displacement.allowed_vertices,
+    ))
+}
+
+fn displacement_build_grid(
+    bsp: &MapBsp,
+    face: &Face,
+    displacement: &DispInfo,
+) -> Result<(Vec<DisplacementGridVertex>, usize), BspError> {
     if !(2..=4).contains(&displacement.power) {
         return Err(BspError::Malformed {
             message: "unsupported displacement power",
@@ -411,27 +480,33 @@ pub(super) fn displacement_vertices(
             message: "incomplete displacement vertex grid",
         });
     }
-    let all_allowed = (0..side * side)
-        .all(|index| displacement.allowed_vertices[index / 32] & (1 << (index % 32)) != 0);
+    Ok((grid, steps))
+}
+
+fn displacement_vertices_from_grid(
+    grid: &[DisplacementGridVertex],
+    steps: usize,
+    allowed: &[u32; 10],
+) -> Vec<DisplacementBuildVertex> {
+    let side = steps + 1;
+    let all_allowed = (0..side * side).all(|index| allowed[index / 32] & (1 << (index % 32)) != 0);
     if all_allowed {
-        return Ok(tessellate_displacement_grid(&grid, steps, side));
+        return tessellate_displacement_grid(grid, steps, side);
     }
-    Ok(
-        displacement_allowed_triangles(steps, &displacement.allowed_vertices)
-            .into_iter()
-            .flatten()
-            .filter_map(|index| {
-                grid.get(index).map(|vertex| DisplacementBuildVertex {
-                    position: vertex.position,
-                    base_position: vertex.base_position,
-                    column: index / side,
-                    row: index % side,
-                    steps,
-                    alpha: vertex.alpha,
-                })
+    displacement_allowed_triangles(steps, allowed)
+        .into_iter()
+        .flatten()
+        .filter_map(|index| {
+            grid.get(index).map(|vertex| DisplacementBuildVertex {
+                position: vertex.position,
+                base_position: vertex.base_position,
+                column: index / side,
+                row: index % side,
+                steps,
+                alpha: vertex.alpha,
             })
-            .collect(),
-    )
+        })
+        .collect()
 }
 
 fn displacement_allowed_triangles(steps: usize, allowed: &[u32; 10]) -> Vec<[usize; 3]> {
@@ -511,17 +586,7 @@ pub(super) fn tessellate_displacement_grid(
     let mut vertices = Vec::with_capacity(steps.saturating_mul(steps).saturating_mul(6));
     for column in 0..steps {
         for row in 0..steps {
-            let triangles = if (column + row) % 2 == 0 {
-                [
-                    [(column, row), (column + 1, row), (column + 1, row + 1)],
-                    [(column, row), (column + 1, row + 1), (column, row + 1)],
-                ]
-            } else {
-                [
-                    [(column, row), (column + 1, row), (column, row + 1)],
-                    [(column + 1, row), (column + 1, row + 1), (column, row + 1)],
-                ]
-            };
+            let triangles = displacement_cell_triangles(column, row);
             for triangle in triangles {
                 let mut triangle_vertices = Vec::with_capacity(3);
                 for (vertex_column, vertex_row) in triangle {
@@ -548,6 +613,20 @@ pub(super) fn tessellate_displacement_grid(
         }
     }
     vertices
+}
+
+pub(super) fn displacement_cell_triangles(column: usize, row: usize) -> [[(usize, usize); 3]; 2] {
+    if (column + row).is_multiple_of(2) {
+        [
+            [(column, row), (column + 1, row), (column + 1, row + 1)],
+            [(column, row), (column + 1, row + 1), (column, row + 1)],
+        ]
+    } else {
+        [
+            [(column, row), (column + 1, row), (column, row + 1)],
+            [(column + 1, row), (column + 1, row + 1), (column, row + 1)],
+        ]
+    }
 }
 
 pub(super) fn displacement_grid(

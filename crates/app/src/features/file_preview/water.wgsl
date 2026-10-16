@@ -5,6 +5,7 @@
 @group(0) @binding(4) var reflection_texture: texture_2d<f32>;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
+@group(1) @binding(22) var normal_sampler:sampler;
 @group(1) @binding(4) var lightmap_sampler: sampler;
 @group(0) @binding(6) var lightmap_texture:texture_2d<f32>;
 
@@ -29,6 +30,7 @@ struct VertexOutput {
     @location(2) uv: vec2<f32>,
     @location(3) lightmap_uv:vec2<f32>,
     @location(4) lightmap_bump_step:f32,
+    @location(5) clip_distance:f32,
     @location(10) tangent_s:vec3<f32>,
     @location(11) tangent_t:vec3<f32>,
 }
@@ -37,6 +39,7 @@ fn transform_water_vertex(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = uniforms.view_proj * vec4<f32>(input.position, 1.0);
     out.world_position = input.position;
+    out.clip_distance=view_clip_distance(input.position);
     out.normal = input.normal;
     out.tangent_s = input.tangent_s;
     out.tangent_t = input.tangent_t;
@@ -63,12 +66,12 @@ fn surface_lighting(input: VertexOutput) -> SurfaceLighting {
     let raw_frame = i32(floor(material.water_animation.z + time * material.water_animation.w));
     let frame_count = max(i32(material.water_state.x), 1);
     let frame = select(raw_frame % frame_count, min(raw_frame, frame_count - 1), material.normal_animation_clamp != 0u);
-    var encoded = textureSampleGrad(normal_texture, base_sampler, bump_uv, frame, bump_du, bump_dv);
+    var encoded = textureSampleGrad(normal_texture, normal_sampler, bump_uv, frame, bump_du, bump_dv);
     if material.water_state.y > 0.5 {
         let extra_a = vec2<f32>(uv.x + uv.y, uv.y - uv.x) * 0.1 + material.water_scroll.xy * time;
         let extra_b = uv.yx * 0.45 + material.water_scroll.zw * time;
-        let normal_a = textureSampleGrad(normal_texture, base_sampler, extra_a, frame, vec2<f32>(du.x + du.y, du.y - du.x) * 0.1, vec2<f32>(dv.x + dv.y, dv.y - dv.x) * 0.1);
-        let normal_b = textureSampleGrad(normal_texture, base_sampler, extra_b, frame, du.yx * 0.45, dv.yx * 0.45);
+        let normal_a = textureSampleGrad(normal_texture, normal_sampler, extra_a, frame, vec2<f32>(du.x + du.y, du.y - du.x) * 0.1, vec2<f32>(dv.x + dv.y, dv.y - dv.x) * 0.1);
+        let normal_b = textureSampleGrad(normal_texture, normal_sampler, extra_b, frame, du.yx * 0.45, dv.yx * 0.45);
         encoded = (encoded + normal_a + normal_b) * 0.33;
     }
     var tangent_normal = vec4<f32>(encoded.xyz * 2.0 - 1.0, encoded.a);
@@ -93,6 +96,7 @@ fn apply_fog(color:vec3<f32>,position:vec3<f32>,projected_depth:f32) -> vec3<f32
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    if view_fragment_is_clipped(input.clip_distance) { discard; }
     let lighting = surface_lighting(input);
     let dimensions_u = textureDimensions(refraction_texture, 0);
     let dimensions = vec2<f32>(dimensions_u);
@@ -157,7 +161,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn fs_skybox(input: VertexOutput) -> @location(0) vec4<f32> {
     let lighting = surface_lighting(input);
-    if dot(vec4<f32>(input.world_position, 1.0), uniforms.clip_plane) < 0.0 { discard; }
+    if view_fragment_is_clipped(input.clip_distance) { discard; }
     var color = mix(material.water_fog.rgb, uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb, lighting.fresnel * material.water_reflect.a);
     if material.planar_kind == PLANAR_MIRROR { color = uniforms.water_time_sky_tint.yzw * material.water_reflect.rgb; }
     if material.planar_kind==PLANAR_TEXTURED_WATER && material.water_reflect.a>0.5 && material.water_refract.a<0.5 {
@@ -173,8 +177,7 @@ fn fs_skybox(input: VertexOutput) -> @location(0) vec4<f32> {
 
 
 // Near-depth projection retains the surface footprint when the near plane clips it.
-@vertex
-fn vs_near_main(input: VertexInput) -> VertexOutput {
+fn transform_near_water_vertex(input: VertexInput) -> VertexOutput {
     var adjusted=input;
     let eye_distance=dot(vec4<f32>(uniforms.camera_position.xyz,1.0),uniforms.medium_plane);
     // Bias only this mask to retain a footprint at the degenerate eye-plane boundary.
@@ -202,10 +205,7 @@ fn fs_near_intersection(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
-    return transform_water_vertex(input);
-}
+
 
 fn bumped_lightmap(uv:vec2<f32>, step:f32, tangent_normal:vec3<f32>, ssbump:bool) -> vec3<f32> {
     if step <= 0.0 { return textureSample(lightmap_texture, lightmap_sampler, uv).rgb * lightmap_scale(); }

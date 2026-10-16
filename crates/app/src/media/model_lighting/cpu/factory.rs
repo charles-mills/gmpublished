@@ -12,6 +12,13 @@ use std::{collections::HashMap, sync::Arc};
 use vformats::bsp::WorldLightKind;
 const WORLD_LIGHT_IN_AMBIENT_CUBE: u32 = 1;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LightSelection {
+    Dynamic,
+    StaticRuntime,
+    StyledSupplement,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelLightingFailure {
     MissingCollision,
@@ -107,7 +114,6 @@ impl<'a> ModelLightingFactory<'a> {
         })
     }
 
-    /// Model/attachment/anchor selection precedes dynamic cache sampling.
     pub fn seed_dynamic(
         &mut self,
         point: Vec3,
@@ -132,18 +138,42 @@ impl<'a> ModelLightingFactory<'a> {
             leaf,
             ambient_cube,
             cell.bounds_max,
-            false,
+            LightSelection::Dynamic,
         )?;
         self.cache.insert(cell.key, Arc::clone(&seed));
         Ok(seed)
     }
 
-    /// Static seeds use the continuous point and spherical ambient, not leaf samples.
-    pub fn seed_static(
+    pub fn seed_static_runtime(
         &self,
         point: Vec3,
         bounds: MapBounds,
         ambient_cube: AmbientCube,
+    ) -> Result<Arc<ModelLightingSeed>, ModelLightingFailure> {
+        self.static_seed(point, bounds, ambient_cube, LightSelection::StaticRuntime)
+    }
+
+    pub fn seed_compiled_supplement(
+        &self,
+        point: Vec3,
+        bounds: MapBounds,
+    ) -> Result<Arc<ModelLightingSeed>, ModelLightingFailure> {
+        self.static_seed(
+            point,
+            bounds,
+            AmbientCube {
+                colors: [Vec3::ZERO; 6],
+            },
+            LightSelection::StyledSupplement,
+        )
+    }
+
+    fn static_seed(
+        &self,
+        point: Vec3,
+        bounds: MapBounds,
+        ambient_cube: AmbientCube,
+        selection: LightSelection,
     ) -> Result<Arc<ModelLightingSeed>, ModelLightingFailure> {
         if !point.is_finite()
             || !bounds.min.is_finite()
@@ -160,7 +190,7 @@ impl<'a> ModelLightingFactory<'a> {
         let cell = LightCacheCell::from_position(point, leaf)
             .ok_or(ModelLightingFailure::InvalidPosition)?;
         // Culling uses the point's cache cell, independently of model hull bounds.
-        self.build_seed(point, point, leaf, ambient_cube, cell.bounds_max, true)
+        self.build_seed(point, point, leaf, ambient_cube, cell.bounds_max, selection)
     }
 
     fn build_seed(
@@ -170,7 +200,7 @@ impl<'a> ModelLightingFactory<'a> {
         leaf: usize,
         ambient_cube: AmbientCube,
         bounds_max: Vec3,
-        is_static: bool,
+        selection: LightSelection,
     ) -> Result<Arc<ModelLightingSeed>, ModelLightingFailure> {
         let visible = self.visibility.and_then(|visibility| {
             visibility
@@ -186,8 +216,9 @@ impl<'a> ModelLightingFactory<'a> {
             .ok_or(ModelLightingFailure::InvalidPosition)?;
         let mut sky_seen = false;
         for light in &self.lights.lights {
-            if (!is_static && light.flags & WORLD_LIGHT_IN_AMBIENT_CUBE != 0)
-                || (is_static && light.style != 0)
+            if (selection == LightSelection::Dynamic
+                && light.flags & WORLD_LIGHT_IN_AMBIENT_CUBE != 0)
+                || (selection == LightSelection::StyledSupplement && light.style == 0)
                 || light.kind == WorldLightKind::SkyAmbient
                 || (light.kind != WorldLightKind::Skylight
                     && light.intensity.into_iter().all(|channel| channel <= 0.0))

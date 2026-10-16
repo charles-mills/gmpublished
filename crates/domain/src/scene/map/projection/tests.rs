@@ -4,6 +4,7 @@ use super::*;
 fn vertex(x: f32, y: f32) -> MapVertex {
     MapVertex {
         position: Vec3::new(x, y, 2.0 * x + 3.0 * y),
+        base_position: Vec3::new(x, y, 2.0 * x + 3.0 * y),
         normal: Vec3::new(-2.0, -3.0, 1.0),
         tangent_s: Vec3::new(1.0, 0.0, 2.0),
         tangent_t: Vec3::new(0.0, 1.0, 3.0),
@@ -124,6 +125,120 @@ fn unrelated_receiver_triangles_do_not_create_floating_geometry() {
 }
 
 #[test]
+fn distant_small_receivers_do_not_lose_clipping_orientation() {
+    let mut triangle = [
+        vertex(10_000.0, 10_000.0),
+        vertex(10_001.0, 10_000.0),
+        vertex(10_000.0, 10_001.0),
+    ];
+    assert!(projection().clip_quad_to_triangle(&triangle).is_empty());
+    triangle.reverse();
+    assert!(projection().clip_quad_to_triangle(&triangle).is_empty());
+}
+
+fn displacement_receiver() -> (super::super::MapDisplacementProjection, Vec<[MapVertex; 3]>) {
+    let base_corners = [
+        Vec3::new(-2.0, -2.0, 0.0),
+        Vec3::new(-2.0, 2.0, 0.0),
+        Vec3::new(2.0, 2.0, 0.0),
+        Vec3::new(2.0, -2.0, 0.0),
+    ];
+    let grid = (0..=2)
+        .flat_map(|column| {
+            (0..=2).map(move |row| {
+                let x = row as f32 * 2.0 - 2.0;
+                let y = column as f32 * 2.0 - 2.0;
+                let mut surface = vertex(x, y);
+                surface.base_position = Vec3::new(x, y, 0.0);
+                surface.position = surface.base_position;
+                if column == 1 && row == 1 {
+                    surface.position += Vec3::new(0.4, 0.3, 5.0);
+                }
+                surface
+            })
+        })
+        .collect::<Vec<_>>();
+    let triangles = (0..2)
+        .flat_map(|column| {
+            (0..2).flat_map(move |row| super::super::mesh::displacement_cell_triangles(column, row))
+        })
+        .map(|triangle| triangle.map(|(column, row)| grid[column * 3 + row]))
+        .collect();
+    (
+        super::super::MapDisplacementProjection {
+            base_corners,
+            steps: 2,
+            positions: grid.iter().map(|surface| surface.position).collect(),
+        },
+        triangles,
+    )
+}
+
+#[test]
+fn compiled_displacement_textures_follow_base_grid_while_positions_follow_deformation() {
+    let (displacement, triangles) = displacement_receiver();
+    let mut projection = projection();
+    projection.u = [0.0, 1.0];
+    projection.v = [0.0, 1.0];
+    let polygons = projection.project_displacement(&displacement, triangles.into_iter());
+    assert!(!polygons.is_empty());
+    let mut saw_displaced_center = false;
+    for vertex in polygons.iter().flatten() {
+        let base = vertex.surface.base_position;
+        assert!((vertex.uv[0] - (base[0] + 1.0) * 0.5).abs() < 1e-5);
+        assert!((vertex.uv[1] - (base[1] + 1.0) * 0.5).abs() < 1e-5);
+        assert!((vertex.surface.lightmap_uv[0] - (0.2 + base[0] * 0.01)).abs() < 1e-6);
+        assert!((vertex.surface.lightmap_uv[1] - (0.4 + base[1] * 0.02)).abs() < 1e-6);
+        if base.length_squared() < 1e-8 {
+            assert!((vertex.surface.position - Vec3::new(0.4, 0.3, 5.0)).length_squared() < 1e-8);
+            saw_displaced_center = true;
+        }
+    }
+    assert!(saw_displaced_center);
+}
+
+#[test]
+fn compiled_displacements_sample_full_grid_when_render_triangles_are_coarse() {
+    let (displacement, _) = displacement_receiver();
+    let corners = displacement.base_corners.map(|base| {
+        let mut surface = vertex(base[0], base[1]);
+        surface.position = base;
+        surface.base_position = base;
+        surface
+    });
+    let triangles = [
+        [corners[0], corners[1], corners[2]],
+        [corners[0], corners[2], corners[3]],
+    ];
+    let polygons = projection().project_displacement(&displacement, triangles.into_iter());
+    assert!(polygons.iter().flatten().any(|vertex| {
+        (vertex.surface.position - Vec3::new(0.4, 0.3, 5.0)).length_squared() < 1e-8
+    }));
+}
+
+#[test]
+fn skew_displacement_uvs_keep_native_vertical_then_horizontal_split_interpolation() {
+    let (displacement, triangles) = displacement_receiver();
+    let mut projection = projection();
+    projection.u = [0.0, 1.0];
+    projection.v = [0.0, 1.0];
+    projection.corners = [[-1.5, -1.5], [-1.5, 1.5], [1.8, 1.0], [1.5, -1.0]];
+    let polygons = projection.project_displacement(&displacement, triangles.into_iter());
+    let centers = polygons
+        .iter()
+        .flatten()
+        .filter(|vertex| vertex.surface.base_position.length_squared() < 1e-8)
+        .collect::<Vec<_>>();
+    assert!(!centers.is_empty());
+    for center in centers {
+        assert!((center.uv[0] - 53.0 / 111.0).abs() < 1e-6);
+        assert!((center.uv[1] - 55.0 / 111.0).abs() < 1e-6);
+        let inverse = projection.inverse_bilinear([0.0, 0.0]).unwrap();
+        assert!((center.uv[0] - inverse[0]).abs() > 1e-4);
+    }
+}
+
+#[test]
 fn malformed_projection_is_rejected() {
     let mut projection = projection();
     projection.corners.swap(1, 2);
@@ -161,7 +276,8 @@ fn receiver_partition_and_brush_ownership_are_independent_of_origin_leaf() {
         allows_decals: false,
         plane_normal: Vec3::new(0.0, 0.0, 1.0),
         plane_distance: 0.0,
-        displacement: false,
+        displacement: None,
+        texture_projection: None,
     });
     let sky = [brush];
     let receivers = receiver_surfaces(&[], &sky, &[]);
@@ -186,10 +302,9 @@ fn placed_surface_round_trip_preserves_local_vertex_attributes() {
 }
 
 #[test]
-fn whole_face_clipping_preserves_quad_uvs_and_receiver_lightmap() {
-    let world = [mesh()];
-    let receivers = receiver_surfaces(&world, &[], &[]);
-    let polygon = projection().clip_quad_to_receiver(&receivers[&7][0]);
+fn quad_clipping_preserves_receiver_lightmap() {
+    let triangle = [vertex(-5.0, -5.0), vertex(5.0, -5.0), vertex(0.0, 8.0)];
+    let polygon = projection().clip_quad_to_triangle(&triangle);
     assert_eq!(polygon.len(), 4);
     for vertex in polygon {
         let p = vertex.surface.position;
@@ -202,26 +317,56 @@ fn whole_face_clipping_preserves_quad_uvs_and_receiver_lightmap() {
 }
 
 #[test]
-fn uncut_skew_quad_keeps_authored_corner_uvs_without_receiver_diagonal_vertices() {
-    let mut receiver = mesh();
-    receiver.vertices = vec![
-        vertex(-10.0, -10.0),
-        vertex(-10.0, 10.0),
-        vertex(10.0, 10.0),
-        vertex(10.0, -10.0),
-    ];
-    receiver.indices = vec![0, 1, 2, 0, 2, 3];
-    for cluster in &mut receiver.visibility.clusters {
-        cluster.ranges[0].count = 6;
-    }
-    let world = [receiver];
-    let receivers = receiver_surfaces(&world, &[], &[]);
+fn skew_quad_clipping_keeps_receiver_fan_boundaries_and_inverse_bilinear_uvs() {
     let mut projection = projection();
     projection.corners = [[-3.0, -1.0], [-1.0, 3.0], [4.0, 2.0], [2.0, -2.0]];
-    let polygon = projection.clip_quad_to_receiver(&receivers[&7][0]);
-    assert_eq!(polygon.len(), 4);
-    assert_eq!(
-        polygon.iter().map(|vertex| vertex.uv).collect::<Vec<_>>(),
-        vec![[0.25, 0.0], [0.25, 2.0], [0.75, 2.0], [0.75, 0.0]]
-    );
+    let triangles = [
+        [
+            vertex(-10.0, -10.0),
+            vertex(-10.0, 10.0),
+            vertex(10.0, 10.0),
+        ],
+        [
+            vertex(-10.0, -10.0),
+            vertex(10.0, 10.0),
+            vertex(10.0, -10.0),
+        ],
+    ];
+    let mut intersections = Vec::new();
+    for (side, triangle) in triangles.iter().enumerate() {
+        let polygon = projection.clip_quad_to_triangle(triangle);
+        assert!(polygon.len() >= 3);
+        if side == 0 {
+            assert!((polygon[0].surface.position[0] + 3.0).abs() < 1e-5);
+            assert!((polygon[0].surface.position[1] + 1.0).abs() < 1e-5);
+        } else {
+            assert!((polygon[0].surface.position[0] - 7.0 / 3.0).abs() < 1e-5);
+            assert!((polygon[0].surface.position[1] - 7.0 / 3.0).abs() < 1e-5);
+        }
+        for vertex in polygon {
+            let p = vertex.surface.position;
+            if side == 0 {
+                assert!(p[1] >= p[0] - 1e-5);
+            } else {
+                assert!(p[1] <= p[0] + 1e-5);
+            }
+            let uv = [
+                (vertex.uv[0] - projection.u[0]) / (projection.u[1] - projection.u[0]),
+                (vertex.uv[1] - projection.v[0]) / (projection.v[1] - projection.v[0]),
+            ];
+            let point = std::array::from_fn::<_, 2, _>(|axis| {
+                projection.corners[0][axis] * (1.0 - uv[0]) * (1.0 - uv[1])
+                    + projection.corners[3][axis] * uv[0] * (1.0 - uv[1])
+                    + projection.corners[1][axis] * (1.0 - uv[0]) * uv[1]
+                    + projection.corners[2][axis] * uv[0] * uv[1]
+            });
+            assert!((point[0] - p[0]).abs() < 1e-5);
+            assert!((point[1] - p[1]).abs() < 1e-5);
+            assert!((vertex.surface.lightmap_uv[0] - (0.2 + p[0] * 0.01)).abs() < 1e-6);
+            if (p[0] - p[1]).abs() < 1e-5 {
+                intersections.push(p);
+            }
+        }
+    }
+    assert!(intersections.len() >= 4);
 }

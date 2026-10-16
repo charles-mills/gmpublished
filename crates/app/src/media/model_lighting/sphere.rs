@@ -21,7 +21,10 @@ impl<'a> Sampler<'a> {
             .radiosity_surfaces
             .as_ref()
             .ok_or(ModelLightingFailure::MissingRadiositySurfaces)?;
-        if inputs.world_lighting.source != Some(surfaces.source)
+        let source = surfaces
+            .lighting_source()
+            .ok_or(ModelLightingFailure::MissingRadiositySurfaces)?;
+        if inputs.world_lighting.source != Some(source)
             || inputs.surface_materials.len() != surfaces.texdatas.len()
         {
             return Err(ModelLightingFailure::IncoherentMode);
