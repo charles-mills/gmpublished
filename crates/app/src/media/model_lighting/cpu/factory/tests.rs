@@ -808,3 +808,27 @@ fn style_dependencies_include_candidates_even_when_the_light_slot_budget_folds_t
         seed.evaluate(&styles, 0, 0.0).unwrap().ambient_cube
     );
 }
+
+#[test]
+fn moving_entity_cells_reuse_seed_payloads_across_factory_lifetimes() {
+    let map = map(&[point(0, Vec3::new(64., 0., 0.))]);
+    let mut cache = ModelLightingDynamicCache::default();
+    let sample = |cache: &mut ModelLightingDynamicCache, point: Vec3| {
+        let mut factory = ModelLightingFactory::new(
+            &map.ambient,
+            &map.world_lighting,
+            map.lighting_collision.as_ref().unwrap(),
+            None,
+        )
+        .unwrap();
+        factory.seed_dynamic_reusing(point, cache).unwrap()
+    };
+    let first = sample(&mut cache, Vec3::ZERO);
+    let moved = sample(&mut cache, Vec3::new(0.5, 0., 0.));
+    assert!(Arc::ptr_eq(&first, &moved));
+    assert_eq!(cache.seeds.len(), 1);
+    assert_eq!(
+        first.evaluate(&[1.; 128], 4, 0.0002).unwrap(),
+        moved.evaluate(&[1.; 128], 4, 0.0002).unwrap()
+    );
+}

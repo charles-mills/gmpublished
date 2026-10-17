@@ -2,6 +2,20 @@ use super::{
     GpuModelContext, ModelLightingContext, ModelLightingHistory, UsedStyles, encode, encode_context,
 };
 
+#[derive(Clone, Copy)]
+struct Contexts<'a> {
+    originals: &'a [ModelLightingContext],
+    overrides: Option<&'a std::collections::BTreeMap<usize, ModelLightingContext>>,
+}
+
+impl<'a> Contexts<'a> {
+    fn get(self, index: usize) -> &'a ModelLightingContext {
+        self.overrides
+            .and_then(|overrides| overrides.get(&index))
+            .unwrap_or(&self.originals[index])
+    }
+}
+
 #[derive(Debug)]
 pub(in super::super) struct State {
     styles: [f32; 128],
@@ -93,12 +107,77 @@ impl State {
         self.advance_with(contexts, styles, time, active, encode_context)
     }
 
+    pub fn advance_overrides(
+        &mut self,
+        contexts: &[ModelLightingContext],
+        overrides: &std::collections::BTreeMap<usize, ModelLightingContext>,
+        origins_changed: bool,
+        styles: &[f32; 128],
+        time: f64,
+        active: &[bool],
+    ) -> bool {
+        if origins_changed {
+            self.used_styles
+                .include(overrides.values().flat_map(|context| {
+                    context
+                        .source
+                        .runtime_seed()
+                        .into_iter()
+                        .chain(
+                            context
+                                .compiled_supplement
+                                .as_ref()
+                                .and_then(|seed| seed.as_ref().ok()),
+                        )
+                        .flat_map(|seed| seed.used_styles())
+                }));
+        }
+        self.advance_resolved(
+            Contexts {
+                originals: contexts,
+                overrides: Some(overrides),
+            },
+            styles,
+            time,
+            active,
+            origins_changed,
+            encode_context,
+        )
+    }
+
     fn advance_with(
         &mut self,
         contexts: &[ModelLightingContext],
         styles: &[f32; 128],
         time: f64,
         active: &[bool],
+        evaluate: impl FnMut(
+            &ModelLightingContext,
+            &[f32; 128],
+            f64,
+            Option<&mut ModelLightingHistory>,
+        ) -> GpuModelContext,
+    ) -> bool {
+        self.advance_resolved(
+            Contexts {
+                originals: contexts,
+                overrides: None,
+            },
+            styles,
+            time,
+            active,
+            false,
+            evaluate,
+        )
+    }
+
+    fn advance_resolved(
+        &mut self,
+        contexts: Contexts<'_>,
+        styles: &[f32; 128],
+        time: f64,
+        active: &[bool],
+        origins_changed: bool,
         mut evaluate: impl FnMut(
             &ModelLightingContext,
             &[f32; 128],
@@ -107,12 +186,12 @@ impl State {
         ) -> GpuModelContext,
     ) -> bool {
         assert_eq!(
-            contexts.len(),
+            contexts.originals.len(),
             self.histories.len(),
             "lighting scene changed without reconstruction"
         );
         assert_eq!(
-            contexts.len(),
+            contexts.originals.len(),
             active.len(),
             "lighting visibility context identity changed"
         );
@@ -122,14 +201,21 @@ impl State {
         self.changed_ranges.clear();
         let active_changed = self.active != active;
         let styles_changed = self.used_styles.changed(&self.styles, styles);
-        if self.initialized && time == self.time && !styles_changed && !active_changed {
+        if self.initialized
+            && time == self.time
+            && !styles_changed
+            && !active_changed
+            && !origins_changed
+        {
             return false;
         }
-        let dynamic = contexts.iter().zip(active).any(|(context, active)| {
+        let dynamic = active.iter().enumerate().any(|(index, active)| {
+            let context = contexts.get(index);
             *active && context.entity && context.source.runtime_seed().is_some()
         });
         if self.initialized
             && !dynamic
+            && !origins_changed
             && !active_changed
             && !styles_changed
             && !self
@@ -141,10 +227,11 @@ impl State {
             self.time = time;
             return false;
         }
-        for (index, context) in contexts.iter().enumerate() {
-            if !active[index] {
+        for (index, active) in active.iter().enumerate() {
+            if !active {
                 continue;
             }
+            let context = contexts.get(index);
             let next = evaluate(context, styles, time, Some(&mut self.histories[index]));
             let previous = &mut self.data[index + 1];
             if *previous != next {
@@ -163,6 +250,73 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runtime_override_of_a_fallback_keeps_history_and_new_styles_live() {
+        use crate::media::preview_model::{ModelLightingFallbackReason, ModelLightingSource};
+        let mut posed = ModelLightingContext::ambient_fixture(1.0);
+        let ModelLightingSource::Runtime { seed, .. } = &mut posed.source else {
+            unreachable!()
+        };
+        std::sync::Arc::make_mut(seed).set_fixture_style(32);
+        let mut original = posed.clone();
+        original.source = ModelLightingSource::DiagnosedFallback {
+            reason: ModelLightingFallbackReason::LegacyVertexLighting,
+            snapshot: original.source.fallback_snapshot().clone(),
+        };
+        let contexts = [original];
+        let overrides = [(0, posed)].into();
+        let mut state = State::new(&contexts, &[1.0; 128]);
+        state.advance_overrides(&contexts, &overrides, true, &[1.0; 128], 0.0, &[true]);
+        assert!(!state.histories[0].has_pending());
+        let history = state.histories[0].clone();
+        state.advance_overrides(&contexts, &overrides, false, &[1.0; 128], 1.0, &[true]);
+        assert_ne!(
+            state.histories[0], history,
+            "effective runtime source must advance its history timestamp after settling"
+        );
+        let previous = state.data[1];
+        let mut styles = [1.0; 128];
+        styles[32] = 0.25;
+        assert!(state.advance_overrides(&contexts, &overrides, false, &styles, 1.25, &[true]));
+        assert_ne!(state.data[1], previous);
+        let history = state.histories[0].clone();
+        state.advance_overrides(&contexts, &overrides, false, &styles, 2.0, &[false]);
+        assert_eq!(
+            state.histories[0], history,
+            "hidden effective sources must keep their last drawn history"
+        );
+        assert!(contexts[0].source.runtime_seed().is_none());
+    }
+
+    #[test]
+    fn posed_context_overrides_update_at_a_fixed_capture_clock_without_mutating_the_scene() {
+        use crate::media::preview_model::{ModelLightingSnapshot, ModelLightingSource};
+        use gmpublished_domain::scene::map::AmbientCube;
+        let mut context = ModelLightingContext::ambient_fixture(1.0);
+        context.source = ModelLightingSource::Explicit(ModelLightingSnapshot {
+            ambient_cube: AmbientCube::WHITE,
+            lights: Vec::new(),
+        });
+        let contexts = [context];
+        let mut state = State::new(&contexts, &[1.; 128]);
+        state.advance(&contexts, &[1.; 128], 1., &[true]);
+        let mut posed = contexts[0].clone();
+        posed.source = ModelLightingSource::Explicit(ModelLightingSnapshot {
+            ambient_cube: AmbientCube {
+                colors: [gmpublished_domain::math::Vec3::ZERO; 6],
+            },
+            lights: Vec::new(),
+        });
+        let overrides = [(0, posed)].into();
+        assert!(state.advance_overrides(&contexts, &overrides, true, &[1.; 128], 1., &[true]));
+        assert_eq!(state.data[1].full.ambient[0][0], 0.);
+        assert!(!state.advance_overrides(&contexts, &overrides, false, &[1.; 128], 1., &[true]));
+        assert_eq!(
+            contexts[0].source.fallback_snapshot().ambient_cube,
+            AmbientCube::WHITE
+        );
+    }
 
     #[test]
     fn unused_styles_do_not_reencode_constant_contexts_but_reactivation_still_does() {

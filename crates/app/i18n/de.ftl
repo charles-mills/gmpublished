@@ -357,6 +357,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Netze
 file-preview-model-bones = Knochen
 file-preview-model-sequences = Sequenzen
+file-preview-animation-unavailable = Animationen nicht verfügbar
 file-preview-model-vertices = Scheitelpunkte
 file-preview-model-triangles = Dreiecke
 file-preview-model-materials = Materialien aufgelöst

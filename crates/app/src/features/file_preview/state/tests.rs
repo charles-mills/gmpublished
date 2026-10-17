@@ -89,6 +89,8 @@ fn render_scene(
 
 fn empty_map(scene: Arc<RenderScene>) -> MapPreview {
     MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         texture_preparation: Default::default(),
         prop_geometry: Default::default(),
         renderables: Vec::new(),
@@ -484,6 +486,8 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
     );
     let scene = Arc::new(empty_map(Arc::clone(&render_scene)));
     let model_scene = Arc::new(ModelPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         scene: render_scene,
         skin_tables: vec![vec![0]],
         bodygroups: Vec::new(),
@@ -537,6 +541,8 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Model(Arc::new(ModelPreview {
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             scene: blank_scene(),
             skin_tables: vec![vec![0], vec![0]],
             bodygroups: vec![3],

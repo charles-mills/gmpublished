@@ -210,6 +210,8 @@ pub struct MapVertex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticPropPlacement {
     pub entity: bool,
+    pub initially_visible: bool,
+    pub animation: Option<MapPropAnimation>,
     /// Original game-lump index used by `sp_N.vhv`, unaffected by filtering/partitioning.
     pub static_prop_index: Option<usize>,
     pub lighting_origin: Option<Vec3>,
@@ -227,6 +229,23 @@ pub struct StaticPropPlacement {
     pub solid: MapPropSolid,
     pub leaf_membership: MapPropLeafMembership,
     pub visibility: MapPropVisibility,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapPropAnimation {
+    pub entity_index: usize,
+    pub hammer_id: Option<u32>,
+    pub default_sequence: Option<String>,
+    pub sequence_index: usize,
+    pub initial_cycle: f32,
+    pub playback_rate: f32,
+    pub random: Option<MapPropRandomAnimation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapPropRandomAnimation {
+    pub minimum_interval: f32,
+    pub maximum_interval: f32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

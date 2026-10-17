@@ -362,6 +362,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Mallas
 file-preview-model-bones = Huesos
 file-preview-model-sequences = Secuencias
+file-preview-animation-unavailable = Animaciones no disponibles
 file-preview-model-vertices = Vértices
 file-preview-model-triangles = Triángulos
 file-preview-model-materials = Materiales resueltos

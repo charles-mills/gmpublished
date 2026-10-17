@@ -14,9 +14,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
-pub(super) struct Destination {
+pub(in super::super) struct Destination {
     pub material_index: usize,
     pub entity: bool,
+    pub animation_instance: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -288,6 +289,13 @@ pub(super) fn bind_geometry(
                 destination: Destination {
                     material_index,
                     entity: placement.entity,
+                    animation_instance: placement.animation.as_ref().and_then(|animation| {
+                        model
+                            .model
+                            .animation
+                            .as_ref()
+                            .map(|_| animation.entity_index)
+                    }),
                 },
             })
         })
@@ -442,7 +450,7 @@ impl GeometryPlan {
 
 #[derive(Debug)]
 pub(super) struct BakedGeometry {
-    pub(super) meshes: BTreeMap<(usize, bool), PropBuildMesh>,
+    pub(super) meshes: BTreeMap<Destination, PropBuildMesh>,
     pub(super) geometry: PropGeometryReport,
     pub(super) admitted: Vec<usize>,
 }
@@ -569,6 +577,7 @@ fn bake_geometry(
             target.renderable_ranges.push(PropBuildRenderableRange {
                 source_index: placement.source_index,
                 draw_order: part.mesh_index,
+                vertex_start: part.vertex_start,
                 start: part.index_start,
                 count: part.index_count,
             });
@@ -576,7 +585,7 @@ fn bake_geometry(
         assert_eq!(target.vertices.len(), buffer.counts.vertices);
         assert_eq!(target.indices.len(), buffer.counts.indices);
         assert_eq!(target.renderable_ranges.len(), buffer.counts.mesh_ranges);
-        ((destination.material_index, destination.entity), target)
+        (destination, target)
     };
     let meshes = if parallel {
         inputs.into_par_iter().map(bake).collect()

@@ -502,8 +502,27 @@ fn with_linear_bones(mut bytes: Vec<u8>) -> (Vec<u8>, usize) {
 }
 
 #[test]
+fn full_bone_flags_alignment_and_procedural_kind_are_retained() {
+    let mut bytes = build_mdl().bytes;
+    let flags = 0x8010_0008u32;
+    put_i32(&mut bytes, HEADER_BYTES + 160, flags as i32);
+    put_i32(&mut bytes, HEADER_BYTES + 164, 5);
+    let alignment = [0.0, 0.0, 0.6, 0.8];
+    for (index, value) in alignment.into_iter().enumerate() {
+        put_f32(&mut bytes, HEADER_BYTES + 144 + index * 4, value);
+    }
+    let model = parse_mdl(&bytes, &Limits::default()).unwrap();
+    assert_eq!(model.bones[0].flags, flags);
+    assert_eq!(model.bones[0].quaternion_alignment, alignment);
+    assert_eq!(model.bones[0].procedural_kind, 5);
+    assert_eq!(model.runtime_bones().unwrap()[0], model.bones[0]);
+}
+
+#[test]
 fn linear_bones_preserve_full_records_and_select_runtime_arrays() {
-    let original = build_mdl();
+    let mut original = build_mdl();
+    put_i32(&mut original.bytes, HEADER_BYTES + 160, 0x10);
+    put_f32(&mut original.bytes, HEADER_BYTES + 144, 1.0);
     let full = parse_mdl(&original.bytes, &Limits::default()).unwrap();
     let (bytes, _) = with_linear_bones(original.bytes);
     let model = parse_mdl(&bytes, &Limits::default()).unwrap();
@@ -520,6 +539,13 @@ fn linear_bones_preserve_full_records_and_select_runtime_arrays() {
     assert_eq!(effective[0].position, [11.0, -12.0, 13.0]);
     assert_eq!(effective[0].pose_to_bone[0][3], -11.0);
     assert_eq!(effective[0].name, full.bones[0].name);
+    assert_eq!(full.bones[0].flags, 0x10);
+    assert_eq!(effective[0].flags, linear.flags[0]);
+    assert_eq!(full.bones[0].quaternion_alignment, [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(
+        effective[0].quaternion_alignment,
+        linear.quaternion_alignment[0]
+    );
 }
 
 #[test]

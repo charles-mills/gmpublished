@@ -58,7 +58,7 @@ impl WaterSide {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Part {
     pub indices: Range<u32>,
     pub centre: Vec3,
@@ -310,14 +310,14 @@ fn remaining_queue(
                 continue;
             }
             let mesh = &upload.meshes[item.mesh_index];
-            if mesh.transparent_parts.is_empty() {
+            if mesh.transparent_parts().is_empty() {
                 draws.push(Draw {
                     primitive: Primitive::Mesh(*item, None),
                     depth: depth(uniforms, mesh.centroid()),
                     blend: upload.assets.material_render_modes[item.material_slot],
                 });
             } else {
-                for part in &mesh.transparent_parts {
+                for part in mesh.transparent_parts() {
                     if schedule.is_some_and(|schedule| {
                         schedule.covers(item.mesh_index, Some(&part.indices))
                     }) {

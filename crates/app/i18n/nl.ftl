@@ -362,6 +362,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Meshes
 file-preview-model-bones = Botten
 file-preview-model-sequences = Sequenties
+file-preview-animation-unavailable = Animaties niet beschikbaar
 file-preview-model-vertices = Hoekpunten
 file-preview-model-triangles = Driehoeken
 file-preview-model-materials = Materialen opgelost

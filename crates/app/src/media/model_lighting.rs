@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 #[path = "model_lighting/cpu.rs"]
 mod cpu;
-pub use cpu::factory::{ModelLightingFailure, ModelLightingSeed};
+pub use cpu::factory::{ModelLightingDynamicCache, ModelLightingFailure, ModelLightingSeed};
 #[path = "model_lighting/origin.rs"]
 mod origin;
 pub use origin::{ModelLightingOriginFailure, placement_sample_point, placement_static_bounds};
@@ -180,6 +180,60 @@ impl ModelLightingSceneInputs {
                 });
             context.set_prepared_seed(seed);
         }
+    }
+
+    pub fn update_animated_origins(
+        &self,
+        originals: &[ModelLightingContext],
+        origins: &std::collections::BTreeMap<usize, Vec3>,
+        overrides: &mut std::collections::BTreeMap<usize, ModelLightingContext>,
+        cache: &mut ModelLightingDynamicCache,
+    ) -> bool {
+        if origins.is_empty() {
+            return false;
+        }
+        let mut factory = self
+            .collision
+            .as_ref()
+            .ok_or(ModelLightingFailure::MissingCollision)
+            .and_then(|collision| {
+                cpu::factory::ModelLightingFactory::new(
+                    &self.ambient,
+                    &self.world_lighting,
+                    collision,
+                    self.visibility.as_ref(),
+                )
+            });
+        let mut changed = false;
+        for (&index, &point) in origins {
+            let Some(original) = originals
+                .get(index)
+                .filter(|context| context.entity && context.sample_point.is_ok())
+            else {
+                continue;
+            };
+            let previous = overrides.get(&index).unwrap_or(original);
+            if previous.lighting_origin == point
+                && previous
+                    .sample_point
+                    .as_ref()
+                    .is_ok_and(|previous| *previous == point)
+            {
+                continue;
+            }
+            let context = overrides.entry(index).or_insert_with(|| original.clone());
+            context.lighting_origin = point;
+            context.sample_point = Ok(point);
+            if !context.source.is_explicit() {
+                let seed = factory
+                    .as_mut()
+                    .map_err(|error| *error)
+                    .and_then(|factory| factory.seed_dynamic_reusing(point, cache));
+                context.set_prepared_seed(seed);
+            }
+            changed = true;
+        }
+        changed
     }
 
     pub fn seed_entities(&self, contexts: &mut [ModelLightingContext]) {
@@ -441,6 +495,40 @@ mod tests {
             None,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn animated_origins_are_sparse_view_owned_and_preserve_invalid_anchor_diagnostics() {
+        let mut valid = ModelLightingContext::ambient_fixture(0.5);
+        valid.source = ModelLightingSource::Explicit(valid.source.fallback_snapshot().clone());
+        let mut invalid = valid.clone();
+        invalid.sample_point = Err(ModelLightingOriginFailure::UnresolvedAnchor {
+            name: "missing".to_owned(),
+        });
+        let contexts = [valid, invalid];
+        let original = contexts.clone();
+        let inputs = empty_scene();
+        let mut first = std::collections::BTreeMap::new();
+        let mut second = std::collections::BTreeMap::new();
+        let mut first_cache = ModelLightingDynamicCache::default();
+        let mut second_cache = ModelLightingDynamicCache::default();
+        let first_point = Vec3::new(3., 4., 5.);
+        let second_point = Vec3::new(6., 7., 8.);
+        let origins = [(0, first_point), (1, first_point)].into();
+        assert!(inputs.update_animated_origins(&contexts, &origins, &mut first, &mut first_cache));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[&0].sample_point, Ok(first_point));
+        assert!(!inputs.update_animated_origins(&contexts, &origins, &mut first, &mut first_cache));
+        assert!(inputs.update_animated_origins(
+            &contexts,
+            &[(0, second_point)].into(),
+            &mut second,
+            &mut second_cache
+        ));
+        assert_eq!(first[&0].lighting_origin, first_point);
+        assert_eq!(second[&0].lighting_origin, second_point);
+        assert_eq!(contexts, original);
+        assert!(first[&0].source.is_explicit());
     }
 
     #[test]

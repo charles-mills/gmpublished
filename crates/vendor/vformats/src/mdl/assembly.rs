@@ -1,18 +1,10 @@
-//! Geometry assembly: `.mdl` + `.vvd` + `.vtx` into render-ready meshes.
-//!
-//! - Triangle winding is flipped once here: strip decoding yields
-//!   triangles wound opposite to brush geometry under a Cw-front
-//!   convention.
-//! - Static props keep stored vertices: every bone skins as identity.
-//! - Skinning uses `pose_chain * pose_to_bone`, with a near-identity
-//!   snap so pose==bind models keep exact stored vertices.
-//! - A single-frame first animation is the rest pose and overrides
-//!   bind locals per bone. A rest-pose channel missing its rotation
-//!   or position falls back to the bone's BIND values.
-//! - Malformed per-vertex data degrades to the stored vertex and is
-//!   counted in [`MdlStats`].
+//! LOD-0 model assembly and Source bone transforms.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+mod animation;
+pub use animation::{ModelAnimation, ModelAnimationError, ModelPose, ModelSequence};
 
 use super::MdlError;
 use super::studio::{FLAG_STATIC_PROP, Mdl, MdlAnimation};
@@ -39,6 +31,8 @@ pub struct ModelSourceVertexFrame {
 /// Assembled model geometry (LOD 0).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelData {
+    /// Shared authored skeleton and animation clips.
+    pub animation: Option<Arc<ModelAnimation>>,
     /// Physical stream representation used for assembled vertices.
     pub vertex_compression: VertexCompression,
     /// Authored frames retained independently of physical stream encoding.
@@ -104,6 +98,8 @@ pub struct ModelAttachment {
 /// One renderable mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
+    /// Unposed physical vertices and original VVD influences.
+    pub skin_vertices: Vec<ModelSkinVertex>,
     /// Deduplicated vertices, first-use order.
     pub vertices: Vec<ModelVertex>,
     /// VHV hardware vertex identity, parallel to [`vertices`](Self::vertices).
@@ -153,6 +149,18 @@ pub struct ModelVertex {
     pub tangent_sign: f32,
     /// Texture coordinates.
     pub uv: [f32; 2],
+}
+
+/// Unposed vertex with at most three authored bone influences.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelSkinVertex {
+    pub vertex: ModelVertex,
+    pub bones: [u32; 3],
+    /// Original weights, without normalization.
+    pub weights: [f32; 3],
+    /// Zero selects the stored vertex fallback.
+    pub bone_count: u32,
 }
 
 /// Assembly result: geometry plus lossy-degradation accounting.
@@ -352,6 +360,9 @@ fn assemble_impl(
         stats.note(AssemblySkip::MeshCountMismatch);
     }
 
+    let animation = (!static_prop && !mdl.sequences.is_empty())
+        .then(|| ModelAnimation::from_mdl(mdl).map(Arc::new))
+        .transpose()?;
     let mut meshes = Vec::new();
     for ((group, choice, model_offset, mdl_mesh), (vtx_mesh, lighting_base)) in
         mdl_meshes.into_iter().zip(vtx_meshes)
@@ -365,6 +376,7 @@ fn assemble_impl(
 
         let mut local_indices = BTreeMap::<(usize, usize), u32>::new();
         let mut vertices = Vec::new();
+        let mut skin_vertices = Vec::new();
         let mut vertex_lighting = Vec::new();
         let mut indices = Vec::new();
         let base_offset = vertex_base_offset(model_offset, mdl_mesh.vertex_offset)?;
@@ -407,6 +419,9 @@ fn assemble_impl(
                             let local_index = u32::try_from(vertices.len())
                                 .map_err(|_| MdlError::TooManyVertices)?;
                             vertices.push(*source_vertex);
+                            if animation.is_some() {
+                                skin_vertices.push(geometry.skin_vertices[source_index]);
+                            }
                             vertex_lighting.push(ModelLightingVertex {
                                 mesh: lighting_base + strip_group_index,
                                 vertex: pool_value,
@@ -420,6 +435,7 @@ fn assemble_impl(
         }
         flip_triangle_winding(&mut indices);
         meshes.push(MeshData {
+            skin_vertices,
             vertices,
             vertex_lighting,
             indices,
@@ -434,6 +450,7 @@ fn assemble_impl(
 
     Ok(ModelRead {
         model: ModelData {
+            animation,
             vertex_compression: options.vertex_compression,
             source_frames: vvd
                 .vertices
@@ -489,14 +506,13 @@ fn flip_triangle_winding(indices: &mut [u32]) {
 }
 
 struct PreparedModelGeometry {
+    skin_vertices: Vec<ModelSkinVertex>,
     vertices: Vec<ModelVertex>,
     attachments: Vec<ModelAttachment>,
     bounds: ([f32; 3], [f32; 3]),
 }
 
-/// Column-major 4x4 affine transform. Source stores `pose_to_bone` as a
-/// row-major 3x4 matrix; convert at that boundary and keep all internal
-/// affine math in this one convention.
+/// Column-major; Source inverse bind rows convert at the boundary.
 type Mat4 = [[f32; 4]; 4];
 
 const MAT4_IDENTITY: Mat4 = [
@@ -509,11 +525,10 @@ const MAT4_IDENTITY: Mat4 = [
 const IDENTITY_SNAP_EPSILON: f32 = 1.0e-3;
 const QUAT_UNIT_EPSILON: f32 = 1.0e-3;
 
-/// Unit quaternion as `[w, x, y, z]` (internal convention; the studio
-/// file stores `[x, y, z, w]`).
+/// `[w, x, y, z]`; studio files store `[x, y, z, w]`.
 type Quat = [f32; 4];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct LocalBonePose {
     position: [f32; 3],
     rotation: Quat,
@@ -576,6 +591,8 @@ fn prepare_model_geometry_with_options(
             })
         })
         .collect::<Result<Vec<_>, MdlError>>()?;
+    let retain_skin = !static_prop && !mdl.sequences.is_empty();
+    let mut skin_vertices = Vec::with_capacity(if retain_skin { vvd.vertices.len() } else { 0 });
     let vertices: Vec<ModelVertex> = vvd
         .vertices
         .iter()
@@ -587,11 +604,40 @@ fn prepare_model_geometry_with_options(
                 physical.normal = source_ubyte4_vector(vertex.normal).unwrap_or(vertex.normal);
                 tangent = tangent.map(|frame| source_ubyte4_tangent(frame).unwrap_or(frame));
             }
+            if retain_skin {
+                let mut raw = physical;
+                raw.bone_count = 0;
+                let raw_vertex = model_vertex(&[], &raw, tangent, &mut MdlStats::default());
+                let count = usize::from(physical.bone_count);
+                let valid = (1..=3).contains(&count)
+                    && physical.weights[..count]
+                        .iter()
+                        .all(|w| w.is_finite() && *w >= 0.0)
+                    && physical.weights[..count].iter().sum::<f32>().is_finite()
+                    && physical.weights[..count].iter().sum::<f32>() > f32::EPSILON
+                    && (0..count).all(|i| {
+                        physical.weights[i] <= f32::EPSILON
+                            || usize::from(physical.bones[i]) < bones.len()
+                    })
+                    && array_is_finite(physical.position)
+                    && array_is_finite(physical.normal);
+                skin_vertices.push(ModelSkinVertex {
+                    vertex: raw_vertex,
+                    bones: physical.bones.map(u32::from),
+                    weights: physical.weights,
+                    bone_count: if valid {
+                        u32::from(physical.bone_count)
+                    } else {
+                        0
+                    },
+                });
+            }
             model_vertex(&bone_transforms, &physical, tangent, stats)
         })
         .collect();
     let bounds = bounds_from_vertices(&vertices);
     Ok(PreparedModelGeometry {
+        skin_vertices,
         vertices,
         attachments,
         bounds,
@@ -632,8 +678,6 @@ fn rest_animation_local_overrides(
     overrides
 }
 
-/// Deliberate divergence: a channel missing rotation or position uses
-/// the bone's bind value for the missing component.
 fn rest_channel_pose(
     bone: &super::studio::MdlBone,
     animation: &MdlAnimation,

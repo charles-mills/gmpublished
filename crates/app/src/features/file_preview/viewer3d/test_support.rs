@@ -24,6 +24,8 @@ fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
 
 pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {
     MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         texture_preparation: Default::default(),
         prop_geometry: Default::default(),
         renderables: Vec::new(),

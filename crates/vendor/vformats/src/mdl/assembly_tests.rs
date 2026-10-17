@@ -25,7 +25,10 @@ fn bone(name: &str, parent: i32, pos: [f32; 3], quat_wxyz: Quat, pose_to_bone: M
         rotation: [0.0; 3],
         position_scale: [0.0; 3],
         rotation_scale: [0.0; 3],
+        quaternion_alignment: wxyz_to_stored(quat_wxyz),
+        flags: 0,
         pose_to_bone: mat4_to_pose_to_bone_rows(pose_to_bone),
+        procedural_kind: 0,
     }
 }
 
@@ -103,6 +106,10 @@ fn mdl_with(
         body_parts: Vec::<MdlBodyPart>::new(),
         local_animations: animations,
         sequence_count: 0,
+        sequences: Vec::new(),
+        included_model_count: 0,
+        bone_controller_count: 0,
+        flex_descriptor_count: 0,
     }
 }
 
@@ -127,6 +134,12 @@ fn rest_desc(animations: Vec<MdlAnimation>, frame_count: usize) -> MdlAnimationD
     MdlAnimationDescription {
         name: "@idle".into(),
         fps: 30.0,
+        flags: 0,
+        sections: Vec::new(),
+        section_frames: 0,
+        external_block: None,
+        hierarchy_count: 0,
+        ik_rule_count: 0,
         frame_count,
         animations,
     }

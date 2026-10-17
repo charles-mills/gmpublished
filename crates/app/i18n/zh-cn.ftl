@@ -362,6 +362,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = 网格
 file-preview-model-bones = 骨骼
 file-preview-model-sequences = 序列
+file-preview-animation-unavailable = 动画不可用
 file-preview-model-vertices = 顶点
 file-preview-model-triangles = 三角形
 file-preview-model-materials = 已解析材质

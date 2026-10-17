@@ -91,7 +91,7 @@ fn raw_selection_preserves_authored_prefix_skip_counts_and_lookup_order() {
     assert_eq!(
         raw_selected.skip_stats,
         PropBakeSkipStats {
-            hidden_render_mode: 1,
+            hidden_placement: 1,
             placement_cap: 1,
             triangle_cap: 2,
             invalid_model_path: 1,
@@ -188,7 +188,7 @@ fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() 
         Instant::now(),
     );
     assert_eq!(baked.placed_count, 1);
-    assert_eq!(baked.skip_stats.hidden_render_mode, 1);
+    assert_eq!(baked.skip_stats.hidden_placement, 1);
     assert_eq!(baked.skip_stats.triangle_cap, 2);
     assert_eq!(baked.model_lighting.len(), 1);
     assert_eq!(baked.meshes[0].vertices[0].lighting_context, 1);
@@ -407,7 +407,9 @@ fn door(path: &str, mode: i32) -> MapDoor {
             open_direction: MapDoorOpenDirection::Both,
         },
         sounds: Default::default(),
-        geometry: MapDoorGeometry::Prop { placement },
+        geometry: MapDoorGeometry::Prop {
+            placement: Box::new(placement),
+        },
     }
 }
 

@@ -25,6 +25,7 @@ pub struct SharedResources {
     #[cfg(any(test, feature = "map-capture"))]
     pub(super) clip_mode: super::clipping::ClipMode,
     pub(super) texture_uploader: super::texture_upload::SharedUploader,
+    pub(super) skinning: std::sync::OnceLock<super::skinning::Resources>,
     model_shader: wgpu::ShaderModule,
     detail_shader: wgpu::ShaderModule,
     water_shader: wgpu::ShaderModule,
@@ -390,6 +391,7 @@ impl SharedResources {
             #[cfg(any(test, feature = "map-capture"))]
             clip_mode,
             texture_uploader,
+            skinning: std::sync::OnceLock::new(),
             _fallback_allocations: vec![
                 surface_white_allocation,
                 flat_normal_allocation,

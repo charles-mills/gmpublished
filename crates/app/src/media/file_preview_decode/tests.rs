@@ -1319,7 +1319,13 @@ fn prop_bake_applies_skin_table_to_material_slot() {
         &mut meshes
     ));
 
-    let mesh = meshes.get(&(11, false)).expect("skin remapped material");
+    let mesh = meshes
+        .get(&map_preview::PropMeshDestination {
+            material_index: 11,
+            entity: false,
+            animation_instance: None,
+        })
+        .expect("skin remapped material");
     assert_eq!(mesh.indices, vec![0, 1, 2]);
     assert_vec3_close(mesh.vertices[0].position, Vec3::new(10.0, 21.0, 30.0));
     assert_eq!(mesh.vertices[0].lightmap_uv, [0.0; 2]);
@@ -1349,7 +1355,13 @@ fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
         &mut meshes
     ));
 
-    let mesh = meshes.get(&(0, false)).expect("material mesh");
+    let mesh = meshes
+        .get(&map_preview::PropMeshDestination {
+            material_index: 0,
+            entity: false,
+            animation_instance: None,
+        })
+        .expect("material mesh");
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for vertex in &mesh.vertices {
@@ -1424,7 +1436,8 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
                 Vec3::splat(0.0),
                 Vec3::splat(0.0),
                 1,
-            ),
+            )
+            .into(),
         },
     };
 
@@ -2055,6 +2068,8 @@ fn prop_placement_with_visibility(
 ) -> StaticPropPlacement {
     StaticPropPlacement {
         entity: false,
+        initially_visible: true,
+        animation: None,
         leaf_membership: gmpublished_domain::scene::map::MapPropLeafMembership::SpatialBounds,
         static_prop_index: None,
         lighting_origin: None,
@@ -2077,6 +2092,8 @@ fn prop_placement_with_visibility(
 pub(super) fn test_prop_asset(material_indices: Vec<usize>) -> PropModelAsset {
     PropModelAsset {
         model: Arc::new(ModelData {
+            animation: None,
+            skin_vertices: Vec::new(),
             mdl_flags: 0,
             vertex_compression: vformats::mdl::VertexCompression::None,
             illumination_position: Vec3::ZERO,
@@ -2122,6 +2139,8 @@ fn test_loaded_prop_model(
     let material_count = material_names.len();
     LoadedPropModel {
         model: Arc::new(ModelData {
+            animation: None,
+            skin_vertices: Vec::new(),
             mdl_flags: 0,
             vertex_compression: vformats::mdl::VertexCompression::None,
             illumination_position: Vec3::ZERO,

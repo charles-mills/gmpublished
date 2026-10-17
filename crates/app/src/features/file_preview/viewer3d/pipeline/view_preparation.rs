@@ -147,6 +147,7 @@ pub(super) struct QueueCache {
     visibility_revision: u64,
     skybox_visibility_revision: u64,
     geometry_revision: u64,
+    animation_revision: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -186,7 +187,8 @@ impl QueueCache {
             && self.groups == Some(groups)
             && self.visibility_revision == visibility_revision
             && self.skybox_visibility_revision == skybox_visibility_revision
-            && self.geometry_revision == upload.geometry_revision();
+            && self.geometry_revision == upload.geometry_revision()
+            && self.animation_revision == upload.animation_revision(plans);
         if !unchanged {
             *self = Self {
                 assets,
@@ -197,6 +199,7 @@ impl QueueCache {
                 visibility_revision,
                 skybox_visibility_revision,
                 geometry_revision: upload.geometry_revision(),
+                animation_revision: upload.animation_revision(plans),
             };
         }
         !unchanged

@@ -362,6 +362,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = 메시
 file-preview-model-bones = 본
 file-preview-model-sequences = 시퀀스
+file-preview-animation-unavailable = 애니메이션을 사용할 수 없음
 file-preview-model-vertices = 버텍스
 file-preview-model-triangles = 삼각형
 file-preview-model-materials = 해결된 머티리얼

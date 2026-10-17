@@ -119,6 +119,8 @@ mod tests {
         StaticPropPlacement {
             leaf_membership: gmpublished_domain::scene::map::MapPropLeafMembership::SpatialBounds,
             entity,
+            initially_visible: true,
+            animation: None,
             static_prop_index: None,
             lighting_origin: None,
             lighting_origin_reference: None,

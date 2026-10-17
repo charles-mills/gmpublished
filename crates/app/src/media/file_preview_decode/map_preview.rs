@@ -42,6 +42,8 @@ mod surface_lighting;
 pub(super) use static_decals::StaticDecalRegistry;
 mod materials;
 mod prop_geometry;
+#[cfg(test)]
+pub(super) use prop_geometry::Destination as PropMeshDestination;
 mod props;
 mod runtime_lighting;
 mod world_geometry;
@@ -568,6 +570,36 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
             }
         }
     }
+    let mut model_animations = prop_bake.model_animations;
+    for instance in &mut model_animations {
+        for binding in &mut instance.bindings {
+            if let gmpublished_domain::scene::map::MapReceiverMesh::World(index) =
+                &mut binding.receiver_mesh
+            {
+                *index += meshes.len();
+            }
+        }
+    }
+    for mut instance in skybox_prop_bake.model_animations {
+        if let Some(id) = instance.lighting_context {
+            instance.lighting_context =
+                crate::media::preview_model::ModelLightingContextId::from_index(
+                    id.index() + sky_context_offset as usize,
+                );
+        }
+        for binding in &mut instance.bindings {
+            if let gmpublished_domain::scene::map::MapReceiverMesh::World(index) =
+                binding.receiver_mesh
+            {
+                binding.receiver_mesh = gmpublished_domain::scene::map::MapReceiverMesh::Skybox(
+                    index + map_skybox_meshes.len(),
+                );
+            }
+        }
+        model_animations.push(instance);
+    }
+    let mut model_animation_issues = prop_bake.model_animation_issues;
+    model_animation_issues.extend(skybox_prop_bake.model_animation_issues);
     let mut model_lighting = prop_bake.model_lighting;
     model_lighting.extend(skybox_prop_bake.model_lighting);
     model_lighting_inputs.seed_entities(&mut model_lighting);
@@ -670,6 +702,8 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
             displacement_batches::prepare(visibility, layout)
         });
     let scene = Arc::new(MapPreview {
+        model_animations,
+        model_animation_issues,
         texture_preparation: crate::media::preview_model::MapTexturePreparation {
             archive_indexes: material_resolver.archive_index_stats(),
             source_discovery: material_resolver.source_discovery_stats().clone(),

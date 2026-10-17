@@ -118,6 +118,7 @@ pub fn inspect_layout(
 
 impl VtfLayout {
     /// Authored metadata, unaffected by resident frame or mip selection.
+    #[must_use]
     pub fn header(&self) -> VtfHeader {
         self.header.clone()
     }

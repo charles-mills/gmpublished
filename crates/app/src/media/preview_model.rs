@@ -9,6 +9,8 @@ use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
 #[path = "geometry_diagnostics.rs"]
 mod geometry_diagnostics;
+#[path = "model_animation.rs"]
+mod model_animation;
 #[path = "model_lighting.rs"]
 mod model_lighting;
 pub use geometry_diagnostics::{
@@ -19,10 +21,16 @@ pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapTrace,
     MapVisibility, MapVisibilityBucket, MapWalkCollision,
 };
+pub use model_animation::{
+    ModelAnimationBinding, ModelAnimationInstance, ModelAnimationIssue, ModelAnimationPlayback,
+    ModelAnimationPlaybackError, ModelAnimationPlaybackMode, ModelAnimationPreparationError,
+};
+pub use model_animation::{animation_local_bounds, model_preview_animations};
 pub use model_lighting::{
-    MODEL_LOCAL_LIGHT_LIMIT, ModelLightKind, ModelLightingContext, ModelLightingFallbackReason,
-    ModelLightingHistory, ModelLightingSceneInputs, ModelLightingSnapshot, ModelLightingSource,
-    ModelLocalLight, placement_sample_point, placement_static_bounds,
+    MODEL_LOCAL_LIGHT_LIMIT, ModelLightKind, ModelLightingContext, ModelLightingDynamicCache,
+    ModelLightingFallbackReason, ModelLightingHistory, ModelLightingSceneInputs,
+    ModelLightingSnapshot, ModelLightingSource, ModelLocalLight, placement_sample_point,
+    placement_static_bounds,
 };
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreviewLoadError {
@@ -159,6 +167,8 @@ impl From<&vformats::mdl::MeshData> for MeshData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelData {
+    pub animation: Option<Arc<vformats::mdl::ModelAnimation>>,
+    pub skin_vertices: Vec<Arc<[vformats::mdl::ModelSkinVertex]>>,
     pub mdl_flags: u32,
     pub vertex_compression: vformats::mdl::VertexCompression,
     pub illumination_position: Vec3,
@@ -198,6 +208,12 @@ pub struct ModelLightingData {
 impl From<vformats::mdl::ModelData> for ModelData {
     fn from(model: vformats::mdl::ModelData) -> Self {
         Self {
+            animation: model.animation,
+            skin_vertices: model
+                .meshes
+                .iter()
+                .map(|mesh| Arc::from(mesh.skin_vertices.as_slice()))
+                .collect(),
             mdl_flags: model.mdl_flags,
             illumination_position: Vec3::from(model.illumination_position),
             hull_min: Vec3::from(model.hull_min),
@@ -408,6 +424,8 @@ pub struct RenderScene {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelPreview {
+    pub(crate) model_animations: Vec<ModelAnimationInstance>,
+    pub(crate) model_animation_issues: Vec<ModelAnimationIssue>,
     pub(crate) scene: Arc<RenderScene>,
     pub(crate) skin_tables: Vec<Vec<u16>>,
     pub(crate) bodygroups: Vec<usize>,
@@ -440,6 +458,8 @@ pub struct MapTexturePreparation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapPreview {
+    pub(crate) model_animations: Vec<ModelAnimationInstance>,
+    pub(crate) model_animation_issues: Vec<ModelAnimationIssue>,
     pub(crate) texture_preparation: MapTexturePreparation,
     pub(crate) prop_geometry: PropGeometrySummary,
     pub(crate) renderables: Vec<PreparedMapRenderable>,
@@ -1043,6 +1063,8 @@ mod tests {
 
     fn preview(mesh_visibility: Vec<MapMeshVisibility>) -> MapPreview {
         MapPreview {
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             texture_preparation: MapTexturePreparation::default(),
             prop_geometry: PropGeometrySummary::default(),
             renderables: Vec::new(),

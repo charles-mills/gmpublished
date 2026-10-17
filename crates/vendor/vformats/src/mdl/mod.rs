@@ -5,20 +5,17 @@
 //!
 //! Parse with [`parse_mdl`], [`parse_vvd`], and [`parse_vtx`], then
 //! [`assemble`] LOD-0 render geometry from the three. Raw struct
-//! layouts follow the `vmdl` crate (MIT, © icewind1991) with two known
-//! upstream defects corrected at the source instead of worked around:
-//! `BoneWeights::weights()` divides by bone count (the VVD-authored raw
-//! weights are what the engine blends), and `RadianEuler` quaternion
-//! conversion flips 180° on some bones (this module converts via the
-//! studiomdl convention).
+//! layouts follow the `vmdl` crate (MIT, © icewind1991). Bone blending
+//! uses authored VVD weights and Source studiomdl Euler conventions.
 
 use std::fmt;
 
 mod assembly;
 pub use assembly::{
-    AssemblySkip, MdlStats, MeshData, ModelAssemblyOptions, ModelAttachment, ModelData,
-    ModelLightingMesh, ModelLightingVertex, ModelRead, ModelSourceVertexFrame, ModelVertex,
-    assemble, assemble_lossy, assemble_lossy_with_options,
+    AssemblySkip, MdlStats, MeshData, ModelAnimation, ModelAnimationError, ModelAssemblyOptions,
+    ModelAttachment, ModelData, ModelLightingMesh, ModelLightingVertex, ModelPose, ModelRead,
+    ModelSequence, ModelSkinVertex, ModelSourceVertexFrame, ModelVertex, assemble, assemble_lossy,
+    assemble_lossy_with_options,
 };
 
 mod vertex_compression;
@@ -34,8 +31,8 @@ mod linear_bones;
 mod studio;
 pub use linear_bones::MdlLinearBones;
 pub use studio::{
-    FLAG_STATIC_PROP, Mdl, MdlAnimation, MdlAnimationDescription, MdlBodyPart, MdlBone, MdlMesh,
-    MdlModel, parse_mdl,
+    FLAG_STATIC_PROP, Mdl, MdlAnimation, MdlAnimationDescription, MdlAnimationSection, MdlBodyPart,
+    MdlBone, MdlMesh, MdlModel, MdlSequence, parse_mdl,
 };
 
 mod vtx;

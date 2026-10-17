@@ -513,6 +513,8 @@ fn loaded_map_state() -> State {
     let mut state = State::default();
     let request = state.begin_open(map_request());
     let scene = Arc::new(MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         texture_preparation: Default::default(),
         prop_geometry: Default::default(),
         renderables: Vec::new(),

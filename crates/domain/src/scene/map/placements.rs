@@ -53,6 +53,8 @@ pub(super) fn partitioned_static_prop_placements(
             let visibility = static_prop_leaf_visibility(bsp, prop, &leaves, cluster_count);
             Some(StaticPropPlacement {
                 entity: false,
+                initially_visible: true,
+                animation: None,
                 static_prop_index: Some(index),
                 lighting_origin: (prop.flags & STATIC_PROP_USE_LIGHTING_ORIGIN != 0)
                     .then_some(Vec3::from(prop.lighting_origin))
@@ -147,12 +149,21 @@ fn static_prop_leaf_visibility(
 }
 
 const ENTITY_PROP_CLASSNAMES: &[&str] = &[
+    "dynamic_prop",
     "prop_dynamic",
     "prop_dynamic_override",
     "prop_physics",
     "prop_physics_multiplayer",
     "prop_physics_override",
 ];
+
+const EFFECT_NO_DRAW: i32 = 0x20;
+
+fn is_dynamic_prop(classname: &str) -> bool {
+    ["prop_dynamic", "prop_dynamic_override", "dynamic_prop"]
+        .iter()
+        .any(|expected| classname.eq_ignore_ascii_case(expected))
+}
 
 pub(super) fn partitioned_entity_prop_placements(
     bsp: &MapBsp,
@@ -161,7 +172,7 @@ pub(super) fn partitioned_entity_prop_placements(
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
     let cluster_count = bsp.cluster_count();
-    for entity in bsp.entities.iter() {
+    for (entity_index, entity) in bsp.entities.iter().enumerate() {
         let Some(classname) = entity.prop("classname").filter(|classname| {
             ENTITY_PROP_CLASSNAMES
                 .iter()
@@ -169,7 +180,9 @@ pub(super) fn partitioned_entity_prop_placements(
         }) else {
             continue;
         };
-        let Some(placement) = entity_prop_placement(entity, classname, bsp, cluster_count) else {
+        let Some(placement) =
+            entity_prop_placement(entity, entity_index, classname, bsp, cluster_count)
+        else {
             continue;
         };
         if entity.prop("parentname").is_some()
@@ -190,6 +203,7 @@ pub(super) fn partitioned_entity_prop_placements(
 
 fn entity_prop_placement(
     entity: &MapEntity,
+    entity_index: usize,
     classname: &str,
     bsp: &MapBsp,
     cluster_count: u32,
@@ -230,6 +244,18 @@ fn entity_prop_placement(
     let (lighting_origin, lighting_origin_reference) = entity_lighting_origin(entity, bsp);
     Some(StaticPropPlacement {
         entity: true,
+        initially_visible: entity
+            .prop("effects")
+            .and_then(parse_entity_i32)
+            .unwrap_or(0)
+            & EFFECT_NO_DRAW
+            == 0
+            && !(is_dynamic_prop(classname)
+                && entity
+                    .prop("startdisabled")
+                    .and_then(super::parse_entity_bool)
+                    .unwrap_or(false)),
+        animation: entity_prop_animation(entity, entity_index, classname),
         static_prop_index: None,
         lighting_origin,
         lighting_origin_reference,
@@ -249,6 +275,56 @@ fn entity_prop_placement(
         solid,
         leaf_membership: MapPropLeafMembership::SpatialBounds,
         visibility: point_visibility_bucket(bsp, origin, cluster_count).into(),
+    })
+}
+
+fn entity_prop_animation(
+    entity: &MapEntity,
+    entity_index: usize,
+    classname: &str,
+) -> Option<super::MapPropAnimation> {
+    if !is_dynamic_prop(classname) {
+        return None;
+    }
+    let default_sequence = entity
+        .prop("defaultanim")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let sequence_index = entity
+        .prop("sequence")
+        .and_then(parse_entity_i32)
+        .and_then(|index| usize::try_from(index).ok());
+    let random = entity
+        .prop("randomanimation")
+        .and_then(parse_entity_i32)
+        .filter(|value| *value != 0)
+        .map(|_| super::MapPropRandomAnimation {
+            minimum_interval: entity
+                .prop("minanimtime")
+                .and_then(super::parse_entity_float)
+                .unwrap_or(5.0),
+            maximum_interval: entity
+                .prop("maxanimtime")
+                .and_then(super::parse_entity_float)
+                .unwrap_or(10.0),
+        });
+    if default_sequence.is_none() && sequence_index.is_none() && random.is_none() {
+        return None;
+    }
+    Some(super::MapPropAnimation {
+        entity_index,
+        hammer_id: entity.prop("hammerid").and_then(|value| value.parse().ok()),
+        default_sequence,
+        sequence_index: sequence_index.unwrap_or(0),
+        initial_cycle: entity
+            .prop("cycle")
+            .and_then(super::parse_entity_float)
+            .unwrap_or(0.0),
+        playback_rate: entity
+            .prop("playbackrate")
+            .and_then(super::parse_entity_float)
+            .unwrap_or(1.0),
+        random,
     })
 }
 

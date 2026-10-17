@@ -833,6 +833,14 @@ fn model_inspector_rows<'a>(
         rows = rows.push(warning);
     }
 
+    if !model.model_animation_issues.is_empty() {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-animation-unavailable"),
+            count_text(u32::try_from(model.model_animation_issues.len()).unwrap_or(u32::MAX)),
+            &tokens,
+        ));
+    }
+
     if model.scene.materials.iter().any(|slot| {
         matches!(
             slot.resolution,
@@ -1453,6 +1461,13 @@ fn map_inspector_rows<'a>(
             .style(move |_, status| theme::styles::checkbox(&tokens, status)),
     );
     let preparation = &map.scene.texture_preparation;
+    if !map.scene.model_animation_issues.is_empty() {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-animation-unavailable"),
+            count_text(u32::try_from(map.scene.model_animation_issues.len()).unwrap_or(u32::MAX)),
+            &tokens,
+        ));
+    }
     if let Some(warning) = gpu_status_warning(state, ctx) {
         rows = rows.push(warning);
     }

@@ -56,6 +56,7 @@ impl MdlLinearBones {
             .enumerate()
             .map(|(i, bone)| MdlBone {
                 name: bone.name.clone(),
+                procedural_kind: bone.procedural_kind,
                 parent: self.parents[i],
                 position: self.positions[i],
                 quaternion: self.quaternions[i],
@@ -63,6 +64,8 @@ impl MdlLinearBones {
                 position_scale: self.position_scales[i],
                 rotation_scale: self.rotation_scales[i],
                 pose_to_bone: self.pose_to_bone[i],
+                quaternion_alignment: self.quaternion_alignment[i],
+                flags: self.flags[i],
             })
             .collect())
     }

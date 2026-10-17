@@ -689,9 +689,15 @@ fn model_preview_data(
     }
 
     request.cancellation.check()?;
+    let (model_animations, model_animation_issues) =
+        crate::media::preview_model::model_preview_animations(&model, &request.entry_path);
+    let (bounds_min, bounds_max) = crate::media::preview_model::animation_local_bounds(&model)
+        .unwrap_or((model.bounds_min, model.bounds_max));
     Ok(PreviewData::from_request(
         request,
         PreviewContent::Model(std::sync::Arc::new(ModelPreview {
+            model_animations,
+            model_animation_issues,
             scene: std::sync::Arc::new(RenderScene {
                 stats: ModelStats {
                     bone_count: model.bone_count,
@@ -705,8 +711,8 @@ fn model_preview_data(
                 meshes: model.meshes,
                 materials,
                 phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
-                bounds_min: model.bounds_min,
-                bounds_max: model.bounds_max,
+                bounds_min,
+                bounds_max,
             }),
             skin_tables: model.skin_tables,
             bodygroups: model.bodygroups,

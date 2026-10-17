@@ -65,7 +65,7 @@ pub enum MapDoorGeometry {
         meshes: Vec<MapMesh>,
     },
     Prop {
-        placement: StaticPropPlacement,
+        placement: Box<StaticPropPlacement>,
     },
 }
 
@@ -166,9 +166,7 @@ impl PendingDoorBuild {
                 initial_progress: self.door.initial_progress,
                 motion: self.door.motion,
                 sounds: self.door.sounds,
-                geometry: MapDoorGeometry::Prop {
-                    placement: *placement,
-                },
+                geometry: MapDoorGeometry::Prop { placement },
             }),
         }
     }
@@ -383,6 +381,8 @@ fn pending_prop_door(
     let visibility = point_visibility_bucket(bsp, origin, cluster_count);
     let placement = StaticPropPlacement {
         entity: true,
+        initially_visible: true,
+        animation: None,
         static_prop_index: None,
         lighting_origin: None,
         lighting_origin_reference: None,

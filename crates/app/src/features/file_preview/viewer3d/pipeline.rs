@@ -47,6 +47,7 @@ mod resources;
 mod samplers;
 pub(super) mod sampling;
 mod screen_refraction;
+mod skinning;
 mod sky;
 mod sun;
 mod surface;
@@ -72,6 +73,10 @@ pub(super) use texture_upload::configured_policy as capture_texture_upload_polic
 pub(super) fn capture_sampler_quality() -> serde_json::Value {
     serde_json::to_value(samplers::quality_profile()).expect("serialize sampler quality")
 }
+#[cfg(feature = "map-capture")]
+pub(super) use skinning::{
+    Phase as ModelAnimationPhase, PhaseOverrides as ModelAnimationPhaseOverrides,
+};
 pub use uniforms::Uniforms;
 #[cfg(feature = "map-capture")]
 pub(super) use uniforms::{Diagnostic, DiagnosticMode};
@@ -106,6 +111,13 @@ impl PreviewScene {
         }
     }
 
+    fn model_animations(&self) -> &[crate::media::preview_model::ModelAnimationInstance] {
+        match self {
+            Self::Model(model) => &model.model_animations,
+            Self::Map(map) => &map.model_animations,
+        }
+    }
+
     fn render_scene(&self) -> &RenderScene {
         match self {
             Self::Model(model) => &model.scene,
@@ -129,6 +141,8 @@ impl PreviewScene {
 pub struct ModelPrimitive {
     pub(super) render_feedback: Option<Arc<super::feedback::RenderFeedback>>,
     pub(super) model_lighting_time: f64,
+    #[cfg(feature = "map-capture")]
+    pub(super) model_animation_phases: Option<Arc<ModelAnimationPhaseOverrides>>,
     pub(super) animation_clock: crate::bridge::materials::AnimationClock,
     #[cfg(feature = "map-capture")]
     pub(super) exact_texture_frame: bool,
@@ -184,6 +198,7 @@ pub struct PreparedFrame {
     binding_request: Option<bindings::FrameRequest>,
     lightmap_request: Option<lightmaps::Request>,
     lightmap_demand_cache: lightmap_demand::Cache,
+    animation_demand_cache: skinning::DemandCache,
     feedback: Option<Arc<super::feedback::RenderFeedback>>,
     pending_clock: Option<(crate::bridge::materials::AnimationClock, f32)>,
 }
@@ -363,6 +378,7 @@ impl shader::Primitive for ModelPrimitive {
                 binding_request: None,
                 lightmap_request: None,
                 lightmap_demand_cache: lightmap_demand::Cache::default(),
+                animation_demand_cache: skinning::DemandCache::default(),
                 feedback: self.render_feedback.clone(),
                 pending_clock: None,
             });
@@ -755,12 +771,47 @@ impl shader::Primitive for ModelPrimitive {
             }
             surface.surface_uniforms.write(queue, &uniforms);
         }
-        let upload = &frame.scene;
         #[cfg(feature = "map-capture")]
         let lighting_span = self
             .capture_diagnostics
             .as_ref()
             .and_then(|observer| observer.span(super::capture::Phase::Lighting));
+        let mut animation_demand_cache = std::mem::take(&mut frame.animation_demand_cache);
+        let animated_instances = animation_demand_cache.collect(frame);
+        frame.animation_demand_cache = animation_demand_cache;
+        let animation_phases = {
+            #[cfg(feature = "map-capture")]
+            {
+                self.model_animation_phases.as_deref()
+            }
+            #[cfg(not(feature = "map-capture"))]
+            {
+                None
+            }
+        };
+        if let Err(error) = animated_instances.and_then(|animated_instances| {
+            frame.scene.update_animations(
+                device,
+                queue,
+                &pipeline.resources,
+                &animated_instances,
+                self.animation_clock.time_seconds,
+                animation_phases,
+            )
+        }) {
+            frame.readiness = Readiness::Rejected;
+            frame.binding_request = None;
+            frame.lightmap_request = None;
+            frame.presentation.clear();
+            frame.screen_overlay = None;
+            if let Some(feedback) = &frame.feedback {
+                feedback.set(super::feedback::RenderStatus::Rejected {
+                    reason: error.to_string(),
+                });
+            }
+            return;
+        }
+        let upload = &frame.scene;
         let lighting_contexts = &mut frame.lighting_contexts;
         lighting_contexts.resize(map.map_or(0, |map| map.model_lighting.len()), false);
         lighting_contexts.fill(false);
@@ -792,6 +843,7 @@ impl shader::Primitive for ModelPrimitive {
             map,
             self.model_lighting_time,
             lighting_contexts,
+            &frame.scene.animation.lighting_origin_updates,
             #[cfg(feature = "map-capture")]
             self.capture_diagnostics.as_ref(),
         );
@@ -998,6 +1050,7 @@ impl shader::Primitive for ModelPrimitive {
             }
             return;
         }
+        frame.scene.encode_animations(&pipeline.resources, encoder);
         #[cfg(feature = "map-capture")]
         if let Some(observer) = self
             .capture_diagnostics
@@ -1005,6 +1058,10 @@ impl shader::Primitive for ModelPrimitive {
             .filter(|observer| observer.recording())
         {
             let mut diagnostics = observer.lock().expect("capture diagnostics lock");
+            diagnostics["animation_state"] = frame
+                .scene
+                .animation
+                .diagnostics(&frame.scene.assets, &frame.scene.meshes);
             diagnostics["page_cache"] = pipeline.bindings.page_diagnostics();
             diagnostics["image_cache"] =
                 serde_json::to_value(pipeline.bindings.stats()).expect("image cache diagnostics");

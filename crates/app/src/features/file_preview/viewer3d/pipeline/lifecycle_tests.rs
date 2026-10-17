@@ -89,6 +89,8 @@ fn model_frames(colors: &[[u8; 3]], mip_count: u8) -> Fixture {
         surface_mark: 0,
     });
     let model = Arc::new(ModelPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         scene: Arc::new(RenderScene {
             meshes: vec![MeshData {
                 geometry: crate::media::preview_model::MeshGeometry::Model,
@@ -141,12 +143,24 @@ enum ClockPolicy {
     Live,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+enum AnimationCapturePass {
+    #[default]
+    Main,
+    Reflection,
+    Refraction,
+    Underwater,
+}
+
 struct ControlledClockView {
     observer: super::super::capture::CaptureDiagnostics,
     viewer: super::super::camera::Viewer3d,
     time: f32,
+    model_lighting_time: Option<f64>,
     policy: ClockPolicy,
     map: Option<Arc<super::super::MapPreview>>,
+    model_animation_phases: Option<Arc<ModelAnimationPhaseOverrides>>,
+    animation_capture_pass: AnimationCapturePass,
 }
 impl iced::widget::shader::Program<crate::features::file_preview::Message> for ControlledClockView {
     type State = super::super::camera::Camera;
@@ -162,10 +176,49 @@ impl iced::widget::shader::Program<crate::features::file_preview::Message> for C
             time_seconds: self.time,
             frame_seconds: 1.0 / 30.0,
         };
-        primitive.model_lighting_time = f64::from(self.time);
+        primitive.model_lighting_time = self
+            .model_lighting_time
+            .unwrap_or_else(|| f64::from(self.time));
         if let Some(map) = &self.map {
             primitive.preview = PreviewScene::Map(Arc::clone(map));
             primitive.uniforms.water_time_sky_tint[0] = self.time;
+        }
+        primitive
+            .model_animation_phases
+            .clone_from(&self.model_animation_phases);
+        primitive.reflection_target = matches!(
+            self.animation_capture_pass,
+            AnimationCapturePass::Reflection
+        );
+        primitive.refraction_target = matches!(
+            self.animation_capture_pass,
+            AnimationCapturePass::Refraction
+        );
+        if matches!(
+            self.animation_capture_pass,
+            AnimationCapturePass::Underwater
+        ) {
+            let scene = &self.viewer.model.scene;
+            let center = mid(scene.bounds_min, scene.bounds_max);
+            let radius = half_extent(scene.bounds_min, scene.bounds_max).max(1.0);
+            let mut eye = Vec3::new(
+                primitive.uniforms.camera_position[0],
+                primitive.uniforms.camera_position[1],
+                primitive.uniforms.camera_position[2],
+            );
+            eye[2] = 2.0 * center[2] - eye[2];
+            let distance = (eye - center).length();
+            primitive.uniforms.view_proj = mat_mul(
+                perspective(
+                    FOV_Y,
+                    bounds.width / bounds.height,
+                    radius * 0.01,
+                    radius * 20.0 + distance,
+                ),
+                look_at(eye, center, SOURCE_UP),
+            );
+            primitive.uniforms.camera_position = [eye[0], eye[1], eye[2], 1.0];
+            primitive.submerged = true;
         }
         primitive.exact_texture_frame = matches!(self.policy, ClockPolicy::Exact);
         primitive.capture_diagnostics = Some(self.observer.clone());
@@ -180,6 +233,9 @@ struct Harness {
     bodygroups: Vec<Vec<usize>>,
     skin_remaps: Vec<Vec<u16>>,
     maps: Vec<Option<Arc<super::super::MapPreview>>>,
+    model_lighting_times: Vec<Option<f64>>,
+    model_animation_phases: Vec<Option<Arc<ModelAnimationPhaseOverrides>>>,
+    animation_capture_passes: Vec<AnimationCapturePass>,
 }
 impl Harness {
     fn draw(&mut self, renderer: &mut iced::Renderer, views: &[View], times: &[f32]) -> Vec<u8> {
@@ -212,8 +268,19 @@ impl Harness {
                 iced::widget::shader(ControlledClockView {
                     observer: observer.clone(),
                     time,
+                    model_lighting_time: self.model_lighting_times.get(index).copied().flatten(),
                     policy,
                     map: self.maps.get(index).cloned().flatten(),
+                    model_animation_phases: self
+                        .model_animation_phases
+                        .get(index)
+                        .cloned()
+                        .flatten(),
+                    animation_capture_pass: self
+                        .animation_capture_passes
+                        .get(index)
+                        .copied()
+                        .unwrap_or_default(),
                     viewer: super::super::camera::Viewer3d {
                         model: Arc::clone(model),
                         render_feedback: Arc::clone(feedback),
@@ -1335,4 +1402,416 @@ fn iced_underwater_pending_slots_preserve_submitted_overlay_and_catch_up_clock()
     let reference = harness.draw(&mut renderer, &views, &[completed_clock, 0.0]);
     assert_pane_equal(&completed, &reference, 0);
     assert_pane_equal(&reference, &initial, 1);
+}
+
+fn animated_pair_preview(combined: &Arc<ModelPreview>) -> Arc<super::super::MapPreview> {
+    use crate::media::preview_model::{
+        ModelAnimationBinding, ModelAnimationInstance, ModelAnimationPlayback,
+    };
+    use gmpublished_domain::scene::map::MapReceiverMesh;
+    let rig = gmpublished_domain::scene::model::animation_for_tests();
+    let raw: Arc<[_]> = [(-4., -4.), (4., -4.), (4., 4.), (-4., 4.)]
+        .map(|(x, y)| vformats::mdl::ModelSkinVertex {
+            vertex: vformats::mdl::ModelVertex {
+                position: [x, y, 0.],
+                normal: [0., 0., 1.],
+                tangent_s: [1., 0., 0.],
+                tangent_t: [0., 1., 0.],
+                tangent_sign: 1.,
+                uv: [x, y],
+            },
+            bones: [0, 0, 0],
+            weights: [1., 0., 0.],
+            bone_count: 1,
+        })
+        .into();
+    let mut map = super::super::test_support::empty_preview(
+        combined.scene.bounds_min,
+        combined.scene.bounds_max,
+    );
+    map.scene = Arc::clone(&combined.scene);
+    let scene = Arc::make_mut(&mut map.scene);
+    for (index, mesh) in scene.meshes.iter_mut().enumerate() {
+        let origin = Vec3::new(if index == 0 { -0.5 } else { 0.25 }, 0., 0.);
+        let scale = 1. / 16.;
+        for (vertex, raw) in mesh.vertices.iter_mut().zip(raw.iter()) {
+            vertex.position = Vec3::from(raw.vertex.position) * scale + origin;
+            vertex.normal = Vec3::from(raw.vertex.normal);
+            vertex.tangent_s = Vec3::from(raw.vertex.tangent_s);
+            vertex.tangent_t = Vec3::from(raw.vertex.tangent_t);
+            vertex.tangent_sign = raw.vertex.tangent_sign;
+            vertex.uv = raw.vertex.uv;
+        }
+        map.model_animations.push(ModelAnimationInstance {
+            model_path: "models/fixtures/two-bone.mdl".to_owned(),
+            entity_index: Some(index),
+            hammer_id: Some(100 + index as u32),
+            animation: Arc::clone(&rig),
+            sequence: 0,
+            playback: ModelAnimationPlayback::default(),
+            origin,
+            angles: Vec3::ZERO,
+            scale,
+            bindings: vec![ModelAnimationBinding {
+                receiver_mesh: MapReceiverMesh::World(index),
+                vertex_start: 0,
+                vertices: Arc::clone(&raw),
+            }],
+            lighting_context: None,
+            illumination_attachment_index: Some(0),
+            illumination_position: Vec3::ZERO,
+            lighting_origin_override: None,
+        });
+    }
+    Arc::new(map)
+}
+
+fn animation_phases(a: f32, b: f32) -> Arc<ModelAnimationPhaseOverrides> {
+    Arc::new(
+        [
+            (
+                0,
+                ModelAnimationPhase {
+                    sequence: None,
+                    cycle: a,
+                },
+            ),
+            (
+                1,
+                ModelAnimationPhase {
+                    sequence: None,
+                    cycle: b,
+                },
+            ),
+        ]
+        .into(),
+    )
+}
+
+#[test]
+#[ignore = "requires exclusive GPU and normal image capacity"]
+fn iced_animated_placements_share_bind_streams_and_isolate_view_phases_without_static_or_hidden_work()
+ {
+    let a = model([255, 0, 0]);
+    let b = model([0, 255, 0]);
+    let combined = paired_model(&a, &b);
+    let map = animated_pair_preview(&combined);
+    let mut static_map = map.as_ref().clone();
+    static_map.model_animations.clear();
+    let views = [
+        (Arc::clone(&combined), Arc::default()),
+        (combined, Arc::default()),
+    ];
+    let mut harness = Harness {
+        maps: vec![Some(Arc::new(static_map)); 2],
+        bodygroups: vec![vec![0, 1]; 2],
+        ..Harness::default()
+    };
+    let mut renderer = renderer();
+    let static_pixels = harness.draw(&mut renderer, &views, &[0., 0.]);
+    find_solid_patch(&static_pixels, 0, [255, 0, 0]);
+    find_solid_patch(&static_pixels, 0, [0, 255, 0]);
+    harness.maps = vec![Some(Arc::clone(&map)); 2];
+    harness.model_animation_phases = vec![Some(animation_phases(0., 0.)); 2];
+    let rest = harness.draw(&mut renderer, &views, &[0., 0.]);
+    assert_eq!(
+        rest, static_pixels,
+        "identity pose changed rest geometry/material/lighting output"
+    );
+    harness.model_animation_phases = vec![
+        Some(animation_phases(0., 0.5)),
+        Some(animation_phases(0.5, 0.)),
+    ];
+    let split = harness.draw(&mut renderer, &views, &[0., 0.]);
+    ready(&views[0].1, 0);
+    ready(&views[1].1, 0);
+    assert_ne!(
+        split, rest,
+        "authored bone translation and rotation did not affect output"
+    );
+    for pane in 0..2 {
+        find_solid_patch(&split, pane, [255, 0, 0]);
+        find_solid_patch(&split, pane, [0, 255, 0]);
+    }
+    let original_a = harness.observers[0].lock().unwrap()["animation_state"].clone();
+    let original_b = harness.observers[1].lock().unwrap()["animation_state"].clone();
+    assert_eq!(original_a["shared_bind_sources"], 1);
+    assert_eq!(original_a["output_meshes"], 2);
+    assert_eq!(original_a["active_instances"][0]["cycle"], 0.0);
+    assert_eq!(original_b["active_instances"][0]["cycle"], 0.5);
+    let paused = harness.draw(&mut renderer, &views, &[0., 0.]);
+    assert_eq!(paused, split);
+    for (index, previous) in [original_a, original_b].iter().enumerate() {
+        let next = harness.observers[index].lock().unwrap()["animation_state"].clone();
+        assert_eq!(
+            next["evaluations"], previous["evaluations"],
+            "stationary explicit phase evaluated again"
+        );
+        assert_eq!(
+            next["encoded_dispatches"], previous["encoded_dispatches"],
+            "stationary explicit phase skinned again"
+        );
+    }
+    harness.model_animation_phases = vec![Some(animation_phases(0.5, 0.)); 2];
+    let same_b = harness.draw(&mut renderer, &views, &[0., 0.]);
+    assert_pane_equal(&same_b, &split, 1);
+    harness.model_animation_phases = vec![
+        Some(animation_phases(0., 0.5)),
+        Some(animation_phases(0.5, 0.)),
+    ];
+    let restored = harness.draw(&mut renderer, &views, &[0., 0.]);
+    assert_eq!(
+        restored, split,
+        "independent actor/view phases leaked across shared rig"
+    );
+    harness.model_animation_phases.clear();
+    harness.model_lighting_times = vec![Some(123.0); 2];
+    let first = harness.draw(&mut renderer, &views, &[0., 0.]);
+    let advanced = harness.draw(&mut renderer, &views, &[0.5, 0.5]);
+    assert_ne!(
+        first, advanced,
+        "natural playback froze while the camera was stationary"
+    );
+    let visible = harness.observers[0].lock().unwrap()["animation_state"].clone();
+    harness.bodygroups = vec![vec![99, 99]; 2];
+    harness.draw(&mut renderer, &views, &[0.75, 0.75]);
+    let hidden = harness.observers[0].lock().unwrap()["animation_state"].clone();
+    assert_eq!(hidden["active_instances"].as_array().unwrap().len(), 0);
+    assert_eq!(hidden["evaluations"], visible["evaluations"]);
+    assert_eq!(hidden["encoded_dispatches"], visible["encoded_dispatches"]);
+    harness.bodygroups = vec![vec![0, 1]; 2];
+    let caught_up = harness.draw(&mut renderer, &views, &[0.75, 0.75]);
+    let natural = harness.observers[0].lock().unwrap()["animation_state"].clone();
+    assert_eq!(natural["active_instances"][0]["cycle"], 0.75);
+    harness.model_animation_phases = vec![Some(animation_phases(0.75, 0.75)); 2];
+    let explicit = harness.draw(&mut renderer, &views, &[0.75, 0.75]);
+    assert_eq!(
+        caught_up, explicit,
+        "hidden animation resumed from an old phase instead of the viewer clock"
+    );
+}
+
+fn animated_optical_preview(
+    combined: &Arc<ModelPreview>,
+) -> (Arc<ModelPreview>, Arc<super::super::MapPreview>) {
+    let mut map = animated_pair_preview(combined);
+    let map = Arc::make_mut(&mut map);
+    let scene = Arc::make_mut(&mut map.scene);
+    for (index, mesh) in scene.meshes.iter_mut().enumerate() {
+        let height = if index == 0 { 64. } else { -64. };
+        for vertex in &mut mesh.vertices {
+            vertex.position = Vec3::new(
+                vertex.position.x() * 256.,
+                vertex.position.y() * 256.,
+                height,
+            );
+        }
+        map.model_animations[index].origin *= 256.;
+        map.model_animations[index].origin[2] = height;
+        map.model_animations[index].scale *= 256.;
+    }
+    let normal = [128, 128, 255, 255].repeat(16);
+    let resolver = MaterialResolver::prop_lighting_fixture(vec![
+        ("materials/normal.vtf",fixture_vtf_bytes(4,4,vformats::vtf::VtfFormat::Rgba8888,&[&normal])),
+        ("materials/water.vmt",br#"Water { "$normalmap" "normal" "$reflecttexture" "_rt_WaterReflection" "$refracttexture" "_rt_WaterRefraction" "$reflectamount" "0" "$refractamount" "0" "$reflecttint" "[1 1 1]" "$refracttint" "[1 1 1]" "$fogenable" "0" "$fogstart" "0" "$fogend" "10000" }"#.to_vec()),
+    ],Vec::new());
+    let resolution = resolver.resolve_with_base2(&[], "water");
+    let material = resolution.material().unwrap();
+    scene.materials.push(MaterialSlot {
+        resolution: resolution.outcome(),
+        canonical_name: resolution.canonical_name().map(str::to_owned),
+        name: "water".to_owned(),
+        texture: material.texture.clone(),
+        texture2: material.texture2.clone(),
+        shader: material.shader.clone(),
+        render_mode: material.render_mode,
+        alpha_policy: material.render_mode.texture_alpha_policy(),
+    });
+    let mut water = scene.meshes[0].clone();
+    water.geometry = crate::media::preview_model::MeshGeometry::Brush;
+    water.material_index = 2;
+    water.bodygroup = 2;
+    water.bodygroup_choice = 0;
+    water.indices = vec![0, 2, 1, 0, 3, 2];
+    for (vertex, (x, y)) in
+        water
+            .vertices
+            .iter_mut()
+            .zip([(-512., -512.), (512., -512.), (512., 512.), (-512., 512.)])
+    {
+        vertex.position = Vec3::new(x, y, 0.);
+        vertex.normal = Vec3::new(0., 0., 1.);
+        vertex.tangent_s = Vec3::new(1., 0., 0.);
+        vertex.tangent_t = Vec3::new(0., 1., 0.);
+        vertex.uv = [x / 64., y / 64.];
+        vertex.lighting_mode = crate::media::preview_model::vertex_lighting::WORLD_CONSTANT;
+        vertex.illumination = Vec3::splat(1.);
+    }
+    scene.meshes.push(water);
+    scene.bounds_min = Vec3::new(-256., -256., -128.);
+    scene.bounds_max = Vec3::new(256., 256., 128.);
+    scene.stats.mesh_count = 3;
+    scene.stats.vertex_count = 12;
+    scene.stats.triangle_count = 6;
+    scene.stats.material_count = 3;
+    scene.stats.resolved_material_count = 3;
+    map.water_volumes = Some(
+        gmpublished_domain::scene::map::MapWaterVolumes::box_for_tests(
+            Vec3::splat(-512.),
+            Vec3::new(512., 512., 0.),
+            "water".to_owned(),
+        ),
+    );
+    let model = Arc::new(ModelPreview {
+        scene: Arc::clone(&map.scene),
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
+        skin_tables: Vec::new(),
+        bodygroups: combined.bodygroups.clone(),
+    });
+    (model, Arc::new(map.clone()))
+}
+
+fn capture_animation_pass(
+    pass: AnimationCapturePass,
+    phase: &str,
+    pixels: &[u8],
+    harness: &Harness,
+) {
+    let Some(directory) = std::env::var_os("GMPUBLISHED_ANIMATION_GPU_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let name = format!("{pass:?}-{phase}");
+    image::save_buffer(
+        directory.join(format!("{name}.png")),
+        pixels,
+        320,
+        180,
+        image::ColorType::Rgba8,
+    )
+    .unwrap();
+    let diagnostics = harness
+        .observers
+        .iter()
+        .map(|observer| observer.lock().unwrap().clone())
+        .collect::<Vec<_>>();
+    std::fs::write(
+        directory.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(&diagnostics).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "requires exclusive GPU and normal image capacity"]
+fn iced_animated_props_use_the_same_pose_in_main_reflection_refraction_and_underwater_passes() {
+    let a = model([255, 0, 0]);
+    let b = model([0, 255, 0]);
+    let combined = paired_model(&a, &b);
+    let (model, map) = animated_optical_preview(&combined);
+    let views = [
+        (Arc::clone(&model), Arc::default()),
+        (model, Arc::default()),
+    ];
+    let mut harness = Harness {
+        maps: vec![Some(map); 2],
+        bodygroups: vec![vec![0, 1]; 2],
+        ..Harness::default()
+    };
+    let mut renderer = renderer();
+    for pass in [
+        AnimationCapturePass::Main,
+        AnimationCapturePass::Reflection,
+        AnimationCapturePass::Refraction,
+        AnimationCapturePass::Underwater,
+    ] {
+        harness.animation_capture_passes = vec![pass; 2];
+        harness.model_animation_phases = vec![
+            Some(animation_phases(0., 0.)),
+            Some(animation_phases(0.5, 0.5)),
+        ];
+        let different = harness.draw(&mut renderer, &views, &[0., 0.]);
+        capture_animation_pass(pass, "different", &different, &harness);
+        ready(&views[0].1, 0);
+        ready(&views[1].1, 0);
+        for pane in 0..2 {
+            find_solid_patch(
+                &different,
+                pane,
+                if matches!(
+                    pass,
+                    AnimationCapturePass::Refraction | AnimationCapturePass::Underwater
+                ) {
+                    [0, 255, 0]
+                } else {
+                    [255, 0, 0]
+                },
+            );
+        }
+        harness.model_animation_phases = vec![Some(animation_phases(0.5, 0.5)); 2];
+        let matched = harness.draw(&mut renderer, &views, &[0., 0.]);
+        capture_animation_pass(pass, "matched", &matched, &harness);
+        assert_pane_equal(&matched, &different, 1);
+        assert_ne!(
+            matched, different,
+            "{pass:?} did not consume the changed actor pose"
+        );
+        for index in 0..2 {
+            let state = harness.observers[index].lock().unwrap()["animation_state"].clone();
+            assert_eq!(state["active_instances"][0]["cycle"], 0.5);
+            assert_eq!(state["active_instances"][1]["cycle"], 0.5);
+            assert_eq!(
+                state["output_initializations"], 2,
+                "optical passes created separate geometry copies"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires exclusive GPU and normal image capacity"]
+fn iced_animated_planar_materials_reject_only_selected_unsupported_draws() {
+    let a = model([255, 0, 0]);
+    let b = model([0, 255, 0]);
+    let combined = paired_model(&a, &b);
+    let (model, map) = animated_optical_preview(&combined);
+    let mut standalone = model.as_ref().clone();
+    standalone.model_animations = map.model_animations.clone();
+    let standalone = Arc::new(standalone);
+    let views = [
+        (Arc::clone(&standalone), Arc::default()),
+        (standalone, Arc::default()),
+    ];
+    let mut renderer = renderer();
+    let mut harness = Harness {
+        maps: vec![Some(map); 2],
+        bodygroups: vec![vec![0, 1]; 2],
+        model_animation_phases: vec![Some(animation_phases(0., 0.)); 2],
+        ..Harness::default()
+    };
+    harness.draw(&mut renderer, &views, &[0., 0.]);
+    ready(&views[0].1, 0);
+    ready(&views[1].1, 0);
+    harness.skin_remaps = vec![vec![2, 1, 2], vec![0, 1, 2]];
+    harness.draw(&mut renderer, &views, &[0.5, 0.5]);
+    let assert_unsupported = || match views[0].1.snapshot() {
+        super::super::feedback::RenderStatus::Rejected { reason } => {
+            assert!(reason.contains("animation instance 0"), "{reason}");
+            assert!(reason.contains("effective material 2"), "{reason}");
+            assert!(reason.contains("planar"), "{reason}");
+        }
+        state => panic!("animated planar draw was silently accepted: {state:?}"),
+    };
+    assert_unsupported();
+    ready(&views[1].1, 0);
+    harness.bodygroups[0] = vec![99, 1];
+    harness.draw(&mut renderer, &views, &[0.5, 0.5]);
+    ready(&views[0].1, 0);
+    harness.bodygroups[0] = vec![0, 1];
+    harness.maps.clear();
+    harness.draw(&mut renderer, &views, &[0.5, 0.5]);
+    assert_unsupported();
+    ready(&views[1].1, 0);
 }

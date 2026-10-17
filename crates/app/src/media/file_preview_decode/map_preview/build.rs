@@ -107,7 +107,9 @@ pub(super) fn build_props(
         unique_prop_model_paths_from(static_props.iter()),
         unique_prop_model_paths_from(skybox_static_props.iter()),
         unique_prop_model_paths_from(map_doors.iter().filter_map(|door| match &door.geometry {
-            gmpublished_domain::scene::map::MapDoorGeometry::Prop { placement } => Some(placement),
+            gmpublished_domain::scene::map::MapDoorGeometry::Prop { placement } => {
+                Some(placement.as_ref())
+            }
             gmpublished_domain::scene::map::MapDoorGeometry::Brush { .. } => None,
         })),
     ];

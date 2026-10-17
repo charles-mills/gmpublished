@@ -14,6 +14,14 @@ impl<const N: usize> UsedStyles<N> {
         Self { indices }
     }
 
+    pub fn include(&mut self, styles: impl IntoIterator<Item = usize>) {
+        for style in styles.into_iter().filter(|&style| style < N) {
+            if let Err(index) = self.indices.binary_search(&style) {
+                self.indices.insert(index, style);
+            }
+        }
+    }
+
     pub fn changed(&self, previous: &[f32; N], next: &[f32; N]) -> bool {
         self.indices
             .iter()

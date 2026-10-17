@@ -10,11 +10,12 @@ pub(super) struct TexturePreparationIssue {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("scene preparation rejected {} texture, {} buffer and {} lightmap resources", .issues.len(), .buffer_issues.len(), .lightmap_issues.len())]
+#[error("scene preparation rejected {} texture, {} buffer, {} lightmap and {} animation resources", .issues.len(), .buffer_issues.len(), .lightmap_issues.len(), .animation_issues.len())]
 pub(super) struct SceneUploadError {
     pub issues: Vec<TexturePreparationIssue>,
     pub buffer_issues: Vec<BufferPreparationIssue>,
     lightmap_issues: Vec<LightmapPreparationIssue>,
+    animation_issues: Vec<super::skinning::PreparationIssue>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -75,6 +76,9 @@ impl SceneUploadError {
         for issue in &self.buffer_issues {
             log::error!("scene buffer preparation: {issue:?}");
         }
+        for issue in &self.animation_issues {
+            log::error!("scene animation preparation: {issue:?}");
+        }
         for issue in &self.lightmap_issues {
             log::error!("scene lightmap preparation: {issue:?}");
         }
@@ -86,6 +90,7 @@ impl SceneUploadError {
             "textures": self.issues.iter().map(|issue| serde_json::json!({"material":issue.material,"role":issue.role,"outcome":format!("{:?}", issue.outcome)})).collect::<Vec<_>>(),
             "buffers": self.buffer_issues,
             "lightmaps": self.lightmap_issues,
+            "animations": self.animation_issues,
         })
     }
 }
@@ -94,6 +99,7 @@ struct Validator {
     issues: Vec<TexturePreparationIssue>,
     buffer_issues: Vec<BufferPreparationIssue>,
     lightmap_issues: Vec<LightmapPreparationIssue>,
+    animation_issues: Vec<super::skinning::PreparationIssue>,
 }
 
 impl Validator {
@@ -370,6 +376,7 @@ pub(super) fn validate(
         issues: Vec::new(),
         buffer_issues: Vec::new(),
         lightmap_issues: Vec::new(),
+        animation_issues: super::skinning::validate(scene, limits),
     };
     validator.geometry(scene, limits);
     for slot in &scene.render_scene().materials {
@@ -490,6 +497,7 @@ pub(super) fn validate(
     if validator.issues.is_empty()
         && validator.buffer_issues.is_empty()
         && validator.lightmap_issues.is_empty()
+        && validator.animation_issues.is_empty()
     {
         Ok(())
     } else {
@@ -497,6 +505,7 @@ pub(super) fn validate(
             issues: validator.issues,
             buffer_issues: validator.buffer_issues,
             lightmap_issues: validator.lightmap_issues,
+            animation_issues: validator.animation_issues,
         })
     }
 }
@@ -587,6 +596,7 @@ mod tests {
             issues: Vec::new(),
             buffer_issues: Vec::new(),
             lightmap_issues: Vec::new(),
+            animation_issues: Vec::new(),
         }
     }
 

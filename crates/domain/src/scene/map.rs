@@ -27,6 +27,7 @@ pub use asset::{MapAsset, decode_map, decode_map_with_pool};
 mod brushes;
 mod cubemaps;
 mod data;
+pub use data::{MapPropAnimation, MapPropRandomAnimation};
 mod decals;
 pub use decals::{
     MapDecal, MapDecalDimensions, MapDecalPermanence, MapDecalPosition, MapSurfaceProjector,

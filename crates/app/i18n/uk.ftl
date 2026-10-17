@@ -386,6 +386,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Сітки
 file-preview-model-bones = Кістки
 file-preview-model-sequences = Послідовності
+file-preview-animation-unavailable = Анімації недоступні
 file-preview-model-vertices = Вершини
 file-preview-model-triangles = Трикутники
 file-preview-model-materials = Знайдені матеріали

@@ -20,6 +20,7 @@ use super::{
 pub struct UploadCache {
     uploads: HashMap<SceneKey, Arc<UploadedModel>>,
     live: HashSet<SceneKey>,
+    skin_sources: super::skinning::SourceCache,
     rejected: HashMap<SceneKey, RejectedUpload>,
 }
 
@@ -47,6 +48,7 @@ impl UploadCache {
         self.uploads.retain(|id, _| self.live.contains(id));
         self.rejected.retain(|id, _| self.live.contains(id));
         self.live.clear();
+        self.skin_sources.trim();
     }
 
     fn admit_scene(
@@ -244,8 +246,11 @@ impl UploadCache {
         super::transparency::build_parts(&mut meshes, &material_render_modes, scene, map);
         let receiver_faces =
             super::super::draw_plan::ReceiverIndex::prepare(receiver_faces, map, &meshes);
+        let animations =
+            super::skinning::Assets::upload(device, queue, source, &meshes, &mut self.skin_sources);
         let mut upload = UploadedModel {
             source: source.clone(),
+            animations,
             surface_pipelines: super::surface_pipelines::SurfacePipelineVariants::new(
                 device,
                 resources,
@@ -318,6 +323,7 @@ pub struct UploadedRenderableRange {
 #[derive(Debug)]
 pub struct UploadedModel {
     pub(super) source: PreviewScene,
+    pub(super) animations: super::skinning::Assets,
     pub(super) surface_pipelines: super::surface_pipelines::SurfacePipelineVariants,
     pub meshes: Vec<Arc<UploadedMesh>>,
     pub detail_sprites: Option<UploadedDetailSprites>,
@@ -490,7 +496,9 @@ pub fn upload_meshes(
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("file_preview.model_viewer.vertices"),
                 size: vertex_bytes.len() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             queue.write_buffer(&vertices, 0, vertex_bytes);

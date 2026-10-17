@@ -134,6 +134,10 @@ impl shader::Program<Message> for Viewer3d {
                     slot.shader
                         .surface()
                         .is_some_and(crate::bridge::materials::SurfaceMaterial::is_animated)
+                }) || self.model.model_animations.iter().any(|instance| {
+                    instance
+                        .playback
+                        .is_animated(&instance.animation, instance.sequence)
                 }) || self.render_feedback.wants_redraw(*now))
                 .then(Action::request_redraw)
             }
@@ -145,6 +149,8 @@ impl shader::Program<Message> for Viewer3d {
         ModelPrimitive {
             render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: None,
+            #[cfg(feature = "map-capture")]
+            model_animation_phases: None,
             model_lighting_time: 0.0,
             animation_clock: camera.animation_clock,
             #[cfg(feature = "map-capture")]
@@ -454,7 +460,11 @@ impl FlyCamera {
         self.animation_frame_seconds = 0.0;
         self.water_time = 0.0;
         self.model_lighting_time = 0.0;
-        self.animated_scene = scene
+        self.animated_scene = scene.model_animations.iter().any(|instance| {
+            instance
+                .playback
+                .is_animated(&instance.animation, instance.sequence)
+        }) || scene
             .lightmap
             .as_ref()
             .is_some_and(gmpublished_domain::scene::map::LightmapSet::is_animated)
@@ -973,6 +983,8 @@ impl shader::Program<Message> for FlyViewer {
                 uniforms.water_depth_params[0],
                 uniforms.water_depth_params[1],
             )),
+            #[cfg(feature = "map-capture")]
+            model_animation_phases: None,
             model_lighting_time: camera.model_lighting_time,
             animation_clock: AnimationClock {
                 time_seconds: camera.water_time,
@@ -1752,6 +1764,79 @@ mod tests {
     }
 
     #[test]
+    fn orbit_authored_model_animation_redraws_and_uses_independent_view_clocks() {
+        use crate::media::preview_model::{ModelAnimationInstance, ModelAnimationPlayback};
+        let scene = empty_preview(Vec3::splat(-32.0), Vec3::splat(32.0));
+        let animation = gmpublished_domain::scene::model::animation_for_tests();
+        let viewer = Viewer3d {
+            render_feedback: Default::default(),
+            model: Arc::new(ModelPreview {
+                model_animations: vec![ModelAnimationInstance {
+                    model_path: "models/fixtures/two-bone.mdl".to_owned(),
+                    entity_index: None,
+                    hammer_id: None,
+                    animation: Arc::clone(&animation),
+                    sequence: 0,
+                    playback: ModelAnimationPlayback::default(),
+                    origin: Vec3::ZERO,
+                    angles: Vec3::ZERO,
+                    scale: 1.0,
+                    bindings: Vec::new(),
+                    lighting_context: None,
+                    illumination_attachment_index: None,
+                    illumination_position: Vec3::ZERO,
+                    lighting_origin_override: None,
+                }],
+                model_animation_issues: Vec::new(),
+                scene: scene.scene,
+                skin_tables: Vec::new(),
+                bodygroups: Vec::new(),
+            }),
+            content_id: 9,
+            skin_remap: Vec::new(),
+            bodygroup_choices: Vec::new(),
+            phy_debug_visible: false,
+            pose: None,
+        };
+        assert!(viewer.model.scene.materials.is_empty());
+        let mut first = Camera::default();
+        let mut second = Camera::default();
+        let now = std::time::Instant::now();
+        let bounds = Rectangle::with_size(iced::Size::new(640.0, 480.0));
+        let redraw = |camera: &mut Camera, milliseconds| {
+            let action = viewer
+                .update(
+                    camera,
+                    &Event::Window(iced::window::Event::RedrawRequested(
+                        now + std::time::Duration::from_millis(milliseconds),
+                    )),
+                    bounds,
+                    mouse::Cursor::Unavailable,
+                )
+                .unwrap();
+            let (message, request, _) = action.into_inner();
+            assert!(message.is_none());
+            assert_eq!(request, iced::window::RedrawRequest::NextFrame);
+        };
+        redraw(&mut first, 0);
+        redraw(&mut second, 250);
+        let poses = [first.pose(), second.pose()];
+        for (camera, expected) in [(&mut first, 0.75), (&mut second, 0.5)] {
+            redraw(camera, 750);
+            let primitive = viewer.draw(camera, mouse::Cursor::Unavailable, bounds);
+            assert_eq!(primitive.animation_clock.time_seconds, expected);
+            assert_eq!(primitive.model_lighting_time, 0.0);
+            assert_eq!(
+                ModelAnimationPlayback::default()
+                    .cycle(&animation, 0, primitive.animation_clock.time_seconds)
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!([first.pose(), second.pose()], poses);
+    }
+
+    #[test]
     fn orbit_texture_animation_owns_its_clock_and_redraws_without_pose_messages() {
         let fly = scene_with_animated_material(
             br#"UnlitGeneric {
@@ -1765,6 +1850,8 @@ mod tests {
         let viewer = Viewer3d {
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
+                model_animations: Vec::new(),
+                model_animation_issues: Vec::new(),
                 scene: Arc::clone(&fly.scene.scene),
                 skin_tables: Vec::new(),
                 bodygroups: Vec::new(),

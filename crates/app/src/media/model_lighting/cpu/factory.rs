@@ -8,7 +8,10 @@ use gmpublished_domain::{
         MapWorldLighting,
     },
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use vformats::bsp::WorldLightKind;
 const WORLD_LIGHT_IN_AMBIENT_CUBE: u32 = 1;
 
@@ -73,6 +76,31 @@ pub struct ModelLightingEvaluation {
     pub ambient_cube: AmbientCube,
     pub selected: Vec<SelectedModelLight>,
     pub folded_ids: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+pub struct ModelLightingDynamicCache {
+    seeds: HashMap<LightCacheKey, Arc<ModelLightingSeed>>,
+    touches: HashMap<LightCacheKey, u64>,
+    oldest: BTreeMap<u64, LightCacheKey>,
+    clock: u64,
+}
+
+impl ModelLightingDynamicCache {
+    fn touch(&mut self, key: LightCacheKey) {
+        if let Some(previous) = self.touches.remove(&key) {
+            self.oldest.remove(&previous);
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.touches.insert(key, self.clock);
+        self.oldest.insert(self.clock, key);
+        const WARM_CELL_LIMIT: usize = 1024;
+        while self.seeds.len() > WARM_CELL_LIMIT {
+            let (_, key) = self.oldest.pop_first().expect("lighting cache recency");
+            self.touches.remove(&key);
+            self.seeds.remove(&key);
+        }
+    }
 }
 
 pub struct ModelLightingFactory<'a> {
@@ -142,6 +170,22 @@ impl<'a> ModelLightingFactory<'a> {
         )?;
         self.cache.insert(cell.key, Arc::clone(&seed));
         Ok(seed)
+    }
+
+    pub fn seed_dynamic_reusing(
+        &mut self,
+        point: Vec3,
+        cache: &mut ModelLightingDynamicCache,
+    ) -> Result<Arc<ModelLightingSeed>, ModelLightingFailure> {
+        std::mem::swap(&mut self.cache, &mut cache.seeds);
+        let result = self.seed_dynamic(point);
+        std::mem::swap(&mut self.cache, &mut cache.seeds);
+        if let Ok(seed) = &result
+            && let Some(cell) = LightCacheCell::from_position(point, seed.leaf)
+        {
+            cache.touch(cell.key);
+        }
+        result
     }
 
     pub fn seed_static_runtime(

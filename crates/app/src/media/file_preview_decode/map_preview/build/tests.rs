@@ -140,7 +140,8 @@ fn shared_loading_keeps_world_sky_and_door_placement_state_separate() {
                 Vec3::new(0.0, 0.0, 30.0),
                 Vec3::ZERO,
                 0,
-            ),
+            )
+            .into(),
         },
     };
     let stats = MapStatsRaw {
@@ -244,7 +245,9 @@ fn prop_door(path: &str, render_mode: i32) -> MapDoor {
             open_direction: MapDoorOpenDirection::Both,
         },
         sounds: MapDoorSounds::default(),
-        geometry: MapDoorGeometry::Prop { placement },
+        geometry: MapDoorGeometry::Prop {
+            placement: Box::new(placement),
+        },
     }
 }
 

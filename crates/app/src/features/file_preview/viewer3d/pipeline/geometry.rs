@@ -14,12 +14,14 @@ pub struct ViewerScene {
     pub meshes: Vec<ViewerMesh>,
     pub overlays: Vec<ViewerOverlay>,
     geometry_revision: u64,
+    pub(super) animation: super::skinning::Frame,
 }
 
 #[derive(Debug)]
 pub struct ViewerMesh {
     source: Arc<UploadedMesh>,
     deformation: Option<DoorDeformation>,
+    pub(super) animation: Option<super::skinning::Mesh>,
 }
 
 #[derive(Debug)]
@@ -76,7 +78,18 @@ impl Deref for ViewerMesh {
 }
 
 impl ViewerMesh {
+    pub fn transparent_parts(&self) -> &[super::transparency::Part] {
+        self.animation
+            .as_ref()
+            .map_or(&self.source.transparent_parts, |animation| {
+                &animation.transparent_parts
+            })
+    }
+
     pub fn vertices(&self) -> &wgpu::Buffer {
+        if let Some(animation) = &self.animation {
+            return &animation.buffer;
+        }
         self.deformation
             .as_ref()
             .and_then(|door| door.vertices.as_ref())
@@ -84,6 +97,9 @@ impl ViewerMesh {
     }
 
     pub fn centroid(&self) -> Vec3 {
+        if let Some(animation) = &self.animation {
+            return animation.centroid;
+        }
         self.deformation
             .as_ref()
             .map_or_else(|| self.source.centroid(), |door| door.centroid)
@@ -257,6 +273,7 @@ impl ViewerScene {
                 ViewerMesh {
                     source: Arc::clone(source),
                     deformation,
+                    animation: None,
                 }
             })
             .collect();
@@ -283,10 +300,70 @@ impl ViewerScene {
         Self {
             bindings: Arc::new(super::bindings::BindingSnapshot::default()),
             lightmaps,
+            animation: super::skinning::Frame::new(assets.animations.instances.len()),
             assets,
             meshes,
             overlays,
             geometry_revision: 0,
+        }
+    }
+
+    pub(super) fn update_animations(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &super::resources::RenderResources,
+        demanded: &std::collections::BTreeSet<usize>,
+        time: f32,
+        overrides: Option<&super::skinning::PhaseOverrides>,
+    ) -> Result<(), super::skinning::Error> {
+        if self.assets.animations.instances.is_empty() && overrides.is_none() {
+            return Ok(());
+        }
+        let resources = resources
+            .skinning
+            .get_or_init(|| super::skinning::Resources::new(device));
+        self.animation.prepare(
+            device,
+            queue,
+            resources,
+            &self.assets,
+            &mut self.meshes,
+            &super::skinning::Request {
+                demanded,
+                time,
+                overrides,
+            },
+        )
+    }
+
+    pub(super) fn encode_animations(
+        &self,
+        resources: &super::resources::RenderResources,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if let Some(resources) = resources.skinning.get() {
+            self.animation
+                .encode(resources, &self.assets, &self.meshes, encoder);
+        }
+    }
+
+    pub(super) fn animation_revision(&self, plans: &super::super::DrawPlans) -> u64 {
+        let affects_order = [&plans.world]
+            .into_iter()
+            .chain(plans.map_skybox.iter())
+            .any(|plan| {
+                plan.translucent.iter().chain(&plan.additive).any(|item| {
+                    self.assets
+                        .animations
+                        .mesh_instances
+                        .contains_key(&item.mesh_index)
+                })
+            });
+        if affects_order {
+            self.animation.revision()
+        } else {
+            0
         }
     }
 

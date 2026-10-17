@@ -1307,6 +1307,8 @@ fn load_map_extracts_static_prop_placements_from_game_lump_fixture() {
         map.static_props,
         vec![StaticPropPlacement {
             entity: false,
+            initially_visible: true,
+            animation: None,
             static_prop_index: Some(0),
             lighting_origin: None,
             lighting_origin_reference: None,
@@ -1515,6 +1517,48 @@ fn load_map_extracts_supported_entity_prop_classnames() {
             .iter()
             .all(|prop| prop.leaf_membership == MapPropLeafMembership::SpatialBounds)
     );
+}
+
+#[test]
+fn entity_animation_state_is_placement_specific_and_keeps_source_identity() {
+    let map = load_map(&bsp_fixture_with_entities(r#"
+        { "classname" "prop_dynamic" "model" "models/entity/shared.mdl" "origin" "0 0 0" "DefaultAnim" "Flag_Idle" "hammerid" "4110" "cycle" "0.25" "playbackrate" "0.5" }
+        { "classname" "dynamic_prop" "model" "models/entity/shared.mdl" "origin" "1 0 0" "sequence" "2" "cycle" "0.75" }
+        { "classname" "prop_dynamic" "model" "models/entity/shared.mdl" "origin" "2 0 0" }
+        { "classname" "prop_physics" "model" "models/entity/shared.mdl" "origin" "3 0 0" "DefaultAnim" "Flag_Idle" }
+    "#)).unwrap();
+    let props: Vec<_> = map.static_props.iter().filter(|prop| prop.entity).collect();
+    assert_eq!(props.len(), 4);
+    let first = props[0].animation.as_ref().unwrap();
+    assert_eq!(first.default_sequence.as_deref(), Some("flag_idle"));
+    assert_eq!(first.hammer_id, Some(4110));
+    assert_eq!(first.initial_cycle, 0.25);
+    assert_eq!(first.playback_rate, 0.5);
+    let second = props[1].animation.as_ref().unwrap();
+    assert_eq!(second.sequence_index, 2);
+    assert_eq!(second.initial_cycle, 0.75);
+    assert_ne!(first.entity_index, second.entity_index);
+    assert!(props[2].animation.is_none());
+    assert!(props[3].animation.is_none());
+}
+
+#[test]
+fn initial_entity_visibility_is_separate_from_render_mode_and_animation() {
+    let map = load_map(&bsp_fixture_with_entities(r#"
+        { "classname" "prop_dynamic" "model" "models/entity/hidden.mdl" "origin" "0 0 0" "DefaultAnim" "idle" "StartDisabled" "1" }
+        { "classname" "prop_dynamic" "model" "models/entity/effect_hidden.mdl" "origin" "1 0 0" "effects" "32" }
+        { "classname" "prop_physics" "model" "models/entity/physics.mdl" "origin" "2 0 0" "StartDisabled" "1" }
+    "#)).unwrap();
+    let props: Vec<_> = map.static_props.iter().filter(|prop| prop.entity).collect();
+    assert_eq!(
+        props
+            .iter()
+            .map(|prop| prop.initially_visible)
+            .collect::<Vec<_>>(),
+        [false, false, true]
+    );
+    assert!(props[0].animation.is_some());
+    assert!(props.iter().all(|prop| prop.render_mode == 0));
 }
 
 #[test]

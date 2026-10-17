@@ -362,6 +362,7 @@ file-preview-image-dimensions = {$width}×{$height}
 file-preview-model-meshes = Ağlar
 file-preview-model-bones = Kemikler
 file-preview-model-sequences = Sekanslar
+file-preview-animation-unavailable = Animasyonlar kullanılamıyor
 file-preview-model-vertices = Köşeler
 file-preview-model-triangles = Üçgenler
 file-preview-model-materials = Çözülen materyaller

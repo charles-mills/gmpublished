@@ -91,6 +91,7 @@ fn a_late_destination_failure_does_not_commit_earlier_placement_parts() {
     let destination = Destination {
         material_index: 1,
         entity: false,
+        animation_instance: None,
     };
     plan.buffers.insert(
         destination,
@@ -108,6 +109,7 @@ fn a_late_destination_failure_does_not_commit_earlier_placement_parts() {
             destination: Destination {
                 material_index: 0,
                 entity: false,
+                animation_instance: None,
             },
             counts: GeometryCounts::checked(3, 3, 1).unwrap(),
         },
@@ -190,7 +192,7 @@ fn allocation_failure_rejects_whole_placement_and_reuses_survivor_buffers() {
     assert_eq!(result.geometry.rejected.len(), 1);
     assert_eq!(result.geometry.rejected[0].placement_index, 0);
     assert_eq!(result.meshes.len(), 2);
-    let survivor = &result.meshes[&(1, false)];
+    let survivor = &result.meshes[&destination(1, false)];
     assert_eq!(survivor.vertices.len(), 3);
     assert!(survivor.vertices.capacity() >= 6);
     assert_eq!(survivor.indices, [0, 1, 2]);
@@ -214,9 +216,12 @@ fn malformed_geometry_is_atomic_and_lighting_context_ids_remain_stable() {
     let output = bake_selected_prop_placements_parallel(&selected);
     assert_eq!(output.admitted, [1]);
     assert_eq!(output.geometry.rejected.len(), 1);
-    assert!(!output.meshes.contains_key(&(0, false)));
-    assert_eq!(output.meshes[&(1, false)].vertices[0].lighting_context, 2);
-    assert_eq!(output.meshes[&(1, false)].vertices.len(), 3);
+    assert!(!output.meshes.contains_key(&destination(0, false)));
+    assert_eq!(
+        output.meshes[&destination(1, false)].vertices[0].lighting_context,
+        2
+    );
+    assert_eq!(output.meshes[&destination(1, false)].vertices.len(), 3);
     assert_eq!(output.geometry.admitted.indices, 3);
 }
 
@@ -254,13 +259,13 @@ fn compiled_lighting_uses_original_mesh_and_vertex_indices() {
     ));
     let output = bake_selected_prop_placements_serial(&selected);
     assert!(output.geometry.rejected.is_empty());
-    assert_eq!(output.meshes[&(1, false)].vertices.len(), 4);
+    assert_eq!(output.meshes[&destination(1, false)].vertices.len(), 4);
     assert_eq!(
-        output.meshes[&(1, false)].vertices[0].illumination,
+        output.meshes[&destination(1, false)].vertices[0].illumination,
         Vec3::splat(2.0)
     );
     assert_eq!(
-        output.meshes[&(1, false)].vertices[3].illumination,
+        output.meshes[&destination(1, false)].vertices[3].illumination,
         Vec3::splat(5.0)
     );
     assert_eq!(output.geometry.admitted.vertices, 7);
@@ -427,4 +432,12 @@ fn raw_plans_and_topology_cache_share_and_release_canonical_source_geometry() {
     assert!(source.upgrade().is_some());
     drop(planner);
     assert!(source.upgrade().is_none());
+}
+
+fn destination(material_index: usize, entity: bool) -> Destination {
+    Destination {
+        material_index,
+        entity,
+        animation_instance: None,
+    }
 }

@@ -1,3 +1,5 @@
+#[path = "capture/animation.rs"]
+mod animation;
 #[path = "capture_isolation.rs"]
 mod isolation;
 #[path = "capture/performance.rs"]
@@ -561,6 +563,8 @@ struct CaptureCamera {
     #[serde(default)]
     model_lighting_timeline: Option<ModelLightingTimeline>,
     #[serde(default)]
+    model_animation_overrides: Vec<animation::Override>,
+    #[serde(default)]
     sky_animation_time: Option<f32>,
     #[serde(default)]
     raster_offset: Option<[f32; 2]>,
@@ -712,6 +716,7 @@ impl CaptureCamera {
 
 struct FixedView {
     model_lighting_timeline: Option<Arc<ModelLightingTimeline>>,
+    model_animation_phases: Option<Arc<super::pipeline::ModelAnimationPhaseOverrides>>,
     diagnostics: CaptureDiagnostics,
     viewer: FlyViewer,
     camera: FlyCamera,
@@ -758,6 +763,9 @@ impl shader::Program<Message> for FixedView {
         primitive.reflection_target = self.target == CaptureTarget::Reflection;
         primitive.refraction_target = self.target == CaptureTarget::Refraction;
         primitive.capture_diagnostics = Some(self.diagnostics.clone());
+        primitive
+            .model_animation_phases
+            .clone_from(&self.model_animation_phases);
         primitive
             .capture_lighting_timeline
             .clone_from(&self.model_lighting_timeline);
@@ -1405,6 +1413,7 @@ pub fn capture_map_reference_frames() {
             "load_wall_time_ms": load_ms,
             "stats": format!("{stats:?}"),
             "prop_geometry": scene.prop_geometry,
+            "model_animation": animation::describe(&scene),
             "texture_preparation": scene.texture_preparation,
             "invalid_detail_leaves": stats.invalid_detail_leaves,
             "prop_geometry_totals": scene.prop_geometry.admitted_totals(),
@@ -1530,6 +1539,8 @@ pub fn capture_map_reference_frames() {
             let diagnostics = CaptureDiagnostics::default();
             let view = FixedView {
                 model_lighting_timeline: shot.lighting_timeline(),
+                model_animation_phases: animation::resolve(&scene, &shot.model_animation_overrides)
+                    .expect("resolve fixed animation phases"),
                 diagnostics: diagnostics.clone(),
                 live_animation: shot.live_animation,
                 fullbright: shot.fullbright,
@@ -1736,6 +1747,7 @@ pub fn capture_map_reference_frames() {
                 "frame_visualization":shot.frame_visualization,"frame_visualization_linear_output":shot.frame_visualization_linear_output,
                 "frame_probe":shot.frame_probe,
                 "model_lighting_timeline":shot.model_lighting_timeline,
+                "model_animation_overrides":shot.model_animation_overrides,
                 "model_lighting_time":capture_lighting_time,
                 "model_light_styles":scene.model_lighting_inputs.as_ref().map(|inputs|inputs.style_values(capture_lighting_time).to_vec()),
                 "animation_time": if shot.live_animation { 2.0 } else { animation_time },
@@ -1797,6 +1809,8 @@ pub fn capture_map_reference_frames() {
             };
             FixedView {
                 model_lighting_timeline: shot.lighting_timeline(),
+                model_animation_phases: animation::resolve(&scene, &shot.model_animation_overrides)
+                    .expect("resolve isolation animation phases"),
                 diagnostics: CaptureDiagnostics::default(),
                 camera,
                 live_animation: false,

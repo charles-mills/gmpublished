@@ -30,6 +30,9 @@ use gmpublished_domain::scene::map::MapBounds;
 
 #[derive(Debug)]
 pub(in super::super) struct PropBakeResult {
+    pub(in super::super) model_animations: Vec<crate::media::preview_model::ModelAnimationInstance>,
+    pub(in super::super) model_animation_issues:
+        Vec<crate::media::preview_model::ModelAnimationIssue>,
     pub(in super::super) geometry: PropGeometryReport,
     pub(in super::super) renderables: Vec<PreparedMapRenderable>,
     pub(in super::super) meshes: Vec<MeshData>,
@@ -88,7 +91,7 @@ pub(in super::super) struct PropDoorMaterialResolution {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(in super::super) struct PropBakeSkipStats {
-    pub(in super::super) hidden_render_mode: usize,
+    pub(in super::super) hidden_placement: usize,
     pub(in super::super) placement_cap: usize,
     pub(in super::super) triangle_cap: usize,
     pub(in super::super) invalid_model_path: usize,
@@ -100,7 +103,7 @@ pub(in super::super) struct PropBakeSkipStats {
 impl PropBakeSkipStats {
     pub(in super::super) const fn total(self) -> usize {
         self.placement_cap
-            + self.hidden_render_mode
+            + self.hidden_placement
             + self.triangle_cap
             + self.invalid_model_path
             + self.load_failure
@@ -118,9 +121,7 @@ impl std::ops::Add for PropBakeSkipStats {
 
     fn add(self, rhs: Self) -> Self::Output {
         Self {
-            hidden_render_mode: self
-                .hidden_render_mode
-                .saturating_add(rhs.hidden_render_mode),
+            hidden_placement: self.hidden_placement.saturating_add(rhs.hidden_placement),
             placement_cap: self.placement_cap.saturating_add(rhs.placement_cap),
             triangle_cap: self.triangle_cap.saturating_add(rhs.triangle_cap),
             invalid_model_path: self
@@ -180,6 +181,7 @@ pub(in super::super) struct PropBuildMesh {
 pub(super) struct PropBuildRenderableRange {
     pub(super) source_index: usize,
     pub(super) draw_order: usize,
+    pub(super) vertex_start: u32,
     pub(super) start: u32,
     pub(super) count: u32,
 }
@@ -279,6 +281,10 @@ pub(in super::super) fn prop_model_world_bounds(
     placement: &StaticPropPlacement,
     model: &ModelData,
 ) -> Option<(Vec3, Vec3)> {
+    if placement.animation.is_some() && model.animation.is_some() {
+        let bounds = prop_renderable_bounds(placement, model).ok()?.world;
+        return Some((bounds.min, bounds.max));
+    }
     let mut positions = model
         .meshes
         .iter()
@@ -301,10 +307,10 @@ fn prop_renderable_bounds(
     placement: &StaticPropPlacement,
     model: &ModelData,
 ) -> Result<PreparedMapRenderableBounds, MapRenderableBoundsError> {
-    if placement.entity {
-        return Err(MapRenderableBoundsError::EntitySequenceUnavailable);
-    }
-    let (min, max) = if model.view_min == Vec3::ZERO && model.view_max == Vec3::ZERO {
+    let (min, max) = if placement.entity {
+        animated_local_bounds(placement, model)
+            .ok_or(MapRenderableBoundsError::EntitySequenceUnavailable)?
+    } else if model.view_min == Vec3::ZERO && model.view_max == Vec3::ZERO {
         (model.hull_min, model.hull_max)
     } else {
         (model.view_min, model.view_max)
@@ -344,6 +350,14 @@ fn prop_renderable_bounds(
         return Err(MapRenderableBoundsError::InvalidCompiledBounds);
     }
     Ok(PreparedMapRenderableBounds { local, world })
+}
+
+fn animated_local_bounds(
+    placement: &StaticPropPlacement,
+    model: &ModelData,
+) -> Option<(Vec3, Vec3)> {
+    placement.animation.as_ref()?;
+    crate::media::preview_model::animation_local_bounds(model)
 }
 
 #[cfg(test)]
@@ -402,7 +416,7 @@ pub(in super::super) fn bake_map_doors_with_prop_model_loader(
     let prop_placements = doors
         .iter()
         .filter_map(|door| match &door.geometry {
-            MapDoorGeometry::Prop { placement } => Some(placement.clone()),
+            MapDoorGeometry::Prop { placement } => Some(placement.as_ref().clone()),
             MapDoorGeometry::Brush { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -444,7 +458,7 @@ pub(super) fn bake_map_doors_from_loaded_model_cache(
                 geometry.map(|geometry| PreparedPropDoor {
                     model,
                     geometry,
-                    hidden: matches!(placement.render_mode, 6 | 10),
+                    hidden: !placement.initially_visible || matches!(placement.render_mode, 6 | 10),
                 }),
             ))
         })
@@ -935,16 +949,45 @@ fn bake_selected_with(
         admitted,
     } = bake(&selected.placements);
     let bake_timing = bake_started.elapsed();
-    let entity_meshes = prop_meshes.keys().map(|(_, entity)| *entity).collect();
+    let entity_meshes = prop_meshes
+        .keys()
+        .map(|destination| destination.entity)
+        .collect();
     let PreparedPropMeshes {
         meshes,
         visibility: mesh_visibility,
         renderable_ranges: mut ranges,
+        animation_bindings,
     } = prop_meshes_to_mesh_data(prop_meshes);
 
     let mut skip_stats = selected.skip_stats;
     skip_stats.geometry_rejected += geometry.rejected.len();
+    let mut model_animations = Vec::new();
+    let mut model_animation_issues = Vec::new();
+    for &index in &admitted {
+        let prop = &selected.placements[index];
+        if prop.placement.animation.is_none() {
+            continue;
+        }
+        match prepare_prop_animation(prop, animation_bindings.get(&prop.source_index)) {
+            Ok(instance) => model_animations.push(instance),
+            Err(error) => {
+                log::warn!("prop animation {}: {error}", prop.placement.model_path);
+                model_animation_issues.push(crate::media::preview_model::ModelAnimationIssue {
+                    model_path: prop.placement.model_path.clone(),
+                    entity_index: prop
+                        .placement
+                        .animation
+                        .as_ref()
+                        .map(|state| state.entity_index),
+                    error,
+                });
+            }
+        }
+    }
     PropBakeResult {
+        model_animations,
+        model_animation_issues,
         renderables: admitted.iter().map(|&index| &selected.placements[index]).map(|selected| {
             let placement = selected.placement;
             let bounds = prop_renderable_bounds(placement, &selected.model.model);
@@ -1129,8 +1172,10 @@ fn select_models<'a, T: AdmissionModel>(
     let mut baked_triangles = 0_usize;
 
     for (index, placement) in placements.iter().take(capped_count).enumerate() {
-        if placement.entity && matches!(placement.render_mode, 6 | 10) {
-            skip_stats.hidden_render_mode += 1;
+        if !placement.initially_visible
+            || (placement.entity && matches!(placement.render_mode, 6 | 10))
+        {
+            skip_stats.hidden_placement += 1;
             continue;
         }
         if !std::path::Path::new(&placement.model_path)
@@ -1253,17 +1298,125 @@ struct PreparedPropMeshes {
     meshes: Vec<MeshData>,
     visibility: Vec<MapMeshVisibility>,
     renderable_ranges: PropRenderableRanges,
+    animation_bindings: BTreeMap<usize, Vec<PropAnimationMeshBinding>>,
+}
+
+struct PropAnimationMeshBinding {
+    receiver_mesh: usize,
+    source_mesh: usize,
+    vertex_start: u32,
+}
+
+fn prepare_prop_animation(
+    selected: &SelectedPropPlacement<'_>,
+    bindings: Option<&Vec<PropAnimationMeshBinding>>,
+) -> Result<
+    crate::media::preview_model::ModelAnimationInstance,
+    crate::media::preview_model::ModelAnimationPreparationError,
+> {
+    use crate::media::preview_model::{
+        ModelAnimationBinding, ModelAnimationInstance, ModelAnimationPlayback,
+        ModelAnimationPlaybackMode, ModelAnimationPreparationError as Error,
+        ModelLightingContextId,
+    };
+    let placement = selected.placement;
+    let state = placement
+        .animation
+        .as_ref()
+        .ok_or(Error::MissingAnimation)?;
+    if state.random.is_some() {
+        return Err(Error::RandomActivity);
+    }
+    let model = &selected.model.model;
+    let animation = model.animation.as_ref().ok_or(Error::MissingAnimation)?;
+    let (sequence, playback) = if let Some(name) = &state.default_sequence {
+        (
+            animation
+                .sequence_index(name)
+                .ok_or_else(|| Error::MissingSequence { name: name.clone() })?,
+            ModelAnimationPlayback {
+                initial_cycle: 0.0,
+                playback_rate: 1.0,
+                mode: ModelAnimationPlaybackMode::Default,
+            },
+        )
+    } else {
+        (
+            state.sequence_index,
+            ModelAnimationPlayback {
+                initial_cycle: state.initial_cycle,
+                playback_rate: 0.0,
+                mode: ModelAnimationPlaybackMode::Sequence,
+            },
+        )
+    };
+    let cycle = playback.cycle(animation, sequence, 0.0)?;
+    animation.evaluate(sequence, cycle, &mut Default::default())?;
+    let bindings =
+        bindings
+            .into_iter()
+            .flatten()
+            .map(|binding| {
+                let expected = model.meshes[binding.source_mesh].vertices.len();
+                let vertices = model.skin_vertices.get(binding.source_mesh).ok_or(
+                    Error::InvalidVertexCount {
+                        mesh: binding.source_mesh,
+                        expected,
+                        actual: 0,
+                    },
+                )?;
+                if vertices.len() != expected {
+                    return Err(Error::InvalidVertexCount {
+                        mesh: binding.source_mesh,
+                        expected,
+                        actual: vertices.len(),
+                    });
+                }
+                Ok(ModelAnimationBinding {
+                    receiver_mesh: gmpublished_domain::scene::map::MapReceiverMesh::World(
+                        binding.receiver_mesh,
+                    ),
+                    vertex_start: binding.vertex_start,
+                    vertices: Arc::clone(vertices),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+    Ok(ModelAnimationInstance {
+        model_path: placement.model_path.clone(),
+        entity_index: Some(state.entity_index),
+        hammer_id: state.hammer_id,
+        animation: Arc::clone(animation),
+        sequence,
+        playback,
+        origin: placement.origin,
+        angles: placement.angles,
+        scale: placement.scale,
+        bindings,
+        lighting_context: ModelLightingContextId::from_gpu(selected.lighting_context),
+        illumination_attachment_index: model.illumination_attachment_index,
+        illumination_position: model.illumination_position,
+        lighting_origin_override: placement.lighting_origin,
+    })
 }
 
 fn prop_meshes_to_mesh_data(
-    prop_meshes: BTreeMap<(usize, bool), PropBuildMesh>,
+    prop_meshes: BTreeMap<prop_geometry::Destination, PropBuildMesh>,
 ) -> PreparedPropMeshes {
     let mut ranges = BTreeMap::<usize, Vec<MapRenderableRange>>::new();
+    let mut animation_bindings = BTreeMap::<usize, Vec<PropAnimationMeshBinding>>::new();
     let (meshes, visibility) = prop_meshes
         .into_values()
         .enumerate()
         .map(|(mesh_index, mesh)| {
             for range in mesh.renderable_ranges {
+                animation_bindings
+                    .entry(range.source_index)
+                    .or_default()
+                    .push(PropAnimationMeshBinding {
+                        receiver_mesh: mesh_index,
+                        source_mesh: range.draw_order,
+                        vertex_start: range.vertex_start,
+                    });
                 ranges
                     .entry(range.source_index)
                     .or_default()
@@ -1294,6 +1447,7 @@ fn prop_meshes_to_mesh_data(
         meshes,
         visibility,
         renderable_ranges: ranges,
+        animation_bindings,
     }
 }
 
@@ -1725,7 +1879,7 @@ pub(in super::super) fn bake_prop_placement(
     placement: &StaticPropPlacement,
     model: &PropModelAsset,
     lighting: LegacyPropLightingFallback,
-    prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
+    prop_meshes: &mut BTreeMap<prop_geometry::Destination, PropBuildMesh>,
 ) -> bool {
     bake_prop_placement_with_compiled(
         placement,
@@ -1747,7 +1901,7 @@ fn bake_prop_placement_with_compiled(
     lighting: LegacyPropLightingFallback,
     compiled: Option<&CompiledPropLighting>,
     identity: PropBakePlacement,
-    prop_meshes: &mut BTreeMap<(usize, bool), PropBuildMesh>,
+    prop_meshes: &mut BTreeMap<prop_geometry::Destination, PropBuildMesh>,
 ) -> bool {
     assert!(prop_meshes.is_empty(), "single-placement fixture output");
     let selected = SelectedPropPlacement {
@@ -1860,6 +2014,14 @@ pub(in super::super) fn transform_prop_normal(
 #[cfg(test)]
 mod compiled_bake_tests {
     use super::*;
+
+    fn destination(material_index: usize, entity: bool) -> prop_geometry::Destination {
+        prop_geometry::Destination {
+            material_index,
+            entity,
+            animation_instance: None,
+        }
+    }
     use crate::media::file_preview_decode::tests::{prop_placement, test_prop_asset};
     use gmpublished_domain::scene::map::AmbientCube;
 
@@ -2009,6 +2171,45 @@ mod compiled_bake_tests {
     }
 
     #[test]
+    fn animated_entity_bounds_include_motion_under_placement_transform() {
+        let mut placement = prop_placement(
+            "models/turn.mdl",
+            Vec3::new(100.0, 200.0, 300.0),
+            Vec3::new(0.0, 90.0, 0.0),
+            0,
+        );
+        placement.entity = true;
+        placement.scale = 2.0;
+        placement.animation = Some(gmpublished_domain::scene::map::MapPropAnimation {
+            entity_index: 7,
+            hammer_id: None,
+            default_sequence: Some("turn".into()),
+            sequence_index: 0,
+            initial_cycle: 0.0,
+            playback_rate: 1.0,
+            random: None,
+        });
+        let mut model = (*test_prop_asset(vec![0, 1]).model).clone();
+        model.animation = Some(gmpublished_domain::scene::model::animation_for_tests());
+        model.bounds_min = Vec3::new(-40.0, -1.0, -1.0);
+        model.bounds_max = Vec3::new(1.0, 40.0, 1.0);
+        let bounds = prop_renderable_bounds(&placement, &model).unwrap();
+        assert_eq!(
+            bounds.local,
+            MapBounds {
+                min: Vec3::new(-80.0, -64.0, -64.0),
+                max: Vec3::new(64.0, 80.0, 64.0)
+            }
+        );
+        assert!((bounds.world.min - Vec3::new(20.0, 120.0, 236.0)).length() < 0.001);
+        assert!((bounds.world.max - Vec3::new(164.0, 264.0, 364.0)).length() < 0.001);
+        assert_eq!(
+            prop_model_world_bounds(&placement, &model),
+            Some((bounds.world.min, bounds.world.max))
+        );
+    }
+
+    #[test]
     fn renderable_identity_and_draw_order_survive_parallel_material_merging() {
         let mut asset = test_prop_asset(vec![1, 0]);
         let mut model = (*asset.model).clone();
@@ -2119,7 +2320,7 @@ mod compiled_bake_tests {
             },
             &mut baked
         ));
-        let vertex = baked[&(0, false)].vertices[0];
+        let vertex = baked[&destination(0, false)].vertices[0];
         assert_eq!(vertex.position, Vec3::new(12.5, 20.0, 30.0));
         assert_eq!(vertex.illumination, Vec3::ZERO);
         assert_eq!(
@@ -2164,16 +2365,34 @@ mod compiled_bake_tests {
             .collect::<Vec<_>>();
         let serial = bake_selected_prop_placements_serial(&selected).meshes;
         let parallel = bake_selected_prop_placements_parallel(&selected).meshes;
-        assert_eq!(serial[&(0, false)].vertices, parallel[&(0, false)].vertices);
-        assert_eq!(serial[&(0, false)].indices, parallel[&(0, false)].indices);
-        assert_eq!(parallel[&(0, false)].vertices[0].illumination, Vec3::ZERO);
         assert_eq!(
-            parallel[&(0, false)].vertices[3].illumination,
+            serial[&destination(0, false)].vertices,
+            parallel[&destination(0, false)].vertices
+        );
+        assert_eq!(
+            serial[&destination(0, false)].indices,
+            parallel[&destination(0, false)].indices
+        );
+        assert_eq!(
+            parallel[&destination(0, false)].vertices[0].illumination,
+            Vec3::ZERO
+        );
+        assert_eq!(
+            parallel[&destination(0, false)].vertices[3].illumination,
             Vec3::splat(1.0)
         );
-        assert_eq!(parallel[&(0, false)].vertices[0].color, Vec3::splat(1.0));
-        assert_eq!(parallel[&(0, false)].vertices[0].lighting_context, 1);
-        assert_eq!(parallel[&(0, false)].vertices[3].lighting_context, 2);
+        assert_eq!(
+            parallel[&destination(0, false)].vertices[0].color,
+            Vec3::splat(1.0)
+        );
+        assert_eq!(
+            parallel[&destination(0, false)].vertices[0].lighting_context,
+            1
+        );
+        assert_eq!(
+            parallel[&destination(0, false)].vertices[3].lighting_context,
+            2
+        );
     }
 
     #[test]
@@ -2192,7 +2411,7 @@ mod compiled_bake_tests {
             },
             &mut baked
         ));
-        let vertex = baked[&(0, false)].vertices[0];
+        let vertex = baked[&destination(0, false)].vertices[0];
         assert_eq!(vertex.color, Vec3::splat(0.25));
         assert_eq!(vertex.illumination, Vec3::splat(1.0));
         assert_eq!(vertex.lighting_mode & 15, 10);
