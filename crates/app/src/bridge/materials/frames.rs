@@ -38,6 +38,14 @@ impl DecodedTextureFrames {
             load_outcome: outcome,
         }
     }
+    pub(crate) fn on_demand(
+        &self,
+    ) -> Option<(
+        &Arc<super::ReloadableTextureSource>,
+        &super::TextureFrameRequest,
+    )> {
+        self.resident.on_demand()
+    }
     pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
         self.resident.resident()
     }
@@ -47,7 +55,12 @@ impl DecodedTextureFrames {
             .unwrap_or(0)
     }
     pub(crate) fn frame_count(&self) -> usize {
-        (self.resident.id().frames.end - self.resident.id().frames.start) as usize
+        if self.on_demand().is_some() {
+            self.source_metadata()
+                .map_or(0, |metadata| metadata.frame_count as usize)
+        } else {
+            (self.resident.id().frames.end - self.resident.id().frames.start) as usize
+        }
     }
     #[cfg(any(test, feature = "map-capture"))]
     pub(crate) fn frame(&self, index: usize) -> Option<&[ResidentTextureMip]> {
@@ -118,6 +131,15 @@ impl MaterialResolver {
         name: &str,
     ) -> Option<Arc<DecodedTextureFrames>> {
         let path = texture_path(name)?;
+        if self.config.texture_loading == super::TextureLoading::OnDemand {
+            let source =
+                self.resolve_on_demand_texture(&path, super::TextureFailurePolicy::Unverified)?;
+            return Some(Arc::new(DecodedTextureFrames {
+                resident: source.resident.clone(),
+                source_metadata: source.source_metadata.clone(),
+                load_outcome: source.load_outcome,
+            }));
+        }
         let selected = match self.selected_texture_asset(&path) {
             Ok(selected) => selected,
             Err(super::TextureSourceError::SourceUnavailable(_)) => {

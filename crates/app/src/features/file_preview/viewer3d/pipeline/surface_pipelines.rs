@@ -29,7 +29,7 @@ impl SurfaceBlend {
 impl From<RenderMode> for SurfaceBlend {
     fn from(mode: RenderMode) -> Self {
         match mode {
-            RenderMode::Opaque | RenderMode::Cutout => Self::Opaque,
+            RenderMode::NoDraw | RenderMode::Opaque | RenderMode::Cutout => Self::Opaque,
             RenderMode::Translucent => Self::Alpha,
             RenderMode::Additive => Self::Additive,
             RenderMode::Modulate => Self::Modulate,
@@ -72,6 +72,9 @@ impl SurfacePipelineVariants {
             .collect::<Vec<_>>();
         let mut pipelines = HashMap::new();
         for (material, &authored) in materials.iter().zip(&raster) {
+            if !material.render_mode.draws() {
+                continue;
+            }
             for state in [
                 authored,
                 SurfaceRaster {

@@ -1,4 +1,5 @@
 use super::pipeline::texture_upload::{RETIREMENT_TIMEOUT, RetirementSubscription};
+use crate::bridge::materials::PageSubscription;
 use crate::generation::Generation;
 use iced::{Subscription, futures};
 use std::{
@@ -28,6 +29,7 @@ pub enum RenderStatus {
 pub struct RenderFeedback {
     status: Mutex<RenderStatus>,
     retirement: Mutex<Option<RetirementSubscription>>,
+    pages: Mutex<Option<PageSubscription>>,
     changes: watch::Sender<u64>,
 }
 impl Default for RenderFeedback {
@@ -35,6 +37,7 @@ impl Default for RenderFeedback {
         Self {
             status: Mutex::new(RenderStatus::default()),
             retirement: Mutex::new(None),
+            pages: Mutex::new(None),
             changes: watch::channel(0).0,
         }
     }
@@ -66,6 +69,20 @@ impl RenderFeedback {
         *current = subscription;
         drop(current);
         self.notify();
+    }
+    pub(super) fn bind_pages(&self, subscription: Option<PageSubscription>) {
+        let mut current = self.pages.lock().expect("page feedback lock");
+        if current.as_ref().map(|binding| binding.id)
+            == subscription.as_ref().map(|binding| binding.id)
+        {
+            return;
+        }
+        *current = subscription;
+        drop(current);
+        self.notify();
+    }
+    fn page_subscription(&self) -> Option<PageSubscription> {
+        self.pages.lock().expect("page feedback lock").clone()
     }
     fn retirement_subscription(&self) -> Option<RetirementSubscription> {
         self.retirement
@@ -130,33 +147,59 @@ pub(in crate::features::file_preview) fn subscription(
         feedback_stream,
     )
 }
+async fn optional_change<T>(receiver: Option<&mut watch::Receiver<T>>) -> bool {
+    match receiver {
+        Some(receiver) => receiver.changed().await.is_err(),
+        None => futures::future::pending().await,
+    }
+}
+
 fn feedback_stream(
     key: &FeedbackKey,
 ) -> impl futures::Stream<Item = super::super::Message> + use<> {
     let changes = key.feedback.changes.subscribe();
     futures::stream::unfold(
-        (key.clone(), changes, None::<RetirementSubscription>, true),
-        |(key, mut changes, mut retirement, initial)| async move {
+        (
+            key.clone(),
+            changes,
+            None::<RetirementSubscription>,
+            None::<PageSubscription>,
+            true,
+        ),
+        |(key, mut changes, mut retirement, mut pages, initial)| async move {
             let message = super::super::Message::RenderFeedbackChanged(key.generation);
             if initial {
-                return Some((message, (key, changes, retirement, false)));
+                return Some((message, (key, changes, retirement, pages, false)));
             }
             let binding = key.feedback.retirement_subscription();
-            if retirement.as_ref().map(|value| value.id) != binding.as_ref().map(|value| value.id) {
-                return Some((message, (key, changes, binding, false)));
+            let page_binding = key.feedback.page_subscription();
+            if retirement.as_ref().map(|value| value.id) != binding.as_ref().map(|value| value.id)
+                || pages.as_ref().map(|value| value.id)
+                    != page_binding.as_ref().map(|value| value.id)
+            {
+                return Some((message, (key, changes, binding, page_binding, false)));
             }
-            let (closed, retirement_closed) = if let Some(binding) = &mut retirement {
-                match futures::future::select(
-                    Box::pin(changes.changed()),
-                    Box::pin(binding.receiver.changed()),
-                )
-                .await
-                {
-                    futures::future::Either::Left((result, _)) => (result.is_err(), false),
-                    futures::future::Either::Right((result, _)) => (false, result.is_err()),
+            let (closed, retirement_closed, pages_closed) = match futures::future::select(
+                Box::pin(changes.changed()),
+                Box::pin(futures::future::select(
+                    Box::pin(optional_change(
+                        retirement.as_mut().map(|binding| &mut binding.receiver),
+                    )),
+                    Box::pin(optional_change(
+                        pages.as_mut().map(|binding| &mut binding.receiver),
+                    )),
+                )),
+            )
+            .await
+            {
+                futures::future::Either::Left((result, _)) => (result.is_err(), false, false),
+                futures::future::Either::Right((futures::future::Either::Left((closed, _)), _)) => {
+                    (false, closed, false)
                 }
-            } else {
-                (changes.changed().await.is_err(), false)
+                futures::future::Either::Right((
+                    futures::future::Either::Right((closed, _)),
+                    _,
+                )) => (false, false, closed),
             };
             if closed {
                 return None;
@@ -165,7 +208,11 @@ fn feedback_stream(
                 retirement = None;
                 key.feedback.bind_retirement(None);
             }
-            Some((message, (key, changes, retirement, false)))
+            if pages_closed {
+                pages = None;
+                key.feedback.bind_pages(None);
+            }
+            Some((message, (key, changes, retirement, pages, false)))
         },
     )
 }
@@ -247,6 +294,53 @@ mod tests {
         assert!(!feedback.wants_redraw(started + RETIREMENT_TIMEOUT));
         assert_eq!(feedback.snapshot(), RenderStatus::RetirementTimedOut);
         signal.complete();
+        assert!(!feedback.wants_redraw(Instant::now()));
+    }
+
+    #[test]
+    fn page_completion_wakes_static_pending_preview_without_redraw_polling() {
+        let (sender, receiver) = watch::channel(0);
+        let feedback = Arc::new(RenderFeedback::default());
+        feedback.bind_pages(Some(PageSubscription { id: 41, receiver }));
+        let key = FeedbackKey {
+            feedback: Arc::clone(&feedback),
+            generation: Generation::INITIAL,
+        };
+        let mut stream = Box::pin(feedback_stream(&key));
+        assert!(stream.next().now_or_never().is_some());
+        assert!(stream.next().now_or_never().is_some());
+        assert!(stream.next().now_or_never().is_none());
+        assert!(!feedback.wants_redraw(Instant::now()));
+        sender.send_modify(|revision| *revision += 1);
+        assert!(stream.next().now_or_never().is_some());
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(feedback.snapshot(), RenderStatus::Pending);
+    }
+
+    #[test]
+    fn detached_or_closed_page_source_does_not_keep_feedback_waking() {
+        let (sender, receiver) = watch::channel(0);
+        let feedback = Arc::new(RenderFeedback::default());
+        feedback.bind_pages(Some(PageSubscription { id: 42, receiver }));
+        let key = FeedbackKey {
+            feedback: Arc::clone(&feedback),
+            generation: Generation::INITIAL,
+        };
+        let mut stream = Box::pin(feedback_stream(&key));
+        assert!(stream.next().now_or_never().is_some());
+        assert!(stream.next().now_or_never().is_some());
+        assert!(stream.next().now_or_never().is_none());
+        feedback.bind_pages(None);
+        while stream.next().now_or_never().is_some() {}
+        sender.send_modify(|revision| *revision += 1);
+        assert!(stream.next().now_or_never().is_none());
+        let (closed_sender, receiver) = watch::channel(0);
+        feedback.bind_pages(Some(PageSubscription { id: 43, receiver }));
+        while stream.next().now_or_never().is_some() {}
+        drop(closed_sender);
+        while stream.next().now_or_never().is_some() {}
+        assert!(feedback.page_subscription().is_none());
+        assert!(stream.next().now_or_never().is_none());
         assert!(!feedback.wants_redraw(Instant::now()));
     }
 }

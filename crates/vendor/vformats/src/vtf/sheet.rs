@@ -219,6 +219,11 @@ pub(super) fn descriptor(payload: &[u8]) -> Result<SpriteSheetDescriptor<'_>, Sp
 }
 
 impl SpriteSheetDescriptor<'_> {
+    /// Inspect an independently read resource payload without retaining its VTF container.
+    pub fn from_payload(payload: &[u8]) -> Result<SpriteSheetDescriptor<'_>, SpriteSheetError> {
+        descriptor(payload)
+    }
+
     #[must_use]
     #[allow(missing_docs)]
     pub fn cost(&self) -> SpriteSheetCost {

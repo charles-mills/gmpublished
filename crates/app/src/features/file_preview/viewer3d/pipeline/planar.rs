@@ -24,19 +24,22 @@ impl Selections {
         indices: Vec<u32>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        source: &super::upload::UploadedMesh,
     ) -> UploadedVisibleIndices {
         match self.entries.entry(mesh) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 if entry.get().indices != indices {
                     *entry.get_mut() = Selection {
-                        uploaded: upload_visible_indices(device, queue, &indices),
+                        uploaded: upload_visible_indices(device, queue, &indices)
+                            .with_lightmaps(source, &indices),
                         indices,
                     };
                 }
                 entry.get().uploaded.clone()
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let uploaded = upload_visible_indices(device, queue, &indices);
+                let uploaded = upload_visible_indices(device, queue, &indices)
+                    .with_lightmaps(source, &indices);
                 entry
                     .insert(Selection { indices, uploaded })
                     .uploaded
@@ -112,9 +115,9 @@ pub(super) fn prepare(
                 );
                 Vec::new()
             });
-            let selected = view
-                .planar_indices
-                .update(item.mesh_index, indices, device, queue);
+            let selected =
+                view.planar_indices
+                    .update(item.mesh_index, indices, device, queue, uploaded);
             visibility.mesh_indices.insert(item.mesh_index, selected);
         }
     }

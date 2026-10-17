@@ -235,6 +235,11 @@ impl Renderer {
         #[cfg(feature = "renderer-profiling")]
         let submit_started = std::time::Instant::now();
         let submission = self.engine.queue.submit([encoder.finish()]);
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .submitted(&self.engine.queue);
         #[cfg(feature = "renderer-profiling")]
         if let Some(token) = self.profile_token {
             profiling::update(token, |sample| {
@@ -347,6 +352,11 @@ impl Renderer {
 
         self.staging_belt.finish();
         let index = self.engine.queue.submit([encoder.finish()]);
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .submitted(&self.engine.queue);
         #[cfg(feature = "renderer-profiling")]
         if let Some(pending) = self.profile_pending.take() {
             self.profiler.submitted(&self.engine.queue, pending);
@@ -377,6 +387,11 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         viewport: &Viewport,
     ) {
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .begin_prepare();
         let scale_factor = viewport.scale_factor();
 
         self.text_viewport
@@ -489,6 +504,11 @@ impl Renderer {
                 prepare_span.finish();
             }
         }
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .finish_prepare(&self.engine.device, &self.engine.queue);
     }
 
     fn render(
@@ -1021,7 +1041,7 @@ impl renderer::Headless for Renderer {
                 label: Some("iced_wgpu [headless]"),
                 required_features: requested_features,
                 required_limits: wgpu::Limits {
-                    max_bind_groups: 2,
+                    max_bind_groups: 3,
                     ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,

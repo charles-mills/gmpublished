@@ -1036,7 +1036,7 @@ mod uniform_layout_tests {
         }
         assert_eq!(
             size_of::<ModelVertex>(),
-            offset_of!(ModelVertex, surface_mark) + 4
+            offset_of!(ModelVertex, lightmap_page) + 4
         );
         let sign = attributes.iter().find(|a| a.shader_location == 12).unwrap();
         assert_eq!(sign.offset as usize, offset_of!(ModelVertex, tangent_sign));
@@ -1389,7 +1389,7 @@ mod tests {
                     canonical_name: Some(name.into()),
                     name: name.into(),
                     shader: r.shader,
-                    texture: Some(r.texture),
+                    texture: r.texture,
                     texture2: None,
                     render_mode: r.render_mode,
                     alpha_policy: r.render_mode.texture_alpha_policy(),

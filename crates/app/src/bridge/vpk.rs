@@ -42,6 +42,15 @@ impl VpkArchive {
             .map(|entry| entry.size)
     }
 
+    pub(crate) fn entry_storage(
+        &self,
+        path: &str,
+    ) -> Result<gmpublished_backend::vpk::VpkEntryStorage, VpkError> {
+        self.file
+            .as_ref()
+            .map_err(Clone::clone)?
+            .entry_storage(path)
+    }
     pub(crate) fn entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VpkError> {
         self.file
             .as_ref()

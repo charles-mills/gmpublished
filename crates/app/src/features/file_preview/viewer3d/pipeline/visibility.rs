@@ -8,6 +8,21 @@ use std::collections::HashMap;
 pub struct UploadedVisibleIndices {
     pub buffer: Option<wgpu::Buffer>,
     pub index_count: u32,
+    pub(super) lightmaps: Vec<super::lightmap_ranges::PageRange>,
+}
+
+impl UploadedVisibleIndices {
+    pub(super) fn with_lightmaps(
+        mut self,
+        mesh: &super::upload::UploadedMesh,
+        indices: &[u32],
+    ) -> Self {
+        self.lightmaps = mesh
+            .lightmaps
+            .select(indices)
+            .expect("visibility preserves admitted triangles");
+        self
+    }
 }
 
 #[derive(Debug, Default)]
@@ -77,6 +92,7 @@ pub fn upload_visible_indices(
         return UploadedVisibleIndices {
             buffer: None,
             index_count,
+            lightmaps: Vec::new(),
         };
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -89,6 +105,7 @@ pub fn upload_visible_indices(
     UploadedVisibleIndices {
         buffer: Some(buffer),
         index_count,
+        lightmaps: Vec::new(),
     }
 }
 
@@ -158,8 +175,10 @@ impl UploadedVisibility {
                     .mesh_indices
                     .get(mesh.scene_mesh_index)
                     .map_or(&[][..], Vec::as_slice);
-                self.mesh_indices
-                    .insert(index, upload_visible_indices(device, queue, visible));
+                self.mesh_indices.insert(
+                    index,
+                    upload_visible_indices(device, queue, visible).with_lightmaps(mesh, visible),
+                );
             }
         }
         self.plan = plan;

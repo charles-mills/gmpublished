@@ -48,7 +48,9 @@ pub(super) fn prepare(
     } else {
         (&upload.assets.detail_sprites, map.detail_sprites.as_slice())
     };
-    if uploaded.is_none() {
+    if uploaded.as_ref().is_none_or(|uploaded| {
+        upload.assets.material_render_modes[uploaded.material_index] == RenderMode::NoDraw
+    }) {
         return Vec::new();
     }
     prepare_sprites(

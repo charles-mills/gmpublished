@@ -15,7 +15,7 @@ use iced_runtime::{UserInterface, user_interface};
 pub use performance::CaptureDiagnostics;
 #[cfg(feature = "gui-benchmark")]
 pub use performance::{Pause, Profile};
-pub(super) use performance::{Phase, VisibilityMode};
+pub(super) use performance::{Phase, Presentation, VisibilityMode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shader::Program as _;
@@ -133,6 +133,56 @@ fn benchmark_render(
         "includes_readback": false,
         "includes_window_presentation_or_widget_update": false,
     }))
+}
+
+fn texture_readiness(statuses: &[super::feedback::RenderStatus]) -> Result<bool, String> {
+    use super::feedback::RenderStatus;
+    if statuses.is_empty() {
+        return Err("capture has no render feedback".into());
+    }
+    for status in statuses {
+        match status {
+            RenderStatus::Rejected { reason } => return Err(reason.clone()),
+            RenderStatus::RetirementTimedOut => {
+                return Err("GPU resource retirement timed out".into());
+            }
+            RenderStatus::Pending | RenderStatus::Retiring { .. } | RenderStatus::Ready { .. } => {}
+        }
+    }
+    Ok(statuses
+        .iter()
+        .all(|status| matches!(status, RenderStatus::Ready { .. })))
+}
+
+fn capture_when_ready(
+    renderer: &mut iced::Renderer,
+    size: Size<u32>,
+    feedbacks: &[Arc<super::feedback::RenderFeedback>],
+    observers: &[CaptureDiagnostics],
+) -> Vec<u8> {
+    let _pauses = observers
+        .iter()
+        .map(CaptureDiagnostics::pause)
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    loop {
+        // screenshot submits and waits for GPU completion, including page-upload retirements.
+        let pixels = renderer.screenshot(size, 1.0, Color::BLACK);
+        let statuses = feedbacks
+            .iter()
+            .map(|feedback| feedback.snapshot())
+            .collect::<Vec<_>>();
+        match texture_readiness(&statuses) {
+            Ok(true) => return pixels,
+            Ok(false) => {}
+            Err(error) => panic!("capture texture preparation failed: {error}"),
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "capture texture preparation timed out: {statuses:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
@@ -272,6 +322,8 @@ impl CaptureModelVertexCompression {
 #[serde(deny_unknown_fields)]
 struct CaptureMap {
     name: String,
+    #[serde(default)]
+    archive: Option<PathBuf>,
     cameras: Vec<CaptureCamera>,
     #[serde(default)]
     verify_temporal_view_isolation: bool,
@@ -283,6 +335,70 @@ struct CaptureMap {
     shader_lighting: Option<CaptureModelLighting>,
     #[serde(default)]
     bone_pose_control: Option<Value>,
+}
+
+struct CaptureMapInput {
+    source: Arc<PreviewArchiveSource>,
+    entry_path: String,
+    bsp_path: Option<PathBuf>,
+    archive_path: Option<PathBuf>,
+    bytes: Vec<u8>,
+}
+
+impl CaptureMap {
+    fn validate_source(&self, maps_directory: &std::path::Path) -> Result<PathBuf, String> {
+        let path = self
+            .archive
+            .clone()
+            .unwrap_or_else(|| maps_directory.join(format!("{}.bsp", self.name)));
+        if self.archive.is_some()
+            && !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("gma"))
+        {
+            return Err(format!("capture archive must be a GMA: {}", path.display()));
+        }
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("capture source {}: {error}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("capture source is not a file: {}", path.display()));
+        }
+        Ok(path)
+    }
+
+    fn read_source(&self, maps_directory: &std::path::Path) -> Result<CaptureMapInput, String> {
+        let path = self.validate_source(maps_directory)?;
+        let entry_path = format!("maps/{}.bsp", self.name);
+        let (source, bsp_path, archive_path) = if self.archive.is_some() {
+            let archive = crate::bridge::gma::PreviewArchive::open(&path)
+                .map_err(|error| format!("capture archive {}: {error}", path.display()))?;
+            (
+                PreviewArchiveSource::from_gma(Arc::new(archive)),
+                None,
+                Some(path),
+            )
+        } else {
+            let size = fs::metadata(&path)
+                .map_err(|error| error.to_string())?
+                .len();
+            (
+                PreviewArchiveSource::from_folder([(entry_path.clone(), size, path.clone())]),
+                Some(path),
+                None,
+            )
+        };
+        let bytes = source
+            .entry_bytes(&entry_path)
+            .map_err(|error| format!("capture entry {entry_path}: {error}"))?;
+        Ok(CaptureMapInput {
+            source,
+            entry_path,
+            bsp_path,
+            archive_path,
+            bytes,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -638,6 +754,7 @@ impl shader::Program<Message> for FixedView {
             cursor,
             bounds,
         );
+        primitive.exact_texture_frame = true;
         primitive.reflection_target = self.target == CaptureTarget::Reflection;
         primitive.refraction_target = self.target == CaptureTarget::Refraction;
         primitive.capture_diagnostics = Some(self.diagnostics.clone());
@@ -751,33 +868,57 @@ fn texture_metadata_info(metadata: &crate::bridge::materials::TextureMetadata) -
         "bumpmap_scale_bits":metadata.bumpmap_scale_bits})
 }
 
+fn texture_storage_name(storage: crate::bridge::materials::TextureStorage) -> String {
+    match storage {
+        crate::bridge::materials::TextureStorage::Rgba8 => "RGBA8".into(),
+        crate::bridge::materials::TextureStorage::Bc(format) => format!("{format:?}"),
+    }
+}
+
+fn texture_recipe_info(recipe: &crate::bridge::materials::TextureFrameRequest) -> Value {
+    json!({"process_source_id":format!("{:?}",recipe.source_id), "frame":recipe.frame,
+        "faces":[recipe.faces.start,recipe.faces.end],"first_source_mip":recipe.first_source_mip,
+        "mip_count":recipe.mip_count,"storage":texture_storage_name(recipe.storage)})
+}
+
 fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
-    let mut hash = crc32fast::Hasher::new();
-    let format = if let Some((format, mips)) = texture.bc_payload() {
-        for mip in mips {
-            hash.update(mip.bytes.as_slice());
+    let on_demand = texture.on_demand();
+    let resident = texture.resident();
+    let format = on_demand
+        .map(|(_, recipe)| texture_storage_name(recipe.storage))
+        .or_else(|| resident.map(|resident| texture_storage_name(resident.id().storage)));
+    let mip_levels = on_demand
+        .map(|(_, recipe)| recipe.mip_count)
+        .or_else(|| resident.map(|resident| resident.id().mip_count));
+    let payload_crc32 = resident.map(|_| {
+        let mut hash = crc32fast::Hasher::new();
+        if let Some((_, mips)) = texture.bc_payload() {
+            for mip in mips {
+                hash.update(mip.bytes.as_slice());
+            }
+        } else {
+            for mip in texture.mip_chain() {
+                hash.update(mip.rgba);
+            }
         }
-        format!("{format:?}")
-    } else {
-        for mip in texture.mip_chain() {
-            hash.update(mip.rgba);
-        }
-        "RGBA8".to_owned()
-    };
+        format!("{:08x}", hash.finalize())
+    });
     json!({
+        "state": if on_demand.is_some() { "on_demand" } else if resident.is_some() { "resident" } else { "unmaterialized" },
+        "recipe": on_demand.map(|(_, recipe)| texture_recipe_info(recipe)),
         "dimensions": [texture.width(), texture.height()],
         "original_dimensions": texture.original_dimensions(),
         "mapping_dimensions": texture.mapping_dimensions(),
         "effective_base_texture": texture.has_effective_base_texture(),
-        "mip_levels": texture.bc_payload().map_or_else(|| texture.mip_chain().count(), |(_, mips)| mips.len()),
+        "mip_levels": mip_levels,
         "format": format,
-        "payload_crc32": format!("{:08x}", hash.finalize()),
+        "payload_crc32": payload_crc32,
         "water_fallback": texture.is_water_fallback(),
         "vtf_flags": texture.flags(),
         "load_outcome": format!("{:?}",texture.load_outcome()),
         "effective_reflectivity_bits":texture.reflectivity_bits(),
         "source_metadata":texture.source_metadata().map(texture_metadata_info),
-        "resident": texture.resident().map(|resident|json!({"frames":[resident.id().frames.start,resident.id().frames.end],
+        "resident": resident.map(|resident|json!({"frames":[resident.id().frames.start,resident.id().frames.end],
             "faces":[resident.id().faces.start,resident.id().faces.end],
             "first_source_mip":resident.id().first_source_mip,
             "mip_count":resident.id().mip_count,"bytes":resident.byte_len()})),
@@ -786,8 +927,9 @@ fn texture_info(texture: &crate::bridge::materials::ResolvedTexture) -> Value {
 
 fn material_info(slot: &MaterialSlot) -> Value {
     let water = slot.shader.water().map(|water| {
-        let frames = water.normal_map.as_ref().map(|normal| {
-            (0..normal.frame_count())
+        let frames = water.normal_map.as_ref().and_then(|normal| {
+            normal.resident()?;
+            Some((0..normal.frame_count())
                 .filter_map(|index| normal.frame(index))
                 .map(|mips| {
                     mips.iter()
@@ -800,13 +942,15 @@ fn material_info(slot: &MaterialSlot) -> Value {
                         })
                         .collect::<Vec<_>>()
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>())
         });
         json!({
             "shader": water.shader,
             "parameters": water.parameters,
             "normal_map_path": water.normal_map_path,
             "normal_frames_linear_rgba": frames,
+            "normal_state": water.normal_map.as_ref().map(|normal| if normal.on_demand().is_some() { "on_demand" } else if normal.resident().is_some() { "resident" } else { "unmaterialized" }),
+            "normal_page_recipe": water.normal_map.as_ref().and_then(|normal| normal.on_demand().map(|(_, recipe)| texture_recipe_info(recipe))),
             "normal_source_metadata":water.normal_map.as_ref().and_then(|normal| normal.source_metadata().map(texture_metadata_info)),
             "bump_transform": water.bump_transform,
             "proxy_scroll": water.proxy_scroll,
@@ -1022,8 +1166,8 @@ pub fn capture_map_reference_frames() {
         "the game asset resolver must discover the primary Garry's Mod VPK"
     );
     for map in &suite.maps {
-        let path = maps_directory.join(format!("{}.bsp", map.name));
-        assert!(path.is_file(), "capture map is missing: {}", path.display());
+        map.validate_source(&maps_directory)
+            .expect("capture input source");
     }
     let output = PathBuf::from(
         std::env::var_os("GMPUBLISHED_MAP_CAPTURE_DIR")
@@ -1157,20 +1301,18 @@ pub fn capture_map_reference_frames() {
     let theme = iced::Theme::Dark;
     for map in &suite.maps {
         println!("map capture: loading {}", map.name);
-        let map_path = maps_directory.join(format!("{}.bsp", map.name));
-        let bytes = fs::read(&map_path).expect("read reference BSP");
+        let input = map
+            .read_source(&maps_directory)
+            .expect("read capture map source");
+        let bytes = &input.bytes;
         let request = PreviewRequest {
             cancellation: Default::default(),
             request_id: Generation::INITIAL.next(),
-            archive: PreviewArchiveSource::from_folder([(
-                format!("maps/{}.bsp", map.name),
-                bytes.len() as u64,
-                map_path.clone(),
-            )]),
-            entry_path: format!("maps/{}.bsp", map.name),
+            archive: Arc::clone(&input.source),
+            entry_path: input.entry_path.clone(),
             display_name: format!("{}.bsp", map.name),
             size_bytes: bytes.len() as u64,
-            crc32: crc32fast::hash(&bytes),
+            crc32: crc32fast::hash(bytes),
             bypass_size_limits: true,
             map_texture_quality: Default::default(),
         };
@@ -1232,11 +1374,32 @@ pub fn capture_map_reference_frames() {
             .expect("serialize material diagnostics"),
         )
         .expect("write material diagnostics");
+        let mut runtime_vertex_counts = vec![0_usize; scene.model_lighting.len()];
+        for vertex in scene
+            .scene
+            .meshes
+            .iter()
+            .chain(&scene.map_skybox_meshes)
+            .flat_map(|mesh| &mesh.vertices)
+        {
+            if vertex.lighting_mode & crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT
+                != 0
+                && let Some(count) = vertex
+                    .lighting_context
+                    .checked_sub(1)
+                    .and_then(|index| runtime_vertex_counts.get_mut(index as usize))
+            {
+                *count += 1;
+            }
+        }
         let mut map_record = json!({
             "name": map.name,
             "shader_lighting":shader_lighting,
             "native_bone_pose_control":map.bone_pose_control,
-            "bsp_path": map_path,
+            "bsp_path": input.bsp_path,
+            "archive_path": input.archive_path,
+            "entry_path": input.entry_path,
+            "entry_source": if map.archive.is_some() { "gma" } else { "folder" },
             "bsp_bytes": bytes.len(),
             "bsp_crc32": format!("{:08x}", request.crc32),
             "load_wall_time_ms": load_ms,
@@ -1277,8 +1440,7 @@ pub fn capture_map_reference_frames() {
                         "ambient":seed.ambient_cube.colors.map(Vec3::to_array),"diagnostics":format!("{:?}",seed.diagnostics)}),
                     Some(Err(error))=>json!({"error":format!("{error:?}")}),
                 },
-                "runtime_vertices":scene.scene.meshes.iter().chain(&scene.map_skybox_meshes)
-                    .flat_map(|mesh|&mesh.vertices).filter(|vertex|vertex.lighting_context as usize==index+1 && vertex.lighting_mode & crate::media::preview_model::vertex_lighting::RUNTIME_CONTEXT != 0).count(),
+                "runtime_vertices":runtime_vertex_counts[index],
             })).collect::<Vec<_>>(),
             "sky": scene.skybox.as_ref().map(sky_info),
             "suns": scene.suns.iter().map(|sun|json!({
@@ -1294,8 +1456,8 @@ pub fn capture_map_reference_frames() {
                 "start_disabled": sun.start_disabled,
                 "spawn_flags": sun.spawn_flags,
             })).collect::<Vec<_>>(),
-            "baked_lighting": scene.lightmap.as_ref().map(|atlas| serde_json::json!({"source":format!("{:?}",atlas.source),"dimensions":[atlas.width,atlas.height],"animated":atlas.is_animated(),"active_styles":atlas.active_styles(),"initial_weights":atlas.active_styles().into_iter().map(|index|(index.to_string(),atlas.style_values(0.0)[usize::from(index)])).collect::<std::collections::BTreeMap<_,_>>()})),
-            "lightmap_crc32": scene.lightmap.as_ref().map(|atlas| format!("{:08x}", crc32fast::hash(&atlas.rgba))),
+            "baked_lighting": scene.lightmap.as_ref().map(|set| serde_json::json!({"source":format!("{:?}",set.source),"storage":"virtual_pages","dimensions":null,"pages":set.pages().iter().enumerate().map(|(id,page)|json!({"id":id,"dimensions":[page.width,page.height],"active_styles":page.active_styles()})).collect::<Vec<_>>(),"animated":set.is_animated(),"active_styles":set.active_styles(),"initial_weights":set.active_styles().into_iter().map(|index|(index.to_string(),set.style_values(0.0)[usize::from(index)])).collect::<std::collections::BTreeMap<_,_>>()})),
+            "lightmap_crc32": null,
             "source_lightmap_layout": scene.surface_lightmaps.as_ref().map(|layout| json!({
                 "profile": [layout.profile.width, layout.profile.height],
                 "physical_pages": layout.physical_page_count,
@@ -1407,6 +1569,7 @@ pub fn capture_map_reference_frames() {
                 )
                 .uniforms
                 .water_depth_params;
+            let render_feedback = Arc::clone(&view.viewer.render_feedback);
             let element: iced::Element<'_, Message> = iced::widget::shader(view)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1457,7 +1620,12 @@ pub fn capture_map_reference_frames() {
                         },
                         mouse::Cursor::Unavailable,
                     );
-                    let rgba = renderer.screenshot(physical_size, 1.0, Color::BLACK);
+                    let rgba = capture_when_ready(
+                        &mut renderer,
+                        physical_size,
+                        std::slice::from_ref(&render_feedback),
+                        std::slice::from_ref(&diagnostics),
+                    );
                     if frame % 60 == 0 {
                         let hash = format!("{:08x}", crc32fast::hash(&rgba));
                         if let Some(previous) = live_animation_samples.last() {
@@ -1487,7 +1655,12 @@ pub fn capture_map_reference_frames() {
                 },
                 mouse::Cursor::Unavailable,
             );
-            let _ = renderer.screenshot(physical_size, 1.0, Color::BLACK);
+            let _ = capture_when_ready(
+                &mut renderer,
+                physical_size,
+                std::slice::from_ref(&render_feedback),
+                std::slice::from_ref(&diagnostics),
+            );
             let started = Instant::now();
             let rgba = renderer.screenshot(physical_size, 1.0, Color::BLACK);
             let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1727,6 +1900,166 @@ mod tests {
         );
     }
 
+    fn capture_map(archive: Option<&std::path::Path>) -> CaptureMap {
+        serde_json::from_value(json!({"name":"control", "archive":archive, "cameras":[]})).unwrap()
+    }
+
+    #[test]
+    fn primary_gma_capture_reads_selected_bsp_and_preserves_bundled_materials() {
+        use crate::test_support::{GmaFixtureBuilder, write_gma_fixture};
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("primary.gma");
+        let fixture = GmaFixtureBuilder::new("Primary capture source")
+            .entry("maps/control.bsp", b"primary BSP".to_vec())
+            .entry("materials/control.vmt", b"primary material".to_vec())
+            .build();
+        write_gma_fixture(&archive, &fixture);
+        fs::write(directory.path().join("control.bsp"), b"different loose BSP").unwrap();
+        let input = capture_map(Some(&archive))
+            .read_source(directory.path())
+            .unwrap();
+        assert_eq!(input.bytes, b"primary BSP");
+        assert_eq!(input.entry_path, "maps/control.bsp");
+        assert_eq!(input.archive_path.as_ref(), Some(&archive));
+        assert!(input.bsp_path.is_none());
+        assert!(matches!(
+            input.source.as_ref(),
+            PreviewArchiveSource::Gma(_)
+        ));
+        assert_eq!(
+            input.source.entry_bytes("materials/control.vmt").unwrap(),
+            b"primary material"
+        );
+    }
+
+    #[test]
+    fn capture_archive_failure_never_falls_back_to_existing_loose_map() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("control.bsp"), b"loose BSP").unwrap();
+        let missing = directory.path().join("missing.gma");
+        assert!(
+            capture_map(Some(&missing))
+                .read_source(directory.path())
+                .is_err()
+        );
+        let invalid = directory.path().join("invalid.gma");
+        fs::write(&invalid, b"not an archive").unwrap();
+        assert!(
+            capture_map(Some(&invalid))
+                .read_source(directory.path())
+                .is_err()
+        );
+        let wrong_extension = directory.path().join("archive.txt");
+        fs::write(&wrong_extension, b"not an archive").unwrap();
+        assert!(
+            capture_map(Some(&wrong_extension))
+                .validate_source(directory.path())
+                .unwrap_err()
+                .contains("must be a GMA")
+        );
+        assert!(
+            serde_json::from_value::<CaptureMap>(
+                json!({"name":"control", "archive":false, "cameras":[]})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn absent_capture_archive_preserves_folder_source_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.bsp");
+        fs::write(&path, b"loose BSP").unwrap();
+        let map: CaptureMap =
+            serde_json::from_value(json!({"name":"control", "cameras":[]})).unwrap();
+        assert!(map.archive.is_none());
+        let input = map.read_source(directory.path()).unwrap();
+        assert_eq!(input.bytes, b"loose BSP");
+        assert_eq!(input.bsp_path.as_ref(), Some(&path));
+        assert!(input.archive_path.is_none());
+        assert!(matches!(
+            input.source.as_ref(),
+            PreviewArchiveSource::Folder(_)
+        ));
+    }
+
+    #[test]
+    fn on_demand_texture_diagnostics_report_recipe_storage_without_inventing_payload_hash() {
+        use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
+        use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
+        let bc = [0_u8; 8];
+        let archive = PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("BC diagnostics")
+                .entry(
+                    "materials/control.vmt",
+                    br#"LightmappedGeneric { "$basetexture" "base" }"#.to_vec(),
+                )
+                .entry(
+                    "materials/base.vtf",
+                    fixture_vtf_bytes(4, 4, vformats::vtf::VtfFormat::Dxt1, &[&bc]),
+                )
+                .build(),
+        )
+        .unwrap();
+        let material = MaterialResolver::new(Arc::new(archive), None)
+            .with_on_demand_textures()
+            .resolve_primary(&[], "control")
+            .into_material()
+            .unwrap();
+        let texture = material
+            .texture
+            .as_ref()
+            .expect("capture fixture has base texture");
+        assert!(texture.resident().is_none());
+        let info = texture_info(texture);
+        assert_eq!(info["state"], "on_demand");
+        assert_eq!(info["format"], "Bc1");
+        assert_eq!(info["mip_levels"], 1);
+        assert_eq!(info["recipe"]["storage"], "Bc1");
+        assert!(info["payload_crc32"].is_null());
+        assert!(info["resident"].is_null());
+        assert_eq!(info["source_metadata"]["dimensions"], json!([4, 4]));
+    }
+
+    #[test]
+    fn on_demand_water_diagnostics_distinguish_unmaterialized_frames_from_empty_texture() {
+        use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
+        use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
+        let rgba = [128, 128, 255, 255].repeat(2);
+        let mut bytes = fixture_vtf_bytes(1, 1, vformats::vtf::VtfFormat::Rgba8888, &[&rgba]);
+        bytes[24..26].copy_from_slice(&2_u16.to_le_bytes());
+        let archive = PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Water diagnostics")
+                .entry(
+                    "materials/control.vmt",
+                    br#"Water { "$normalmap" "normal" }"#.to_vec(),
+                )
+                .entry("materials/normal.vtf", bytes)
+                .build(),
+        )
+        .unwrap();
+        let resolved = MaterialResolver::new(Arc::new(archive), None)
+            .with_on_demand_textures()
+            .resolve_primary(&[], "control");
+        let resolution = resolved.outcome();
+        let material = resolved.into_material().unwrap();
+        let slot = MaterialSlot {
+            resolution,
+            canonical_name: Some("control".into()),
+            name: "control".into(),
+            shader: material.shader,
+            texture: material.texture,
+            texture2: None,
+            render_mode: material.render_mode,
+            alpha_policy: material.render_mode.texture_alpha_policy(),
+        };
+        let info = material_info(&slot);
+        assert!(info["water"]["normal_frames_linear_rgba"].is_null());
+        assert_eq!(info["water"]["normal_state"], "on_demand");
+        assert_eq!(info["water"]["normal_source_metadata"]["frames"], 2);
+        assert_eq!(info["water"]["normal_page_recipe"]["mip_count"], 1);
+    }
+
     fn camera(extra: &Value) -> CaptureCamera {
         let mut value = json!({"name":"projection","eye":[0,0,0],"angles":[0,0]});
         value
@@ -1768,5 +2101,52 @@ mod tests {
     #[should_panic(expected = "finite 0 < clip_near < clip_far")]
     fn unordered_capture_pair_is_rejected() {
         let _ = camera(&json!({"clip_near":4,"clip_far":2})).clip_distances();
+    }
+}
+
+#[cfg(test)]
+mod texture_readiness_tests {
+    use super::texture_readiness;
+    use crate::features::file_preview::viewer3d::feedback::RenderStatus;
+
+    #[test]
+    fn every_simultaneous_view_must_be_ready_including_policy_placeholders() {
+        let ready = RenderStatus::Ready {
+            unavailable_images: 3,
+        };
+        assert_eq!(
+            texture_readiness(&[ready.clone(), RenderStatus::Pending]),
+            Ok(false)
+        );
+        assert_eq!(
+            texture_readiness(&[
+                ready.clone(),
+                RenderStatus::Retiring {
+                    unavailable_images: 0
+                }
+            ]),
+            Ok(false)
+        );
+        assert_eq!(texture_readiness(&[ready.clone(), ready]), Ok(true));
+        assert!(texture_readiness(&[]).is_err());
+    }
+
+    #[test]
+    fn terminal_preparation_errors_cannot_become_matching_blank_captures() {
+        assert_eq!(
+            texture_readiness(&[
+                RenderStatus::Ready {
+                    unavailable_images: 0
+                },
+                RenderStatus::Rejected {
+                    reason: "intrinsic source failure".into()
+                }
+            ]),
+            Err("intrinsic source failure".into())
+        );
+        assert_eq!(
+            texture_readiness(&[RenderStatus::RetirementTimedOut]),
+            Err("GPU resource retirement timed out".into())
+        );
     }
 }

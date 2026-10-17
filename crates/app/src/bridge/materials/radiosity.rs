@@ -39,10 +39,10 @@ impl MaterialResolver {
             material.effective_base_texture()
         {
             let path = texture_path(base)?;
-            match self.selected_texture_asset(&path) {
-                Ok(selected) => match selected.asset.validate_payload() {
+            match self.selected_texture_source(&path) {
+                Ok(selected) => match selected.validate_payload() {
                     Ok(()) => {
-                        let metadata = selected.asset.metadata();
+                        let metadata = selected.metadata();
                         let reflectivity =
                             Vec3::from(metadata.reflectivity_bits?.map(f32::from_bits));
                         if !reflectivity.is_finite() {
@@ -260,7 +260,10 @@ mod tests {
                 [255, 0, 0, 255]
             };
             let primary = resolver.resolve_primary(&[], name).into_material().unwrap();
-            assert_eq!(primary.texture.rgba_bytes().unwrap(), expected);
+            assert_eq!(
+                primary.texture.as_ref().unwrap().rgba_bytes().unwrap(),
+                expected
+            );
             let full = resolver
                 .resolve_with_base2(&[], name)
                 .into_material()

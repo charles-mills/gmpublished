@@ -6,8 +6,8 @@
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
 @group(1) @binding(22) var normal_sampler:sampler;
-@group(1) @binding(4) var lightmap_sampler: sampler;
-@group(0) @binding(6) var lightmap_texture:texture_2d<f32>;
+@group(2) @binding(2) var lightmap_sampler: sampler;
+@group(2) @binding(1) var lightmap_texture:texture_2d<f32>;
 
 @group(1) @binding(5) var<uniform> material: Material;
 @group(1) @binding(6) var normal_texture: texture_2d_array<f32>;
@@ -28,7 +28,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) lightmap_uv:vec2<f32>,
+    @location(3) @interpolate(perspective, centroid) lightmap_uv:vec2<f32>,
     @location(4) lightmap_bump_step:f32,
     @location(5) clip_distance:f32,
     @location(10) tangent_s:vec3<f32>,

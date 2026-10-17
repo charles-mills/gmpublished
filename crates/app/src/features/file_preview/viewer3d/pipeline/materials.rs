@@ -32,14 +32,6 @@ pub(super) fn bc_upload_enabled(device: &wgpu::Device) -> bool {
         .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
 }
 
-fn base_texture_frame(requested: f32, frame_count: u32) -> u32 {
-    if requested.is_finite() && requested >= 0.0 && requested < frame_count as f32 {
-        requested as u32
-    } else {
-        0
-    }
-}
-
 fn mip_layout_is_valid(
     dimensions: impl IntoIterator<Item = [u32; 2]>,
     base: [u32; 2],
@@ -78,6 +70,25 @@ impl BoundTexture {
         SampledTexture {
             view: &self.view,
             flags: self.flags,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BaseTextureFrame {
+    Base(u32),
+    Base2(u32),
+}
+impl BaseTextureFrame {
+    fn frame(self) -> u32 {
+        match self {
+            Self::Base(frame) | Self::Base2(frame) => frame,
+        }
+    }
+    fn role(self) -> &'static str {
+        match self {
+            Self::Base(_) => "base",
+            Self::Base2(_) => "base2",
         }
     }
 }
@@ -141,6 +152,7 @@ pub struct MaterialUploadMode<'a> {
     pub base2_flags: Option<u32>,
     pub render_mode: RenderMode,
     pub alpha_policy: crate::bridge::materials::TextureAlphaPolicy,
+    pub(super) frames: Option<&'a super::frame_selection::MaterialFrames>,
 }
 
 impl RenderResources {
@@ -241,7 +253,7 @@ impl RenderResources {
         slot: &MaterialSlot,
         texture: Option<&ResolvedTexture>,
         images: &mut ImageLease<'_>,
-        second: bool,
+        selection: BaseTextureFrame,
     ) -> BoundTexture {
         let Some(texture) = texture else {
             let view = if slot.name == PHY_DEBUG_MATERIAL_NAME {
@@ -254,7 +266,7 @@ impl RenderResources {
         if texture.load_outcome().is_unavailable() {
             images.reject(
                 &slot.name,
-                if second { "base2" } else { "base" },
+                selection.role(),
                 format!("{:?}", texture.load_outcome()),
             );
             return BoundTexture {
@@ -267,30 +279,29 @@ impl RenderResources {
             TextureReadTransfer::SrgbToLinear,
             crate::bridge::materials::SurfaceMaterial::base_read_transfer,
         );
-        let requested_frame = if texture.has_effective_base_texture() {
-            surface.map_or(0.0, |surface| {
-                if second {
-                    surface.base2_frame
-                } else {
-                    surface.base_frame
-                }
-            })
+        let frame = selection.frame();
+        let view = if let Some((_, recipe)) = texture.on_demand() {
+            let mut request = recipe.clone();
+            request.frame = frame;
+            images
+                .cached_page_view(&request, transfer, ImageView::D2(0))
+                .expect("prepared base page")
         } else {
-            0.0
+            let resident = texture.resident().expect("validated scene image residency");
+            resident
+                .layer_index(frame, 0)
+                .ok_or(super::images::UploadError::InvalidView)
+                .and_then(|layer| {
+                    images.view(device, queue, resident, transfer, ImageView::D2(layer))
+                })
         };
-        let resident = texture.resident().expect("validated scene image residency");
-        let frame = base_texture_frame(requested_frame, resident.metadata().frame_count);
-        let layer = resident.layer_index(frame, 0);
-        let view = layer
-            .ok_or(super::images::UploadError::InvalidView)
-            .and_then(|layer| images.view(device, queue, resident, transfer, ImageView::D2(layer)));
         match view {
             Ok(view) => BoundTexture {
                 view,
                 flags: texture.flags(),
             },
             Err(error) => {
-                images.reject_upload(&slot.name, if second { "base2" } else { "base" }, &error);
+                images.reject_upload(&slot.name, selection.role(), &error);
                 BoundTexture {
                     view: self.error_texture.clone(),
                     flags: None,
@@ -299,10 +310,11 @@ impl RenderResources {
         }
     }
 
-    pub(super) fn create_data_view(
+    pub(super) fn create_data_frame_view(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         source: &crate::bridge::materials::DecodedTextureFrames,
+        frame: u32,
         role: TextureRole,
         images: &mut ImageLease<'_>,
         material_name: &str,
@@ -315,13 +327,22 @@ impl RenderResources {
             );
             return None;
         }
-        match images.view(
-            device,
-            queue,
-            source.resident().expect("validated scene image residency"),
-            role.read_transfer(),
-            ImageView::Array,
-        ) {
+        let view = if let Some((_, recipe)) = source.on_demand() {
+            let mut request = recipe.clone();
+            request.frame = frame;
+            images
+                .cached_page_view(&request, role.read_transfer(), ImageView::Array)
+                .expect("prepared data page")
+        } else {
+            images.view(
+                device,
+                queue,
+                source.resident().expect("validated scene image residency"),
+                role.read_transfer(),
+                ImageView::Array,
+            )
+        };
+        match view {
             Ok(view) => Some(view),
             Err(error) => {
                 images.reject_upload(material_name, &format!("{role:?}"), &error);
@@ -429,6 +450,7 @@ impl RenderResources {
         images: &mut ImageLease<'_>,
         diagnostics: &mut Vec<SamplerDiagnostic>,
     ) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::Buffer) {
+        let frames = mode.frames;
         let material_name = mode.name;
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("file_preview.model_viewer.material_uniform"),
@@ -437,7 +459,7 @@ impl RenderResources {
             mapped_at_creation: false,
         });
         let surface = mode.material.surface();
-        let material_uniform = match mode.material {
+        let mut material_uniform = match mode.material {
             PreparedMaterial::Fallback => MaterialUniform::new(mode.render_mode, mode.alpha_policy),
             PreparedMaterial::Surface(surface) => {
                 MaterialUniform::new(mode.render_mode, mode.alpha_policy).with_surface(surface)
@@ -449,6 +471,14 @@ impl RenderResources {
                 MaterialUniform::new(mode.render_mode, mode.alpha_policy).with_mirror(mirror)
             }
         };
+        if mode
+            .material
+            .normal()
+            .is_some_and(|source| source.on_demand().is_some())
+        {
+            material_uniform.water_animation[2..].fill(0.0);
+            material_uniform.water_state[0] = 1.0;
+        }
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&material_uniform));
         use wgpu::util::DeviceExt;
         let model_material = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -458,19 +488,55 @@ impl RenderResources {
             )),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let mut surface_data =
+            super::surface::SurfaceUniform::new(surface, mode.base_flags, mode.base2_flags);
+        if let Some(frames) = frames {
+            surface_data.detail[1] = if surface
+                .and_then(|surface| surface.detail.as_ref())
+                .and_then(|detail| detail.texture.as_ref())
+                .is_some_and(|texture| texture.on_demand().is_some())
+            {
+                0.0
+            } else {
+                frames.detail as f32
+            };
+            surface_data.env_flags[2] = if surface
+                .and_then(|surface| surface.envmap.as_ref())
+                .and_then(|environment| environment.mask_texture.as_ref())
+                .is_some_and(|texture| texture.on_demand().is_some())
+            {
+                0
+            } else {
+                frames.environment_mask
+            };
+            surface_data.misc[2] = if mode
+                .material
+                .normal()
+                .is_some_and(|texture| texture.on_demand().is_some())
+            {
+                0.0
+            } else {
+                frames.normal as f32
+            };
+        }
         let surface_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("file_preview.material.surface_uniform"),
-            contents: bytemuck::bytes_of(&super::surface::SurfaceUniform::new(
-                surface,
-                mode.base_flags,
-                mode.base2_flags,
-            )),
+            contents: bytemuck::bytes_of(&surface_data),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let mut role_view = |source: Option<&crate::bridge::materials::DecodedTextureFrames>,
-                             role: TextureRole| {
+                             role: TextureRole,
+                             frame: u32| {
             source.and_then(|source| {
-                Self::create_data_view(device, queue, source, role, images, material_name)
+                Self::create_data_frame_view(
+                    device,
+                    queue,
+                    source,
+                    frame,
+                    role,
+                    images,
+                    material_name,
+                )
             })
         };
         let detail = surface.and_then(|surface| surface.detail.as_ref());
@@ -485,16 +551,19 @@ impl RenderResources {
         let detail_view = role_view(
             detail.and_then(|detail| detail.texture.as_deref()),
             detail_role,
+            frames.map_or(0, |frames| frames.detail),
         );
         let blend_view = role_view(
             surface.and_then(|surface| surface.blend_modulation.as_deref()),
             TextureRole::BlendModulation,
+            0,
         );
         let emission_view = role_view(
             surface
                 .and_then(|surface| surface.emission.as_ref())
                 .and_then(|emission| emission.mask.as_deref()),
             TextureRole::EmissionMask,
+            0,
         );
         let envmap = surface.and_then(|surface| surface.envmap.as_deref());
         let cube_source = envmap.and_then(|envmap| match &envmap.source {
@@ -504,6 +573,7 @@ impl RenderResources {
         let envmap_mask_view = role_view(
             envmap.and_then(|envmap| envmap.mask_texture.as_deref()),
             TextureRole::EnvironmentMask,
+            frames.map_or(0, |frames| frames.environment_mask),
         );
         let phong = surface.and_then(|surface| surface.phong.as_deref());
         let exponent_view = role_view(
@@ -511,18 +581,21 @@ impl RenderResources {
                 .and_then(|phong| phong.exponent_texture.as_ref())
                 .and_then(|texture| texture.texture.as_deref()),
             TextureRole::PhongExponent,
+            0,
         );
         let diffuse_warp_view = role_view(
             phong
                 .and_then(|phong| phong.diffuse_warp.as_ref())
                 .and_then(|texture| texture.texture.as_deref()),
             TextureRole::PhongWarp,
+            0,
         );
         let specular_warp_view = role_view(
             phong
                 .and_then(|phong| phong.specular_warp.as_ref())
                 .and_then(|texture| texture.texture.as_deref()),
             TextureRole::PhongWarp,
+            0,
         );
         let cube_view = cube_source.and_then(|cube| {
             if cube.load_outcome().is_unavailable() {
@@ -533,15 +606,29 @@ impl RenderResources {
                 );
                 return None;
             }
-            let resident = cube.resident().expect("validated scene image residency");
-            let layer = resident.layer_index(cube.frame, 0)?;
-            match images.view(
-                device,
-                queue,
-                resident,
-                TextureReadTransfer::SrgbToLinear,
-                ImageView::Cube(layer),
-            ) {
+            let view = if let Some((_, recipe)) = cube.on_demand() {
+                let mut request = recipe.clone();
+                request.frame = frames.map_or(cube.frame, |frames| frames.environment);
+                images
+                    .cached_page_view(
+                        &request,
+                        TextureReadTransfer::SrgbToLinear,
+                        ImageView::Cube(0),
+                    )
+                    .expect("prepared environment page")
+            } else {
+                let resident = cube.resident().expect("validated scene image residency");
+                let layer = resident
+                    .layer_index(frames.map_or(cube.frame, |frames| frames.environment), 0)?;
+                images.view(
+                    device,
+                    queue,
+                    resident,
+                    TextureReadTransfer::SrgbToLinear,
+                    ImageView::Cube(layer),
+                )
+            };
+            match view {
                 Ok(view) => Some(view),
                 Err(error) => {
                     images.reject_upload(material_name, "environment", &error);
@@ -678,10 +765,6 @@ impl RenderResources {
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(&base_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::Sampler(&self.lightmap_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
@@ -913,23 +996,6 @@ pub const fn solid_rgba<const N: usize>(color: [u8; 4]) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::{CHECKERBOARD_MIP_RGBA, checkerboard_mip_levels};
-
-    #[test]
-    fn invalid_fixed_base_frames_reset_to_zero() {
-        for (requested, expected) in [
-            (0.0, 0),
-            (1.0, 1),
-            (1.9, 1),
-            (2.0, 2),
-            (-1.0, 0),
-            (3.0, 0),
-            (4.0, 0),
-            (f32::INFINITY, 0),
-            (f32::NAN, 0),
-        ] {
-            assert_eq!(super::base_texture_frame(requested, 3), expected);
-        }
-    }
 
     #[test]
     fn upload_layout_rejects_misaddressed_and_excessive_levels_before_allocation() {

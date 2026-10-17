@@ -657,3 +657,45 @@ fn duplicate_mounts_do_not_spend_unique_source_admission_twice() {
     assert_eq!(paths, [path]);
     assert_eq!(budget.stats().planned_source_records, 1);
 }
+
+#[test]
+fn selected_storage_reconstructs_ranges_and_shares_preload_bytes() {
+    let dir = TempDir::new().unwrap();
+    let path = write_vpk_fixture(
+        &dir.path().join("selected_dir.vpk"),
+        2,
+        vec![
+            FixtureEntrySpec::embedded("materials/embedded.vtf", b"head-and-tail".to_vec())
+                .preload(4),
+            FixtureEntrySpec::external("materials/split.vtf", b"split-entry".to_vec(), 3)
+                .preload(2),
+            FixtureEntrySpec::external("materials/preloaded.vtf", b"only-preload".to_vec(), 4)
+                .preload(12),
+        ],
+    );
+    let vpk = VpkFile::open(path).unwrap();
+    for (name, expected) in [
+        ("materials/embedded.vtf", b"head-and-tail".as_slice()),
+        ("materials/split.vtf", b"split-entry".as_slice()),
+        ("materials/preloaded.vtf", b"only-preload".as_slice()),
+    ] {
+        let VpkEntryStorage {
+            archive_path: path,
+            data_range: range,
+            preload,
+        } = vpk.entry_storage(name).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &preload,
+            &vpk.entries()[name].preload
+        ));
+        let mut bytes = preload.to_vec();
+        if !range.is_empty() {
+            let mut file = File::open(path).unwrap();
+            file.seek(SeekFrom::Start(range.start)).unwrap();
+            file.take(range.end - range.start)
+                .read_to_end(&mut bytes)
+                .unwrap();
+        }
+        assert_eq!(bytes, expected);
+    }
+}

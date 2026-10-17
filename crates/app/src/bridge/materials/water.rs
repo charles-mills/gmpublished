@@ -76,6 +76,9 @@ impl MaterialResolver {
         let paths = super::material_paths(&[], name);
         let definition = self.material_definition(&paths)?;
         let material = &definition.material;
+        if material.no_draw() {
+            return None;
+        }
         if !material.shader.eq_ignore_ascii_case("Refract")
             && !material.shader.eq_ignore_ascii_case("Refract_DX90")
         {
@@ -134,8 +137,10 @@ impl MaterialResolver {
         let normal_map_path = get("$normalmap")
             .and_then(normalize_texture_name)
             .unwrap_or_else(|| "dev/water_normal".into());
-        let normal_map = self.resolve_water_normal(&normal_map_path);
-        if normal_map.is_none() {
+        let normal_map = (!material.no_draw())
+            .then(|| self.resolve_water_normal(&normal_map_path))
+            .flatten();
+        if !material.no_draw() && normal_map.is_none() {
             log::warn!("water normal map unavailable: {normal_map_path}; using a flat normal");
         }
         let mut bump_transform = texture_transform(get("$bumptransform"));

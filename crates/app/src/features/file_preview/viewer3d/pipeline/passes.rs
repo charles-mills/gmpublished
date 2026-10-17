@@ -413,15 +413,22 @@ fn render_scene(
     iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
 }
 
-pub fn render_frame(
+#[derive(Clone, Copy)]
+pub(super) struct Composition<'a> {
+    pub blit: &'a wgpu::BindGroup,
+    pub size: (u32, u32),
+    pub overlay: Option<&'a super::screen_refraction::Frame>,
+}
+
+pub fn render_frame<'a>(
     primitive: &ModelPrimitive,
-    frame: &PreparedFrame,
+    frame: &'a PreparedFrame,
     resources: &RenderResources,
     upload: &ViewerScene,
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
     clip_bounds: &Rectangle<u32>,
-) {
+) -> Composition<'a> {
     for surface_view in &frame.planar_views {
         if let Some(view) = surface_view.reflection.as_ref() {
             render_scene(
@@ -516,13 +523,17 @@ pub fn render_frame(
                 );
                 pass.set_bind_group(
                     1,
-                    &upload.assets.water_material_bind_groups[surface.material_slot],
+                    upload.bindings.materials.water(surface.material_slot),
                     &[],
                 );
                 pass.set_vertex_buffer(0, upload.meshes[surface.mesh_index].vertices().slice(..));
                 if let Some(buffer) = optical.surface_buffer.buffer.as_ref() {
                     pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..optical.surface_buffer.index_count, 0, 0..1);
+                    draw::draw_lightmap_ranges(
+                        &mut pass,
+                        &upload.lightmaps,
+                        &optical.surface_buffer.lightmaps,
+                    );
                 }
             }
             for reflection in &frame.planar_views {
@@ -539,7 +550,7 @@ pub fn render_frame(
                 );
                 pass.set_bind_group(
                     1,
-                    &upload.assets.water_material_bind_groups[surface.material_slot],
+                    upload.bindings.materials.water(surface.material_slot),
                     &[],
                 );
                 pass.set_vertex_buffer(0, upload.meshes[surface.mesh_index].vertices().slice(..));
@@ -552,7 +563,11 @@ pub fn render_frame(
                         .slice(..),
                     wgpu::IndexFormat::Uint32,
                 );
-                pass.draw_indexed(0..reflection.surface_buffer.index_count, 0, 0..1);
+                draw::draw_lightmap_ranges(
+                    &mut pass,
+                    &upload.lightmaps,
+                    &reflection.surface_buffer.lightmaps,
+                );
             }
         }
         pass.set_bind_group(0, &view.world.bind_group, &[]);
@@ -643,6 +658,37 @@ pub fn render_frame(
     } else {
         targets
     };
+    let overlay = frame.screen_overlay.as_ref();
+    #[cfg(feature = "map-capture")]
+    let overlay = if primitive.reflection_target || primitive.refraction_target {
+        None
+    } else {
+        overlay
+    };
+    let composition = Composition {
+        blit: &targets.blit_bind_group,
+        size: targets.size,
+        overlay,
+    };
+    compose(
+        composition,
+        frame.bounds,
+        resources,
+        encoder,
+        target,
+        clip_bounds,
+    );
+    composition
+}
+
+pub(super) fn compose(
+    composition: Composition<'_>,
+    bounds: Rectangle,
+    resources: &RenderResources,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    clip_bounds: &Rectangle<u32>,
+) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("file_preview.view.compose"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -658,33 +704,19 @@ pub fn render_frame(
         timestamp_writes: None,
         occlusion_query_set: None,
     });
-    pass.set_viewport(
-        frame.bounds.x,
-        frame.bounds.y,
-        frame.bounds.width,
-        frame.bounds.height,
-        0.0,
-        1.0,
-    );
+    pass.set_viewport(bounds.x, bounds.y, bounds.width, bounds.height, 0.0, 1.0);
     pass.set_scissor_rect(
         clip_bounds.x,
         clip_bounds.y,
         clip_bounds.width,
         clip_bounds.height,
     );
-    let overlay = frame.screen_overlay.as_ref();
-    #[cfg(feature = "map-capture")]
-    let overlay = if primitive.reflection_target || primitive.refraction_target {
-        None
-    } else {
-        overlay
-    };
-    if let Some(overlay) = overlay {
+    if let Some(overlay) = composition.overlay {
         pass.set_pipeline(&resources.screen_refraction.pipeline);
         pass.set_bind_group(1, &overlay.bind_group, &[]);
     } else {
         pass.set_pipeline(&resources.blit_pipeline);
     }
-    pass.set_bind_group(0, &targets.blit_bind_group, &[]);
+    pass.set_bind_group(0, composition.blit, &[]);
     pass.draw(0..6, 0..1);
 }

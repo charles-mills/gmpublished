@@ -396,7 +396,13 @@ mod tests {
             let (planned, plan) =
                 small.plan_texture_requests(|resolver| resolver.resolve_primary(&[], "test/image"));
             assert_eq!(
-                planned.material().unwrap().texture.load_outcome(),
+                planned
+                    .material()
+                    .unwrap()
+                    .texture
+                    .as_ref()
+                    .unwrap()
+                    .load_outcome(),
                 TextureLoadOutcome::QualityRejected
             );
             let resident = Arc::new(DecodedTextureBudget::new(20));
@@ -409,6 +415,8 @@ mod tests {
                     .material()
                     .unwrap()
                     .texture
+                    .as_ref()
+                    .unwrap()
                     .load_outcome(),
                 TextureLoadOutcome::QualityRejected
             );
@@ -418,7 +426,10 @@ mod tests {
                 .resolve_primary(&[], "test/image")
                 .into_material()
                 .unwrap();
-            assert_eq!(accepted.texture.load_outcome(), TextureLoadOutcome::Loaded);
+            assert_eq!(
+                accepted.texture.as_ref().unwrap().load_outcome(),
+                TextureLoadOutcome::Loaded
+            );
             assert_eq!(working.current_bytes(), 0);
             assert_eq!(working.peak_bytes(), if warm { 0 } else { 20 });
         }
@@ -461,14 +472,17 @@ mod tests {
             .map(|worker| worker.join().unwrap())
             .collect::<Vec<_>>();
         for output in &outputs {
-            assert_eq!(output.texture.load_outcome(), TextureLoadOutcome::Loaded);
             assert_eq!(
-                &output.texture.rgba_bytes().unwrap()[..4],
+                output.texture.as_ref().unwrap().load_outcome(),
+                TextureLoadOutcome::Loaded
+            );
+            assert_eq!(
+                &output.texture.as_ref().unwrap().rgba_bytes().unwrap()[..4],
                 &[31, 31, 31, 255]
             );
             assert!(Arc::ptr_eq(
-                output.texture.resident().unwrap(),
-                outputs[0].texture.resident().unwrap()
+                output.texture.as_ref().unwrap().resident().unwrap(),
+                outputs[0].texture.as_ref().unwrap().resident().unwrap()
             ));
         }
         assert_eq!(working.current_bytes(), 0);
@@ -498,7 +512,7 @@ mod tests {
                 .resolve_primary(&[], "test/image")
                 .into_material()
                 .unwrap();
-            assert_eq!(material.texture.load_outcome(), expected);
+            assert_eq!(material.texture.as_ref().unwrap().load_outcome(), expected);
             let surface = material.shader.surface().unwrap();
             assert_eq!(surface.normal.as_ref().unwrap().load_outcome(), expected);
             let super::super::EnvironmentMapSource::Named(cube) =
@@ -535,6 +549,8 @@ mod tests {
                     .material()
                     .unwrap()
                     .texture
+                    .as_ref()
+                    .unwrap()
                     .load_outcome(),
                 TextureLoadOutcome::Unsupported
             );
@@ -582,9 +598,12 @@ mod tests {
                         .resolve_primary(&[], &format!("test/image{index}"))
                         .into_material()
                         .unwrap();
-                    assert_eq!(material.texture.load_outcome(), TextureLoadOutcome::Loaded);
                     assert_eq!(
-                        &material.texture.rgba_bytes().unwrap()[..4],
+                        material.texture.as_ref().unwrap().load_outcome(),
+                        TextureLoadOutcome::Loaded
+                    );
+                    assert_eq!(
+                        &material.texture.as_ref().unwrap().rgba_bytes().unwrap()[..4],
                         &[index, index, index, 255]
                     );
                 })

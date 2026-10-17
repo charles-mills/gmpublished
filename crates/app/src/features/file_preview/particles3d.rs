@@ -1067,7 +1067,8 @@ mod texture_tests {
             .resolve_primary(&[], "particle/base")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(particle_texture_levels(&accepted, 2).unwrap().len(), 2);
         assert!(particle_texture_levels(&accepted, 1).is_none());
         let rejected = resolver
@@ -1077,7 +1078,8 @@ mod texture_tests {
             .resolve_primary(&[], "particle/base")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(
             rejected.load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
@@ -1098,7 +1100,8 @@ mod texture_tests {
             .resolve_primary(&[], "particle/error")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(texture.load_outcome(), TextureLoadOutcome::MissingSource);
         assert_eq!(particle_texture_levels(&texture, 32).unwrap().len(), 1);
     }

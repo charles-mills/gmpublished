@@ -429,7 +429,7 @@ pub(super) fn map_vertex(
         tex_t: texture_coord(position, texinfo.texture_vecs[1]),
         texture_size: [0; 2],
         lightmap_uv,
-        has_lightmap: false,
+        lightmap_page: None,
         lightmap_bump_step: 0.0,
         blend_alpha,
         opacity: 1.0,

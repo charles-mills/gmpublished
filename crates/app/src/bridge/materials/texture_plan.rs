@@ -23,13 +23,29 @@ struct TextureRequest {
     preflight_error: Option<TextureAssetError>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct TextureRequestPlan {
     requests: Vec<TextureRequest>,
     sources: HashSet<u64>,
     residents: HashSet<TextureResidentId>,
     backings: HashMap<usize, super::TextureBytes>,
     cost: TextureRequestCost,
+}
+
+impl Clone for TextureRequestPlan {
+    fn clone(&self) -> Self {
+        Self {
+            requests: self.requests.clone(),
+            sources: self.sources.clone(),
+            residents: self.residents.clone(),
+            backings: self
+                .backings
+                .iter()
+                .map(|(id, bytes)| (*id, bytes.legacy_alias()))
+                .collect(),
+            cost: self.cost,
+        }
+    }
 }
 
 impl TextureRequestPlan {
@@ -254,10 +270,22 @@ mod tests {
         let resolver = resolver().with_decoded_texture_budget(Arc::clone(&budget));
         let (planned, plan) =
             resolver.plan_texture_requests(|resolver| material(resolver, "test/a"));
-        assert_eq!(planned.texture.load_outcome(), TextureLoadOutcome::Deferred);
-        assert!(planned.texture.resident().is_none());
-        assert!(planned.texture.has_effective_base_texture());
-        assert_eq!(planned.texture.mapping_dimensions(), Some((2, 2)));
+        assert_eq!(
+            planned.texture.as_ref().unwrap().load_outcome(),
+            TextureLoadOutcome::Deferred
+        );
+        assert!(planned.texture.as_ref().unwrap().resident().is_none());
+        assert!(
+            planned
+                .texture
+                .as_ref()
+                .unwrap()
+                .has_effective_base_texture()
+        );
+        assert_eq!(
+            planned.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((2, 2))
+        );
         assert_eq!(
             planned
                 .shader
@@ -277,7 +305,11 @@ mod tests {
         assert_eq!(resolver.shared.texture_assets.resident_count(), 0);
         let admitted = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
         assert_eq!(
-            material(&admitted, "test/a").texture.load_outcome(),
+            material(&admitted, "test/a")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::Loaded
         );
         assert_eq!(budget.decoded_bytes(), 20);
@@ -308,7 +340,14 @@ mod tests {
                 ] {
                     let admitted = &admitted;
                     scope.spawn(move || {
-                        assert_eq!(material(admitted, name).texture.load_outcome(), expected);
+                        assert_eq!(
+                            material(admitted, name)
+                                .texture
+                                .as_ref()
+                                .unwrap()
+                                .load_outcome(),
+                            expected
+                        );
                     });
                 }
             });
@@ -322,7 +361,11 @@ mod tests {
     fn warm_residents_still_require_image_admission() {
         let resolver = resolver();
         assert_eq!(
-            material(&resolver, "test/a").texture.load_outcome(),
+            material(&resolver, "test/a")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::Loaded
         );
         let budget = Arc::new(DecodedTextureBudget::with_image_limit(100, 1));
@@ -330,7 +373,11 @@ mod tests {
         let (_, plan) = resolver.plan_texture_requests(|resolver| material(resolver, "test/a"));
         let admitted = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
         assert_eq!(
-            material(&admitted, "test/a").texture.load_outcome(),
+            material(&admitted, "test/a")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::QualityRejected
         );
         assert_eq!(budget.decoded_bytes(), 0);
@@ -376,15 +423,27 @@ mod tests {
         assert!(plan.cost().resident_record_bytes > plan.cost().resident_bytes);
         let admitted = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
         assert_eq!(
-            material(&admitted, "test/a").texture.load_outcome(),
+            material(&admitted, "test/a")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::Loaded
         );
         assert_eq!(
-            material(&admitted, "test/b").texture.load_outcome(),
+            material(&admitted, "test/b")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::QualityRejected
         );
         assert_eq!(
-            material(&admitted, "test/c").texture.load_outcome(),
+            material(&admitted, "test/c")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::Loaded
         );
         assert_eq!(budget.decoded_bytes(), 260);
@@ -412,12 +471,20 @@ mod tests {
             let resolver = resolver.with_decoded_texture_budget(Arc::clone(&budget));
             let admitted = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
             assert_eq!(
-                material(&admitted, "test/a").texture.load_outcome(),
+                material(&admitted, "test/a")
+                    .texture
+                    .as_ref()
+                    .unwrap()
+                    .load_outcome(),
                 TextureLoadOutcome::Loaded
             );
             for name in ["test/b", "test/c"] {
                 assert_eq!(
-                    material(&admitted, name).texture.load_outcome(),
+                    material(&admitted, name)
+                        .texture
+                        .as_ref()
+                        .unwrap()
+                        .load_outcome(),
                     TextureLoadOutcome::QualityRejected
                 );
             }
@@ -432,12 +499,20 @@ mod tests {
         let (escaped, plan) =
             resolver.plan_texture_requests(|resolver| resolver.variant(resolver.config.clone()));
         assert_eq!(
-            material(&escaped, "test/a").texture.load_outcome(),
+            material(&escaped, "test/a")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::Unplanned
         );
         let admitted = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
         assert_eq!(
-            material(&admitted, "test/a").texture.load_outcome(),
+            material(&admitted, "test/a")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::Unplanned
         );
         assert_eq!(resolver.shared.texture_assets.resident_count(), 0);
@@ -476,7 +551,11 @@ mod tests {
         assert_eq!(budget.admitted_images(), 1);
         for _ in 0..2 {
             assert_eq!(
-                material(&admitted, "test/a").texture.load_outcome(),
+                material(&admitted, "test/a")
+                    .texture
+                    .as_ref()
+                    .unwrap()
+                    .load_outcome(),
                 TextureLoadOutcome::Unsupported
             );
             assert_eq!(budget.decoded_bytes(), 0);
@@ -485,7 +564,11 @@ mod tests {
         let (_, later) = resolver.plan_texture_requests(|resolver| material(resolver, "test/b"));
         let later = resolver.with_texture_admissions(resolver.admit_texture_requests(later));
         assert_eq!(
-            material(&later, "test/b").texture.load_outcome(),
+            material(&later, "test/b")
+                .texture
+                .as_ref()
+                .unwrap()
+                .load_outcome(),
             TextureLoadOutcome::QualityRejected
         );
         assert_eq!(budget.decoded_bytes(), 0);
@@ -496,7 +579,7 @@ mod tests {
         let bytes = super::super::TextureBytes::owned(vec![7; 100]);
         let duplicate = super::super::TextureBytes::owned(vec![7; 100]);
         let mut first = TextureRequestPlan::default();
-        first.source(bytes.clone());
+        first.source(bytes.legacy_alias());
         let mut second = TextureRequestPlan::default();
         second.source(bytes);
         second.source(duplicate);
@@ -516,8 +599,27 @@ mod tests {
         let sky = sky.with_decoded_texture_budget(Arc::clone(&budget));
         let admitted = sky.with_texture_admissions(sky.admit_texture_requests(plan));
         let material = material(&admitted, "test/a");
-        assert_eq!(material.texture.source_metadata().unwrap().mip_count, 2);
-        assert_eq!(material.texture.resident().unwrap().id().mip_count, 1);
+        assert_eq!(
+            material
+                .texture
+                .as_ref()
+                .unwrap()
+                .source_metadata()
+                .unwrap()
+                .mip_count,
+            2
+        );
+        assert_eq!(
+            material
+                .texture
+                .as_ref()
+                .unwrap()
+                .resident()
+                .unwrap()
+                .id()
+                .mip_count,
+            1
+        );
         assert_eq!(budget.decoded_bytes(), 16);
     }
     #[test]
@@ -538,7 +640,7 @@ mod tests {
         let (resolved, mut plan) =
             resolver.plan_texture_requests(|resolver| material(resolver, "test/invalid"));
         assert_eq!(
-            resolved.texture.load_outcome(),
+            resolved.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::InvalidSource
         );
         assert_eq!(

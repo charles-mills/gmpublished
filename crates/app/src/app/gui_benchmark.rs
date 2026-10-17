@@ -730,7 +730,8 @@ impl Harness {
                     let views:Vec<_> = self.controls.iter().map(|control| json!({
                         "logical":control.observed.lock().ok().map(|v| json!(&*v)),
                         "physical_render_extent":control.diagnostics.as_ref().map(file_preview::CaptureDiagnostics::observed_extent),
-                        "visibility":control.diagnostics.as_ref().map(file_preview::CaptureDiagnostics::observed_visibility)
+                        "visibility":control.diagnostics.as_ref().map(file_preview::CaptureDiagnostics::observed_visibility),
+                        "presentation":control.diagnostics.as_ref().map(file_preview::CaptureDiagnostics::observed_presentation)
                     })).collect();
                     let invalid_pose = self.controls.iter().any(|control| {
                         control.observed.lock().map_or(true, |observed| {

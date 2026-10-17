@@ -93,6 +93,15 @@ pub struct ModelVertex {
     pub tangent_sign: f32,
     pub lighting_context: u32,
     pub surface_mark: u32,
+    pub lightmap_page: u32,
+}
+
+impl ModelVertex {
+    pub fn lightmap_page_id(&self) -> Option<gmpublished_domain::scene::map::LightmapPageId> {
+        self.lightmap_page
+            .checked_sub(1)
+            .map(gmpublished_domain::scene::map::LightmapPageId)
+    }
 }
 
 impl From<&vformats::mdl::ModelVertex> for ModelVertex {
@@ -108,6 +117,7 @@ impl From<&vformats::mdl::ModelVertex> for ModelVertex {
             uv: vertex.uv,
             lightmap_uv: [0.0; 2],
             lightmap_bump_step: 0.0,
+            lightmap_page: 0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,
@@ -772,7 +782,7 @@ impl MaterialSlot {
     }
 }
 
-pub type LightmapSlot = gmpublished_domain::scene::map::LightmapAtlas;
+pub type LightmapSlot = gmpublished_domain::scene::map::LightmapSet;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetailSprite {
@@ -997,6 +1007,7 @@ mod tests {
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
             lightmap_bump_step: 0.0,
+            lightmap_page: 0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,

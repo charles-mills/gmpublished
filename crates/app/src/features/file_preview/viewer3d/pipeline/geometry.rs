@@ -9,6 +9,8 @@ use crate::media::preview_model::ModelVertex;
 #[derive(Debug)]
 pub struct ViewerScene {
     pub assets: Arc<UploadedModel>,
+    pub(super) bindings: Arc<super::bindings::BindingSnapshot>,
+    pub(super) lightmaps: Arc<super::lightmaps::Snapshot>,
     pub meshes: Vec<ViewerMesh>,
     pub overlays: Vec<ViewerOverlay>,
     geometry_revision: u64,
@@ -238,7 +240,10 @@ impl ViewerScene {
         )
     }
 
-    pub fn new(assets: Arc<UploadedModel>) -> Self {
+    pub(super) fn new(
+        assets: Arc<UploadedModel>,
+        lightmaps: Arc<super::lightmaps::Snapshot>,
+    ) -> Self {
         let map = assets.source.map();
         let meshes = assets
             .meshes
@@ -276,6 +281,8 @@ impl ViewerScene {
             })
             .collect();
         Self {
+            bindings: Arc::new(super::bindings::BindingSnapshot::default()),
+            lightmaps,
             assets,
             meshes,
             overlays,

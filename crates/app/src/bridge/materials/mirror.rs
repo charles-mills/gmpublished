@@ -44,7 +44,9 @@ impl MaterialResolver {
         MirrorMaterial {
             shader: material.shader.clone(),
             parameters: material.parameters.clone(),
-            normal_map: self.resolve_water_normal(&normal_map_path),
+            normal_map: (!material.no_draw())
+                .then(|| self.resolve_water_normal(&normal_map_path))
+                .flatten(),
             normal_map_path,
             bump_transform: texture_transform(get("$bumptransform")),
             reflect_amount: scalar(get("$reflectamount"), 0.8),

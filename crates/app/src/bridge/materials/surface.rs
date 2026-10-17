@@ -1,6 +1,11 @@
 use super::parameters::{scalar, texture_transform};
 use super::{Arc, BTreeMap, DecodedTextureFrames, EffectiveMaterial, MaterialResolver};
 
+mod animation;
+#[cfg(test)]
+pub use animation::AnimationWrap;
+pub use animation::{AnimatedTexture, AnimationClock, AnimationError, FrameChannel};
+
 pub type TextureTransform = [[f32; 4]; 2];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -207,8 +212,10 @@ pub struct SurfaceMaterial {
     pub alpha_test_reference: Option<f32>,
     pub additive: bool,
     pub translucent: bool,
+    pub no_draw: bool,
     pub no_cull: bool,
     pub ignore_z: bool,
+    pub animated_textures: Vec<AnimatedTexture>,
     pub unsupported_proxies: Vec<String>,
 }
 
@@ -219,6 +226,12 @@ pub struct UnavailableTexture<'a> {
 }
 
 impl SurfaceMaterial {
+    pub(crate) fn is_animated(&self) -> bool {
+        self.animated_textures
+            .iter()
+            .any(|proxy| proxy.frame_rate != 0.0)
+    }
+
     pub(crate) fn uses_blend_modulation(&self, base_has_alpha: bool) -> bool {
         self.base_blend.uses_secondary()
             && self.blend_modulation.is_some()
@@ -531,6 +544,9 @@ impl SurfaceMaterial {
         alpha: f32,
     ) -> super::RenderMode {
         use super::RenderMode;
+        if self.no_draw {
+            return RenderMode::NoDraw;
+        }
         if self.family == SurfaceFamily::DecalModulate {
             return RenderMode::Modulate;
         }
@@ -606,8 +622,10 @@ impl Default for SurfaceMaterial {
             alpha_test_reference: None,
             additive: false,
             translucent: false,
+            no_draw: false,
             no_cull: false,
             ignore_z: false,
+            animated_textures: Vec::new(),
             unsupported_proxies: Vec::new(),
         }
     }
@@ -640,6 +658,15 @@ impl MaterialResolver {
         family: SurfaceFamily,
         base_blend: SourceSurfaceBaseBlend,
     ) -> Arc<SurfaceMaterial> {
+        if material.no_draw() {
+            return Arc::new(SurfaceMaterial {
+                shader: material.shader.clone(),
+                family,
+                parameters: material.parameters.clone(),
+                no_draw: true,
+                ..SurfaceMaterial::default()
+            });
+        }
         let get = |key| material.parameter(key);
         let generic = family != SurfaceFamily::DecalModulate;
         let raw_texture = |key| get(key).and_then(|name| self.resolve_raw_texture_frames(name));
@@ -667,8 +694,7 @@ impl MaterialResolver {
             fresnel: super::vmt_bool(get("$selfillumfresnel"))
                 .then(|| vector3(get("$selfillumfresnelminmaxexp"), [0.0, 1.0, 1.0])),
         });
-        let unsupported_proxies = material.proxies.iter().map(|p| p.name.clone()).collect();
-        let surface = SurfaceMaterial {
+        let mut surface = SurfaceMaterial {
             shader: material.shader.clone(),
             family,
             base_blend,
@@ -726,10 +752,31 @@ impl MaterialResolver {
             alpha_test_reference: get("$alphatestreference").map(|v| scalar(Some(v), 0.0)),
             additive: super::vmt_bool(get("$additive")),
             translucent: super::vmt_bool(get("$translucent")),
+            no_draw: material.no_draw(),
             no_cull: super::vmt_bool(get("$nocull")),
             ignore_z: super::vmt_bool(get("$ignorez")),
-            unsupported_proxies,
+            animated_textures: Vec::new(),
+            unsupported_proxies: Vec::new(),
         };
+        for proxy in &material.proxies {
+            if let Some(animation) = AnimatedTexture::parse(proxy) {
+                let local_probe_input = animation.texture_parameter == "$envmap"
+                    && surface.envmap.as_ref().is_some_and(|environment| {
+                        matches!(environment.source, super::EnvironmentMapSource::LocalProbe)
+                    });
+                if local_probe_input {
+                    log::debug!(
+                        "material {}: AnimatedTexture input $envmap requires receiver-specific probe state",
+                        material.shader
+                    );
+                    surface.unsupported_proxies.push(proxy.name.clone());
+                } else {
+                    surface.animated_textures.push(animation);
+                }
+            } else {
+                surface.unsupported_proxies.push(proxy.name.clone());
+            }
+        }
         for texture in surface.unavailable_textures() {
             log::debug!(
                 "material {}: unavailable {} texture {}",

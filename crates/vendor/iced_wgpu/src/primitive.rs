@@ -86,9 +86,16 @@ pub trait Pipeline: Any + MaybeSend + MaybeSync {
         Self::new(device, queue, format)
     }
 
-    /// Trims any cached data in the [`Pipeline`].
-    ///
-    /// This will normally be called at the end of a frame.
+    /// Starts demand collection for one compositor frame.
+    fn begin_prepare(&mut self) {}
+
+    /// Resolves collected demand before any primitive draws.
+    fn finish_prepare(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {}
+
+    /// Transfers frame-resource ownership after command submission.
+    fn submitted(&mut self, _queue: &wgpu::Queue) {}
+
+    /// Releases cached data after drawing.
     fn trim(&mut self) {}
 }
 
@@ -208,6 +215,7 @@ pub trait Renderer: core::Renderer {
 pub struct Storage {
     capabilities: Option<wgpu::DownlevelCapabilities>,
     pipelines: FxHashMap<TypeId, Box<dyn Pipeline>>,
+    preparing: bool,
 }
 
 impl Storage {
@@ -224,8 +232,33 @@ impl Storage {
     }
 
     /// Inserts the data `T` in to [`Storage`].
-    pub fn store<T: 'static, P: Pipeline>(&mut self, pipeline: P) {
+    pub fn store<T: 'static, P: Pipeline>(&mut self, mut pipeline: P) {
+        if self.preparing {
+            pipeline.begin_prepare();
+        }
         let _ = self.pipelines.insert(TypeId::of::<T>(), Box::new(pipeline));
+    }
+
+    pub(crate) fn begin_prepare(&mut self) {
+        assert!(!self.preparing, "nested primitive preparation");
+        self.preparing = true;
+        for pipeline in self.pipelines.values_mut() {
+            pipeline.begin_prepare();
+        }
+    }
+
+    pub(crate) fn finish_prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        assert!(self.preparing, "primitive preparation was not started");
+        for pipeline in self.pipelines.values_mut() {
+            pipeline.finish_prepare(device, queue);
+        }
+        self.preparing = false;
+    }
+
+    pub(crate) fn submitted(&mut self, queue: &wgpu::Queue) {
+        for pipeline in self.pipelines.values_mut() {
+            pipeline.submitted(queue);
+        }
     }
 
     /// Returns a reference to the data with type `T` if it exists in [`Storage`].

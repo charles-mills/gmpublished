@@ -185,25 +185,6 @@ fn lightmap_uv_math_uses_face_min_size_and_half_luxel_bias() {
 }
 
 #[test]
-fn shelf_packer_fits_grows_and_overflows() {
-    let fits = vec![block(2, 2), block(2, 2)];
-    let (width, height, placements) = pack_lightmap_blocks(&fits).expect("fits");
-    assert_eq!((width, height), (4, 2));
-    assert!(placements.iter().all(Option::is_some));
-
-    let grows = vec![block(600, 500), block(600, 20)];
-    let (width, height, placements) = pack_lightmap_blocks(&grows).expect("grows");
-    assert_eq!((width, height), (1024, 1024));
-    assert!(placements.iter().all(Option::is_some));
-
-    let overflow = vec![block(4096, 4096), block(1, 1)];
-    let (width, height, placements) = pack_lightmap_blocks(&overflow).expect("overflows");
-    assert_eq!((width, height), (4096, 4096));
-    assert!(placements[0].is_some());
-    assert!(placements[1].is_none());
-}
-
-#[test]
 fn displacement_tessellation_matches_base_face_fan_winding() {
     let steps = 2_usize;
     let side = steps + 1;
@@ -2508,14 +2489,22 @@ fn unsupported_versions_are_reported_before_decode() {
 }
 
 fn block(width: usize, height: usize) -> PendingLightmapBlock {
+    let face_width = width.max(3) - 2;
+    let face_height = height.max(3) - 2;
     PendingLightmapBlock {
-        rgba: vec![255; width * height * 4],
-        width,
-        height,
-        face_width: width.saturating_sub(2),
-        face_height: height.saturating_sub(2),
-        styles: Vec::new(),
-        samples: Vec::new(),
+        sample_start: 0,
+        face_width,
+        face_height,
+        styles: vec![0],
+        samples: vec![
+            ColorRgbExp {
+                r: 255,
+                g: 255,
+                b: 255,
+                exponent: 0
+            };
+            face_width * face_height
+        ],
         sample_basis: lighting::LightmapBasis::Scalar,
         output_basis: lighting::LightmapBasis::Scalar,
     }
@@ -3693,7 +3682,7 @@ fn all_non_finite_vertices_degrade_to_a_zero_box_not_nan() {
         tex_s: 0.0,
         tex_t: 0.0,
         lightmap_uv: [0.0; 2],
-        has_lightmap: false,
+        lightmap_page: None,
         lightmap_bump_step: 0.0,
         blend_alpha: 0.0,
         opacity: 1.0,
@@ -3813,12 +3802,11 @@ fn baked_lightstyle_entity_start_state_follows_named_light_precedence() {
         { "classname" "light" "style" "35" "pattern" "a" }
     "#,
     );
-    let atlas = lighting::bake_lightmap_atlas(
+    let atlas = lighting::bake_lightmap_set(
         std::iter::empty(),
-        &[block(4, 4)],
+        vec![block(4, 4)],
         Some(LightmapSource::Ldr),
         &entities,
-        &mut MapLightmapStats::default(),
     )
     .unwrap();
     let first = atlas.style_values(0.0);
@@ -3936,14 +3924,14 @@ fn lightmap_stats_report_corrupt_offsets_extents_and_style_bundles() {
             map.meshes
                 .iter()
                 .flat_map(|mesh| &mesh.vertices)
-                .all(|vertex| !vertex.has_lightmap)
+                .all(|vertex| vertex.lightmap_page.is_none())
         );
     }
 }
 
 #[test]
-fn lightmap_stats_separate_valid_payload_atlas_rejection_from_truncation() {
-    for (sample_count, valid, invalid, dropped) in [(4095, 1, 0, 1), (4094, 0, 1, 0)] {
+fn lightmap_storage_preserves_oversized_valid_payloads_and_rejects_truncation() {
+    for (sample_count, valid, invalid) in [(4095, 1, 0), (4094, 0, 1)] {
         let map = load_map(&lightmap_stats_fixture(
             0,
             [4094, 0],
@@ -3951,93 +3939,19 @@ fn lightmap_stats_separate_valid_payload_atlas_rejection_from_truncation() {
             sample_count,
         ))
         .unwrap();
-        assert_eq!(
-            map.stats.lightmap,
-            MapLightmapStats {
-                unlightmapped_surfaces: 0,
-                valid_payloads: valid,
-                missing_payloads: 1,
-                invalid_payloads: invalid,
-                atlas_dropped_blocks: dropped,
-            }
-        );
-        assert!(map.lightmap.is_none());
+        assert_eq!(map.stats.lightmap.valid_payloads, valid);
+        assert_eq!(map.stats.lightmap.invalid_payloads, invalid);
+        assert_eq!(map.stats.lightmap.missing_payloads, 1);
+        assert_eq!(map.stats.lightmap.atlas_dropped_blocks, 0);
+        assert_eq!(map.lightmap.is_some(), valid != 0);
+        if let Some(lightmap) = &map.lightmap {
+            assert!(!lightmap.pages().is_empty());
+            assert!(
+                lightmap
+                    .pages()
+                    .iter()
+                    .all(|page| page.width <= 1024 && page.height <= 1024)
+            );
+        }
     }
-}
-
-#[test]
-fn atlas_partial_overflow_counts_drops_and_clears_only_dropped_receiver_bindings() {
-    let map = load_map(&door_bmodel_bsp_fixture("")).unwrap();
-    let mut meshes = BuildMeshes::default();
-    let mesh = meshes.get_or_insert(0, GeometryPartition::Visible, false);
-    mesh.vertices = map.meshes[0]
-        .vertices
-        .iter()
-        .take(2)
-        .enumerate()
-        .map(|(index, vertex)| {
-            let mut vertex = *vertex;
-            vertex.has_lightmap = true;
-            vertex.lightmap_uv = [0.5; 2];
-            mesh::BuildVertex {
-                vertex,
-                lightmap_block: Some(index),
-            }
-        })
-        .collect();
-    let mut stats = MapLightmapStats {
-        unlightmapped_surfaces: 0,
-        valid_payloads: 2,
-        ..Default::default()
-    };
-    let atlas = bake_lightmap_atlas(
-        meshes.iter_mut(),
-        &[block(4, 4), block(4097, 1)],
-        Some(LightmapSource::Ldr),
-        &[],
-        &mut stats,
-    )
-    .unwrap();
-    assert_eq!(stats.atlas_dropped_blocks, 1);
-    assert_eq!(stats.valid_payloads, 2);
-    assert_eq!(stats.missing_payloads, 0);
-    assert_eq!(stats.invalid_payloads, 0);
-    assert_eq!((atlas.width, atlas.height), (4096, 4096));
-    let mesh = &meshes.meshes[0];
-    assert!(mesh.vertices[0].vertex.has_lightmap);
-    assert!(!mesh.vertices[1].vertex.has_lightmap);
-    assert_eq!(mesh.vertices[1].vertex.lightmap_uv, [0.0; 2]);
-    assert_eq!(mesh.vertices[1].lightmap_block, None);
-}
-
-#[test]
-fn completely_rejected_atlas_clears_receiver_bindings_and_reports_failure() {
-    let map = load_map(&door_bmodel_bsp_fixture("")).unwrap();
-    let mut meshes = BuildMeshes::default();
-    let mesh = meshes.get_or_insert(0, GeometryPartition::Visible, false);
-    let mut vertex = map.meshes[0].vertices[0];
-    vertex.has_lightmap = true;
-    vertex.lightmap_uv = [0.5; 2];
-    mesh.vertices.push(mesh::BuildVertex {
-        vertex,
-        lightmap_block: Some(0),
-    });
-    let mut stats = MapLightmapStats {
-        unlightmapped_surfaces: 0,
-        valid_payloads: 1,
-        ..Default::default()
-    };
-    assert!(
-        bake_lightmap_atlas(
-            meshes.iter_mut(),
-            &[block(4097, 1)],
-            Some(LightmapSource::Ldr),
-            &[],
-            &mut stats
-        )
-        .is_none()
-    );
-    assert_eq!(stats.atlas_dropped_blocks, 1);
-    assert!(!meshes.meshes[0].vertices[0].vertex.has_lightmap);
-    assert_eq!(meshes.meshes[0].vertices[0].lightmap_block, None);
 }

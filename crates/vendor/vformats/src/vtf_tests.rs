@@ -900,3 +900,80 @@ fn source_legacy_sentinel_cubemap_requires_the_seventh_face_at_every_mip() {
         68_328
     );
 }
+
+#[test]
+fn detached_layout_addresses_frames_mips_and_legacy_seventh_face() {
+    let mut fixture = Fixture::new(4, 4, RGBA8888, 3);
+    fixture.frames = 2;
+    fixture.flags = texture_flags::ENVMAP;
+    fixture.first_frame = u16::MAX;
+    fixture.payload = vec![43; (4 + 16 + 64) * 2 * 7];
+    let bytes = fixture.bytes();
+    let vtf = parse(&bytes, &limits()).unwrap();
+    let layout = inspect_layout(&bytes[..80], bytes.len() as u64, &limits()).unwrap();
+    for frame in 0..2 {
+        for face in 0..7 {
+            for mip in 0..3 {
+                let image = layout.stored_image(frame, face, mip).unwrap();
+                assert_eq!(image, vtf.stored_image(frame, face, mip).unwrap());
+                assert_eq!(
+                    decode_image_rgba(
+                        layout.header().format,
+                        image.dimensions,
+                        &bytes[image.byte_range],
+                        &limits()
+                    )
+                    .unwrap(),
+                    vtf.decode_rgba(frame, face, mip, &limits()).unwrap()
+                );
+            }
+        }
+    }
+    assert!(matches!(
+        inspect_layout(&bytes[..80], bytes.len() as u64 - 1, &limits()),
+        Err(VtfError::Truncated { .. })
+    ));
+}
+
+#[test]
+fn bounded_header_inspection_does_not_charge_unread_animation_payload() {
+    let mut fixture = Fixture::new(1024, 1024, DXT1, 1);
+    fixture.frames = 4096;
+    let prefix = fixture.bytes();
+    let declared_len = prefix.len() as u64 + 4096 * 524_288;
+    let bounded = Limits {
+        max_input_bytes: prefix.len() as u64,
+        ..limits()
+    };
+    let layout = inspect_layout(&prefix, declared_len, &bounded).unwrap();
+    let last = layout.stored_image(4095, 0, 0).unwrap();
+    assert_eq!(last.byte_range.end as u64, declared_len);
+    assert_eq!(last.byte_range.len(), 524_288);
+    assert!(last.byte_range.start as u64 > limits().max_input_bytes);
+    assert!(matches!(
+        inspect_layout(&prefix, declared_len - 1, &bounded),
+        Err(VtfError::Truncated { .. })
+    ));
+    let mut oversized_input = prefix;
+    oversized_input.push(0);
+    assert!(matches!(
+        inspect_layout(&oversized_input, declared_len, &bounded),
+        Err(VtfError::InputTooLarge { len: 81, max: 80 })
+    ));
+}
+
+#[test]
+fn full_parse_keeps_its_actual_input_byte_limit() {
+    let mut fixture = Fixture::new(2, 2, DXT1, 1);
+    fixture.payload = vec![0; 8];
+    let bytes = fixture.bytes();
+    let bounded = Limits {
+        max_input_bytes: 80,
+        ..limits()
+    };
+    assert!(inspect_layout(&bytes[..80], bytes.len() as u64, &bounded).is_ok());
+    assert!(matches!(
+        parse(&bytes, &bounded),
+        Err(VtfError::InputTooLarge { len: 88, max: 80 })
+    ));
+}

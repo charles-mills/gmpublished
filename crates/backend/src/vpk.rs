@@ -66,7 +66,15 @@ pub struct VpkEntry {
     pub crc: u32,
 
     location: vformats::vpk::VpkLocation,
-    preload: Vec<u8>,
+    preload: std::sync::Arc<[u8]>,
+}
+
+/// Frozen entry locator with shared directory preload bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VpkEntryStorage {
+    pub archive_path: PathBuf,
+    pub data_range: std::ops::Range<u64>,
+    pub preload: std::sync::Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -242,7 +250,7 @@ impl PreparedVpkIndex {
                         size: entry.size(),
                         crc: entry.crc32,
                         location: entry.location,
-                        preload: entry.preload.to_vec(),
+                        preload: entry.preload.into(),
                     },
                 )
             })
@@ -279,6 +287,35 @@ impl VpkFile {
     #[must_use]
     pub fn entries(&self) -> &HashMap<String, VpkEntry> {
         &self.entries
+    }
+
+    pub fn entry_storage(&self, path: &str) -> Result<VpkEntryStorage, VpkError> {
+        let entry = self.entries.get(path).ok_or(VpkError::EntryNotFound)?;
+        let (path, offset, len) = match entry.location {
+            vformats::vpk::VpkLocation::InDirectory { offset, len } => {
+                (self.path.clone(), offset, len)
+            }
+            vformats::vpk::VpkLocation::InArchive {
+                archive,
+                offset,
+                len,
+            } => {
+                let file_name = self
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or(VpkError::MissingArchive)?;
+                let sibling = vformats::vpk::sibling_archive_name(file_name, archive)
+                    .ok_or(VpkError::MissingArchive)?;
+                (self.path.with_file_name(sibling), offset, len)
+            }
+        };
+        let end = offset.checked_add(len).ok_or(VpkError::FormatError)?;
+        Ok(VpkEntryStorage {
+            archive_path: path,
+            data_range: offset..end,
+            preload: std::sync::Arc::clone(&entry.preload),
+        })
     }
 
     pub fn read_entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VpkError> {

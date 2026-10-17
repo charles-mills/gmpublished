@@ -7,13 +7,8 @@ use gmpublished_domain::scene::map::{
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use super::images::{Image, ImageCache, ImageResidency, ImageStats, ImageUploadIssue, ImageView};
-use super::materials::{
-    MaterialTextureViews, MaterialUploadMode, PreparedMaterial, SampledTexture,
-};
 use super::resources::RenderResources;
 use super::uniforms::scene_sky_tint;
-use crate::bridge::materials::{TextureReadTransfer, TextureRole};
 
 use super::{
     DETAIL_VERTEX_FLOAT_COUNT, DetailSprite, DoorInstance, DoorRenderPose, MapVisibilityBucket,
@@ -26,7 +21,6 @@ pub struct UploadCache {
     uploads: HashMap<SceneKey, Arc<UploadedModel>>,
     live: HashSet<SceneKey>,
     rejected: HashMap<SceneKey, RejectedUpload>,
-    images: ImageCache,
 }
 
 #[derive(Debug)]
@@ -37,14 +31,8 @@ struct RejectedUpload {
 
 impl UploadCache {
     pub fn new(capabilities: Option<&wgpu::DownlevelCapabilities>) -> Self {
-        Self {
-            images: ImageCache::new(capabilities),
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn image_stats(&self) -> ImageStats {
-        self.images.stats()
+        let _ = capabilities;
+        Self::default()
     }
 
     pub fn get(&self, key: SceneKey) -> Option<&Arc<UploadedModel>> {
@@ -59,8 +47,6 @@ impl UploadCache {
         self.uploads.retain(|id, _| self.live.contains(id));
         self.rejected.retain(|id, _| self.live.contains(id));
         self.live.clear();
-        self.images.trim();
-        log::trace!("GPU image cache: {:?}", self.image_stats());
     }
 
     fn admit_scene(
@@ -102,119 +88,12 @@ impl UploadCache {
     ) -> Result<(), Arc<super::residency::SceneUploadError>> {
         let scene = source.render_scene();
         let map = source.map();
-        let epoch = {
-            let uploader = resources
-                .texture_uploader
-                .lock()
-                .expect("texture uploader lock");
-            uploader.retirement_state().epoch
-        };
-        if self
-            .uploads
-            .get(&key)
-            .is_some_and(|upload| !upload.should_retry_images(epoch))
-        {
+        if self.uploads.contains_key(&key) {
             return Ok(());
         }
 
         self.admit_scene(key, source, &device.limits())?;
 
-        let mut images = self.images.lease(&resources.texture_uploader);
-        let flat_normal = &resources.flat_normal;
-        let flat_sample = SampledTexture {
-            view: flat_normal,
-            flags: None,
-        };
-        let mut sampler_diagnostics = Vec::new();
-        let material_uploads = scene
-            .materials
-            .iter()
-            .map(|slot| {
-                let base_view = resources.create_slot_texture(
-                    device,
-                    queue,
-                    slot,
-                    slot.texture.as_deref(),
-                    &mut images,
-                    false,
-                );
-                let base2_view = slot.texture2.as_deref().map(|texture| {
-                    resources.create_slot_texture(
-                        device,
-                        queue,
-                        slot,
-                        Some(texture),
-                        &mut images,
-                        true,
-                    )
-                });
-                let prepared = PreparedMaterial::from(&slot.shader);
-                let normal_source = prepared.normal();
-                let normal2_source = prepared.normal2();
-                let normal = normal_source.and_then(|normal| {
-                    RenderResources::create_data_view(
-                        device,
-                        queue,
-                        normal,
-                        TextureRole::Normal,
-                        &mut images,
-                        &slot.name,
-                    )
-                });
-                let normal2 = normal2_source.and_then(|normal| {
-                    RenderResources::create_data_view(
-                        device,
-                        queue,
-                        normal,
-                        TextureRole::Normal,
-                        &mut images,
-                        &slot.name,
-                    )
-                });
-                resources.create_material(
-                    device,
-                    queue,
-                    MaterialTextureViews {
-                        base: base_view.sampled(),
-                        base2: base2_view.as_ref().unwrap_or(&base_view).sampled(),
-                        normal: normal.as_ref().map_or(flat_sample, |view| SampledTexture {
-                            view,
-                            flags: normal_source
-                                .map(crate::bridge::materials::DecodedTextureFrames::flags),
-                        }),
-                        normal2: normal2
-                            .as_ref()
-                            .map(|view| SampledTexture {
-                                view,
-                                flags: normal2_source
-                                    .map(crate::bridge::materials::DecodedTextureFrames::flags),
-                            })
-                            .or_else(|| {
-                                normal.as_ref().map(|view| SampledTexture {
-                                    view,
-                                    flags: normal_source
-                                        .map(crate::bridge::materials::DecodedTextureFrames::flags),
-                                })
-                            })
-                            .unwrap_or(flat_sample),
-                    },
-                    MaterialUploadMode {
-                        name: &slot.name,
-                        material: PreparedMaterial::from(&slot.shader),
-                        base_flags: slot.texture.as_ref().and_then(|texture| texture.flags()),
-                        base2_flags: slot
-                            .texture2
-                            .as_ref()
-                            .or(slot.texture.as_ref())
-                            .and_then(|texture| texture.flags()),
-                        render_mode: slot.render_mode,
-                        alpha_policy: slot.alpha_policy,
-                    },
-                    &mut images,
-                    &mut sampler_diagnostics,
-                )
-            })
-            .collect::<Vec<_>>();
         let material_render_modes = if scene.materials.is_empty() {
             vec![RenderMode::Opaque]
         } else {
@@ -233,46 +112,6 @@ impl UploadCache {
                 .map(|slot| slot.shader.is_planar())
                 .collect::<Vec<_>>()
         };
-        let mut material_uploads = material_uploads;
-        if material_uploads.is_empty() {
-            let base_view = &resources.error_texture;
-            let upload = resources.create_material(
-                device,
-                queue,
-                MaterialTextureViews {
-                    base: SampledTexture {
-                        view: base_view,
-                        flags: None,
-                    },
-                    base2: SampledTexture {
-                        view: base_view,
-                        flags: None,
-                    },
-                    normal: flat_sample,
-                    normal2: flat_sample,
-                },
-                MaterialUploadMode {
-                    name: "<missing material>",
-                    material: PreparedMaterial::Fallback,
-                    base_flags: None,
-                    base2_flags: None,
-                    render_mode: RenderMode::Opaque,
-                    alpha_policy: crate::bridge::materials::TextureAlphaPolicy::Opaque,
-                },
-                &mut images,
-                &mut sampler_diagnostics,
-            );
-            material_uploads.push(upload);
-        }
-        let mut material_bind_groups = Vec::with_capacity(material_uploads.len());
-        let mut water_material_bind_groups = Vec::with_capacity(material_uploads.len());
-        let mut material_uniforms = Vec::with_capacity(material_uploads.len());
-        for (material, water, uniform) in material_uploads {
-            material_bind_groups.push(material);
-            water_material_bind_groups.push(water);
-            material_uniforms.push(uniform);
-        }
-
         let mut meshes = upload_meshes(
             device,
             queue,
@@ -402,117 +241,16 @@ impl UploadCache {
             overlays
         });
         let sky_tint = scene_sky_tint(map.and_then(|map| map.skybox.as_ref()));
-        let skybox = map.and_then(|map| map.skybox.as_ref()).map(|skybox| {
-            let face_bind_groups = std::array::from_fn(|index| {
-                skybox.materials[index].as_ref().map(|material| {
-                    let source = if material.is_painted() {
-                        material
-                            .painted
-                            .as_ref()
-                            .and_then(|paint| paint.texture.as_ref())
-                            .map(|texture| (texture.resident(), texture.load_outcome()))
-                    } else {
-                        skybox.faces[index]
-                            .as_ref()
-                            .map(|texture| (texture.resident(), texture.load_outcome()))
-                    };
-                    let role = if material.is_painted() {
-                        "stars"
-                    } else {
-                        "face"
-                    };
-                    let source = source.and_then(|(resident, outcome)| {
-                        if outcome.is_unavailable() {
-                            images.reject("<sky>", role, format!("{outcome:?}"));
-                            None
-                        } else {
-                            resident
-                        }
-                    });
-                    let transfer = if material.is_painted() {
-                        TextureReadTransfer::Unmodified
-                    } else {
-                        TextureReadTransfer::SrgbToLinear
-                    };
-                    let view = source
-                        .and_then(|source| {
-                            match images.view(device, queue, source, transfer, ImageView::D2(0)) {
-                                Ok(view) => Some(view),
-                                Err(error) => {
-                                    images.reject_upload("<sky>", role, &error);
-                                    None
-                                }
-                            }
-                        })
-                        .unwrap_or_else(|| resources.sky_black_texture.clone());
-                    resources.create_sky_material(
-                        device,
-                        &view,
-                        super::sky::SkyUniform::new(material),
-                        source
-                            .and_then(|texture| texture.metadata().flags)
-                            .unwrap_or(0),
-                        &mut sampler_diagnostics,
-                    )
-                })
-            });
-            UploadedSkybox { face_bind_groups }
-        });
-
-        let mut screen_refraction_normals = HashMap::new();
-        for effect in scene
-            .materials
-            .iter()
-            .filter_map(|slot| slot.shader.water())
-            .filter_map(|water| water.underwater_overlay.as_deref())
-        {
-            screen_refraction_normals
-                .entry(effect.name.clone())
-                .or_insert_with(|| {
-                    let view = RenderResources::create_data_view(
-                        device,
-                        queue,
-                        &effect.normal_map,
-                        TextureRole::Normal,
-                        &mut images,
-                        &effect.name,
-                    );
-                    let flags = view.as_ref().and_then(|_| {
-                        effect
-                            .normal_map
-                            .source_metadata()
-                            .and_then(|metadata| metadata.flags)
-                    });
-                    let sampler = resources.samplers.texture(
-                        &effect.name,
-                        "underwater_normal",
-                        flags,
-                        super::samplers::TextureKind::Texture2d,
-                        resources.sampler_quality,
-                        &mut sampler_diagnostics,
-                    );
-                    Arc::new(super::screen_refraction::Texture {
-                        view: view.unwrap_or_else(|| flat_normal.clone()),
-                        sampler,
-                    })
-                });
-        }
         super::transparency::build_parts(&mut meshes, &material_render_modes, scene, map);
-        let (images, image_upload_issues) = images.finish();
         let receiver_faces =
             super::super::draw_plan::ReceiverIndex::prepare(receiver_faces, map, &meshes);
         let mut upload = UploadedModel {
-            image_rejection_epoch: epoch,
-            images,
-            image_upload_issues,
-            sampler_diagnostics,
             source: source.clone(),
             surface_pipelines: super::surface_pipelines::SurfacePipelineVariants::new(
                 device,
                 resources,
                 &scene.materials,
             ),
-            screen_refraction_normals,
             meshes: meshes.into_iter().map(Arc::new).collect(),
             detail_sprites,
             map_skybox_detail_sprites,
@@ -537,30 +275,12 @@ impl UploadCache {
             phy_debug_meshes: OnceLock::new(),
             model_lighting_references: OnceLock::new(),
             opaque_placements,
-            material_bind_groups,
-            water_material_bind_groups,
             material_render_modes,
             material_planar_materials,
-            _material_uniforms: material_uniforms,
-            skybox,
             sky_tint,
             reflectors: Vec::new(),
         };
         upload.reflectors = super::reflections::collect_reflectors(&upload, scene);
-        log::debug!(
-            "Material samplers: {} roles, {} limitations",
-            upload.sampler_diagnostics.len(),
-            upload
-                .sampler_diagnostics
-                .iter()
-                .filter(|policy| policy.has_limitations())
-                .count()
-        );
-        log::debug!(
-            "Scene GPU images: {:?}; {} upload issues",
-            upload.image_stats(),
-            upload.image_upload_issues.len()
-        );
         self.uploads.insert(key, Arc::new(upload));
         Ok(())
     }
@@ -597,13 +317,8 @@ pub struct UploadedRenderableRange {
 
 #[derive(Debug)]
 pub struct UploadedModel {
-    image_rejection_epoch: u64,
-    images: Vec<Arc<Image>>,
-    pub(super) image_upload_issues: Vec<ImageUploadIssue>,
-    pub(super) sampler_diagnostics: Vec<super::samplers::SamplerDiagnostic>,
     pub(super) source: PreviewScene,
     pub(super) surface_pipelines: super::surface_pipelines::SurfacePipelineVariants,
-    pub screen_refraction_normals: HashMap<String, Arc<super::screen_refraction::Texture>>,
     pub meshes: Vec<Arc<UploadedMesh>>,
     pub detail_sprites: Option<UploadedDetailSprites>,
     pub map_skybox_detail_sprites: Option<UploadedDetailSprites>,
@@ -614,30 +329,15 @@ pub struct UploadedModel {
     pub phy_debug_meshes: OnceLock<Vec<UploadedMesh>>,
     pub(super) model_lighting_references: OnceLock<super::model_lighting_visibility::References>,
     pub(in super::super) opaque_placements: super::super::draw_plan::OpaquePlacementIndex,
-    pub material_bind_groups: Vec<wgpu::BindGroup>,
-    pub water_material_bind_groups: Vec<wgpu::BindGroup>,
     pub material_render_modes: Vec<RenderMode>,
     pub material_planar_materials: Vec<bool>,
-    pub _material_uniforms: Vec<wgpu::Buffer>,
-    pub skybox: Option<UploadedSkybox>,
     pub sky_tint: Vec3,
     pub reflectors: Vec<super::reflections::Reflector>,
 }
 
 impl UploadedModel {
-    pub(super) fn has_capacity_issues(&self) -> bool {
-        self.image_upload_issues
-            .iter()
-            .any(|issue| issue.cause == super::images::ImageUploadCause::Capacity)
-    }
-    fn should_retry_images(&self, epoch: u64) -> bool {
-        self.image_upload_issues
-            .iter()
-            .any(|issue| issue.retry_after_retirement(self.image_rejection_epoch, epoch))
-    }
-
-    pub(super) fn image_stats(&self) -> ImageResidency {
-        super::images::lease_stats(&self.images)
+    pub fn material_count(&self) -> usize {
+        self.source.render_scene().materials.len().max(1)
     }
     pub fn map(&self) -> Option<&super::MapPreview> {
         self.source.map()
@@ -666,6 +366,7 @@ pub struct UploadedSkybox {
 
 #[derive(Debug)]
 pub struct UploadedMesh {
+    pub(super) lightmaps: super::lightmap_ranges::Ranges,
     pub geometry: crate::media::preview_model::MeshGeometry,
     pub entity: bool,
     pub transparent_parts: Vec<super::transparency::Part>,
@@ -714,8 +415,8 @@ pub struct UploadedDetailSprites {
 
 #[derive(Debug)]
 pub struct UploadedOverlay {
+    pub(super) lightmaps: Vec<super::lightmap_ranges::PageRange>,
     vertices: wgpu::Buffer,
-    pub vertex_count: u32,
     centroid: Vec3,
     pub material_index: usize,
     pub map_skybox: bool,
@@ -803,6 +504,8 @@ pub fn upload_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             UploadedMesh {
+                lightmaps: super::lightmap_ranges::Ranges::new(&mesh.vertices, &mesh.indices)
+                    .expect("admitted mesh lightmap assignments"),
                 geometry: mesh.geometry,
                 transparent_parts: Vec::new(),
                 entity: entity_flags
@@ -862,6 +565,8 @@ pub fn upload_door_meshes(
             queue.write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
 
             uploaded.push(UploadedMesh {
+                lightmaps: super::lightmap_ranges::Ranges::new(&mesh.vertices, &mesh.indices)
+                    .expect("admitted door lightmap assignments"),
                 geometry: mesh.geometry,
                 transparent_parts: Vec::new(),
                 entity: true,
@@ -967,8 +672,9 @@ pub fn upload_overlays(
             });
             queue.write_buffer(&vertices, 0, bytemuck::cast_slice(&posed));
             Arc::new(UploadedOverlay {
+                lightmaps: super::lightmap_ranges::Ranges::expanded(&posed)
+                    .expect("admitted surface mark lightmap assignments"),
                 vertices,
-                vertex_count: posed.len() as u32,
                 centroid: mesh_centroid(&posed),
                 material_index: overlay.material_index,
                 map_skybox,
@@ -1053,7 +759,6 @@ mod admission_tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(cache.rejected.len(), 1);
         assert!(cache.uploads.is_empty());
-        assert_eq!(cache.image_stats().allocations, 0);
         drop(scene);
         assert!(weak.upgrade().is_some());
         cache.trim();

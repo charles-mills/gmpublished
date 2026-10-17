@@ -37,8 +37,19 @@ mod texture;
 mod texture_asset;
 mod texture_budget;
 pub use texture_budget::DecodedTextureBudget;
+mod reloadable;
 mod texture_plan;
 mod texture_source;
+use reloadable::TexturePage;
+mod page_cache;
+pub use page_cache::{
+    CachedTexturePage, PageCacheInitError, PageRetry, PageStatus, PageSubscription, PageTicket,
+    TexturePageCache,
+};
+pub use reloadable::{
+    ReloadableTextureSource, TextureFrameRequest, TexturePageCost, TexturePageIdentity,
+    TexturePageLimits, TextureSourceId,
+};
 mod texture_working;
 pub use texture_source::EncodedTextureBudget;
 #[cfg(feature = "map-capture")]
@@ -58,8 +69,13 @@ pub use shader::MaterialShader;
 pub use sky::{PaintedSkyMaterial, SkyMaterial};
 #[cfg(test)]
 use surface::DecalParameters;
-pub use surface::{ModelShadingProfile, SourceSurfaceBaseBlend, SurfaceFamily, SurfaceMaterial};
-pub use water::WaterMaterial;
+#[cfg(test)]
+pub use surface::{AnimatedTexture, AnimationWrap};
+pub use surface::{
+    AnimationClock, AnimationError, FrameChannel, ModelShadingProfile, SourceSurfaceBaseBlend,
+    SurfaceFamily, SurfaceMaterial,
+};
+pub use water::{ScreenRefraction, WaterMaterial};
 
 pub use frames::{DecodedTextureFrames, TextureReadTransfer, TextureRole};
 pub use texture::decode_vtf_rgba;
@@ -98,6 +114,13 @@ const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
 const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
 const NATIVE_ERROR_TEXTURE_FLAGS: u32 = 0x0008_0000;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextureLoading {
+    #[default]
+    Resident,
+    OnDemand,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureLoadOutcome {
@@ -242,12 +265,26 @@ impl ResolvedTexture {
         }
     }
 
+    pub(crate) fn on_demand(
+        &self,
+    ) -> Option<(&Arc<ReloadableTextureSource>, &TextureFrameRequest)> {
+        self.resident.on_demand()
+    }
     pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
         self.resident.resident()
     }
     pub(crate) fn source_metadata(&self) -> Option<&TextureMetadata> {
         self.source_metadata.as_deref()
     }
+    pub(crate) fn effective_frame_count(&self) -> u32 {
+        if self.load_outcome.uses_native_error_texture() {
+            1
+        } else {
+            self.source_metadata()
+                .map_or(1, |metadata| metadata.frame_count)
+        }
+    }
+
     pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
         self.load_outcome
     }
@@ -263,10 +300,12 @@ impl ResolvedTexture {
     fn dimensions(&self) -> [u32; 2] {
         match &self.resident {
             TextureResidency::Resident(resident) => resident.layers()[0].mips[0].dimensions,
-            TextureResidency::Deferred(_) => self.resident.dimensions(
-                self.source_metadata()
-                    .expect("deferred image retains source metadata"),
-            ),
+            TextureResidency::Deferred(_) | TextureResidency::OnDemand { .. } => {
+                self.resident.dimensions(
+                    self.source_metadata()
+                        .expect("deferred image retains source metadata"),
+                )
+            }
         }
     }
     pub(crate) fn flags(&self) -> Option<u32> {
@@ -359,7 +398,7 @@ pub struct ResolvedMaterialTextures {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedPrimaryMaterial {
     pub(crate) shader: MaterialShader,
-    pub(crate) texture: Arc<ResolvedTexture>,
+    pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
     pub(crate) render_mode: RenderMode,
 }
@@ -374,13 +413,13 @@ fn canonical_error_primary() -> ResolvedPrimaryMaterial {
                 diffuse_bump: false,
                 ..Default::default()
             })),
-            texture: Arc::new(ResolvedTexture {
+            texture: Some(Arc::new(ResolvedTexture {
                 resident: TextureResidency::Resident(texture_asset::missing_material_resident()),
                 source_metadata: None,
                 mapping_dimensions: Some([32, 32]),
                 load_outcome: TextureLoadOutcome::Generated,
                 water_fallback: false,
-            }),
+            })),
             texture2: None,
             render_mode: RenderMode::Opaque,
         })
@@ -458,6 +497,7 @@ impl<T> MaterialResolution<T> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenderMode {
+    NoDraw,
     Opaque,
     Cutout,
     Translucent,
@@ -478,8 +518,12 @@ impl TextureAlphaPolicy {
 }
 
 impl RenderMode {
+    pub(crate) const fn draws(self) -> bool {
+        !matches!(self, Self::NoDraw)
+    }
+
     pub(crate) const fn texture_alpha_policy(self) -> TextureAlphaPolicy {
-        if matches!(self, Self::Opaque) {
+        if matches!(self, Self::Opaque | Self::NoDraw) {
             TextureAlphaPolicy::Opaque
         } else {
             TextureAlphaPolicy::Sampled
@@ -502,12 +546,13 @@ struct ResolverConfig {
     sprite_sheet_budget: Arc<SpriteSheetBudget>,
     bc_textures: BcTextures,
     texture_access: texture_plan::TextureAccess,
+    texture_loading: TextureLoading,
     single_texture_mip: bool,
 }
 
 #[derive(Debug)]
 struct IndexedVpks {
-    archives: Vec<VpkArchive>,
+    archives: Vec<Arc<VpkArchive>>,
     _reservations: Vec<source_index::IndexReservation>,
 }
 
@@ -521,10 +566,11 @@ struct ResolverShared {
     loose_source_dirs: Vec<LooseSourceDir>,
     sibling_gma_paths: Vec<SiblingGmaPath>,
     game_vpk_paths: Vec<PathBuf>,
-    sibling_gmas: crate::preparation::FlightCell<SiblingGmaIndex>,
-    game_vpks: crate::preparation::FlightCell<IndexedVpks>,
+    sibling_gmas: crate::preparation::FlightCell<Arc<SiblingGmaIndex>>,
+    game_vpks: crate::preparation::FlightCell<Arc<IndexedVpks>>,
     material_definitions: MaterialDefinitionCache,
     texture_assets: TextureAssetCache,
+    reloadable_sources: reloadable::TextureSourceCache,
     sound_scripts: crate::preparation::FlightCell<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
 }
@@ -809,6 +855,7 @@ impl MaterialResolver {
                 )),
                 bc_textures: BcTextures::RetainAuthored,
                 texture_access: texture_plan::TextureAccess::Direct,
+                texture_loading: TextureLoading::Resident,
                 single_texture_mip: false,
             },
             shared: Arc::new(ResolverShared {
@@ -824,6 +871,7 @@ impl MaterialResolver {
                 game_vpks: Default::default(),
                 material_definitions: MaterialDefinitionCache::default(),
                 texture_assets: TextureAssetCache::default(),
+                reloadable_sources: Default::default(),
                 sound_scripts: Default::default(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
             }),
@@ -948,7 +996,7 @@ impl MaterialResolver {
         let material_paths = material_paths(material_dirs, material_name);
         let definition = self.material_definition(&material_paths)?;
         self.resolve_primary_material(&definition.material)
-            .map(|material| Arc::clone(&material.texture))
+            .and_then(|material| material.texture)
     }
 
     pub(crate) fn resolve_primary(
@@ -977,7 +1025,7 @@ impl MaterialResolver {
                 let primary = canonical_error_primary();
                 ResolvedMaterialTextures {
                     shader: primary.shader,
-                    texture: Some(primary.texture),
+                    texture: primary.texture,
                     texture2: None,
                     render_mode: primary.render_mode,
                 }
@@ -1064,6 +1112,14 @@ impl MaterialResolver {
 
     fn resolve_material(&self, material: &EffectiveMaterial) -> Option<ResolvedMaterialTextures> {
         let render_mode = material.render_mode();
+        if !render_mode.draws() {
+            return Some(ResolvedMaterialTextures {
+                shader: self.resolve_shader(material, false, false),
+                texture: None,
+                texture2: None,
+                render_mode,
+            });
+        }
         let texture = material
             .effective_base_texture()
             .and_then(|base_texture| self.resolve_material_texture(material, base_texture))
@@ -1113,9 +1169,12 @@ impl MaterialResolver {
         material: &EffectiveMaterial,
     ) -> Option<ResolvedPrimaryMaterial> {
         let resolved = self.resolve_material(material)?;
+        if resolved.render_mode.draws() && resolved.texture.is_none() {
+            return None;
+        }
         Some(ResolvedPrimaryMaterial {
             shader: resolved.shader,
-            texture: resolved.texture?,
+            texture: resolved.texture,
             texture2: resolved.texture2,
             render_mode: resolved.render_mode,
         })
@@ -1139,6 +1198,9 @@ impl MaterialResolver {
         policy: TextureFailurePolicy,
     ) -> Option<Arc<ResolvedTexture>> {
         let path = texture_path(base_texture)?;
+        if self.config.texture_loading == TextureLoading::OnDemand {
+            return self.resolve_on_demand_texture(&path, policy);
+        }
         let selected = match self.selected_texture_asset(&path) {
             Ok(selected) => selected,
             Err(TextureSourceError::Missing) => {
@@ -1274,7 +1336,7 @@ impl MaterialResolver {
         self.shared.index_budget.stats()
     }
 
-    fn game_vpks(&self) -> Result<&[VpkArchive], crate::preparation::Cancelled> {
+    fn game_vpks(&self) -> Result<&Arc<IndexedVpks>, crate::preparation::Cancelled> {
         self.shared
             .game_vpks
             .get_or_try_init_ref(&self.config.cancellation, || {
@@ -1300,7 +1362,7 @@ impl MaterialResolver {
                             if let VpkError::IndexLimit(limit) = &error {
                                 self.shared.index_budget.reject(*limit);
                             }
-                            archives.push(VpkArchive::unavailable(error));
+                            archives.push(Arc::new(VpkArchive::unavailable(error)));
                             break;
                         }
                         Err(error) => {
@@ -1342,12 +1404,12 @@ impl MaterialResolver {
                         Ok(archive)
                     })();
                     match result {
-                        Ok(archive) => archives.push(archive),
+                        Ok(archive) => archives.push(Arc::new(archive)),
                         Err(error @ VpkError::IndexLimit(_)) => {
                             if let VpkError::IndexLimit(limit) = &error {
                                 self.shared.index_budget.reject(*limit);
                             }
-                            archives.push(VpkArchive::unavailable(error));
+                            archives.push(Arc::new(VpkArchive::unavailable(error)));
                             break;
                         }
                         Err(error) => {
@@ -1355,15 +1417,14 @@ impl MaterialResolver {
                         }
                     }
                 }
-                Ok(IndexedVpks {
+                Ok(Arc::new(IndexedVpks {
                     archives,
                     _reservations: reservations,
-                })
+                }))
             })
-            .map(|indexed| indexed.archives.as_slice())
     }
 
-    fn sibling_gmas(&self) -> Result<&SiblingGmaIndex, crate::preparation::Cancelled> {
+    fn sibling_gmas(&self) -> Result<&Arc<SiblingGmaIndex>, crate::preparation::Cancelled> {
         self.shared
             .sibling_gmas
             .get_or_try_init_ref(&self.config.cancellation, || {
@@ -1372,6 +1433,7 @@ impl MaterialResolver {
                     &self.shared.index_budget,
                     &self.config.cancellation,
                 )
+                .map(Arc::new)
             })
     }
 
@@ -1532,7 +1594,7 @@ impl MaterialResolver {
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
             .pakfile
-            .as_deref()
+            .as_ref()
             .map(SourceRef::Pakfile)
             .into_iter()
             .chain(std::iter::once_with(|| {
@@ -1551,10 +1613,12 @@ impl MaterialResolver {
             .chain(self.discovery_barrier(ContentSourceTier::GameVpk))
             .chain(
                 std::iter::once_with(|| {
-                    self.game_vpks()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(SourceRef::GameVpk)
+                    self.game_vpks().ok().into_iter().flat_map(|catalog| {
+                        catalog
+                            .archives
+                            .iter()
+                            .map(move |archive| SourceRef::GameVpk(catalog, archive))
+                    })
                 })
                 .flatten(),
             )
@@ -1691,11 +1755,11 @@ enum SourceError {
 enum SourceRef<'a> {
     SourceUnavailable(ContentSourceTier, &'a SourceDiscoveryFailure),
     IndexUnavailable(ContentSourceTier, vformats::ArchiveIndexLimit),
-    Pakfile(&'a PakSource),
-    Addon(&'a PreviewArchiveSource),
+    Pakfile(&'a Arc<PakSource>),
+    Addon(&'a Arc<PreviewArchiveSource>),
     Loose(&'a LooseSourceDir),
-    SiblingGma(&'a SiblingGmaIndex),
-    GameVpk(&'a VpkArchive),
+    SiblingGma(&'a Arc<SiblingGmaIndex>),
+    GameVpk(&'a Arc<IndexedVpks>, &'a Arc<VpkArchive>),
 }
 
 impl SourceRef<'_> {
@@ -1710,7 +1774,7 @@ impl SourceRef<'_> {
         match self {
             Self::IndexUnavailable(_, error) => Some(*error),
             Self::Pakfile(source) => source.index_error,
-            Self::GameVpk(source) => match source.index_error() {
+            Self::GameVpk(_, source) => match source.index_error() {
                 Some(VpkError::IndexLimit(error)) => Some(*error),
                 _ => None,
             },
@@ -1726,7 +1790,7 @@ impl SourceRef<'_> {
             Self::Addon(_) => ContentSourceTier::Addon,
             Self::Loose(_) => ContentSourceTier::Loose,
             Self::SiblingGma(_) => ContentSourceTier::SiblingGma,
-            Self::GameVpk(_) => ContentSourceTier::GameVpk,
+            Self::GameVpk(..) => ContentSourceTier::GameVpk,
         }
     }
 
@@ -1748,7 +1812,7 @@ impl SourceRef<'_> {
             },
             Self::Loose(loose_dir) => loose_dir.entry_bytes(path),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.entry_bytes(path),
-            Self::GameVpk(vpk) => match vpk.entry_bytes(path.as_str()) {
+            Self::GameVpk(_, vpk) => match vpk.entry_bytes(path.as_str()) {
                 Ok(bytes) => Ok(Some(bytes)),
                 Err(VpkError::EntryNotFound) => Ok(None),
                 Err(error) => Err(SourceError::GameVpk(error)),
@@ -1763,7 +1827,7 @@ impl SourceRef<'_> {
             Self::Addon(addon) => addon.for_each_path(visit),
             Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.for_each_path(visit),
-            Self::GameVpk(vpk) => vpk.paths().iter().for_each(|path| visit(path)),
+            Self::GameVpk(_, vpk) => vpk.paths().iter().for_each(|path| visit(path)),
         }
     }
 }
@@ -1847,7 +1911,9 @@ impl EffectiveMaterial {
     }
 
     fn render_mode(&self) -> RenderMode {
-        if is_water_shader(&self.shader) {
+        if self.no_draw() {
+            RenderMode::NoDraw
+        } else if is_water_shader(&self.shader) {
             if vmt_bool(self.parameter("$alphatest")) {
                 RenderMode::Cutout
             } else {
@@ -1865,6 +1931,10 @@ impl EffectiveMaterial {
         } else {
             RenderMode::Opaque
         }
+    }
+
+    fn no_draw(&self) -> bool {
+        vmt_bool(self.parameter("$no_draw"))
     }
 
     fn apply_patch_values(
@@ -2093,5 +2163,7 @@ fn collect_loose_script_paths(dir: &Path, prefix: &str, depth: usize, out: &mut 
     }
 }
 
+#[cfg(test)]
+mod nodraw_tests;
 #[cfg(test)]
 mod tests;

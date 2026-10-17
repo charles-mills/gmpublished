@@ -146,8 +146,23 @@ impl SpriteSheetBudget {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SpriteSheetAllocationId(u64);
 
+struct SheetReservation {
+    budget: Arc<SpriteSheetBudget>,
+    id: SpriteSheetAllocationId,
+}
+impl Drop for SheetReservation {
+    fn drop(&mut self) {
+        self.budget.release(self.id);
+    }
+}
+struct ReloadableSheet {
+    sheet: Arc<SpriteSheet>,
+    _reservation: SheetReservation,
+}
+
 pub(super) struct SpriteSheetCache {
     allocation_id: SpriteSheetAllocationId,
+    reloadable_parsed: crate::preparation::FlightCell<Option<Arc<ReloadableSheet>>>,
     cost: OnceLock<Result<Option<SpriteSheetCost>, SpriteSheetError>>,
     parsed: crate::preparation::FlightCell<Result<Option<Arc<SpriteSheet>>, SpriteSheetError>>,
     #[cfg(test)]
@@ -158,6 +173,7 @@ impl Default for SpriteSheetCache {
     fn default() -> Self {
         Self {
             allocation_id: SpriteSheetAllocationId(super::texture_source::source_token()),
+            reloadable_parsed: Default::default(),
             cost: OnceLock::new(),
             parsed: Default::default(),
             #[cfg(test)]
@@ -176,6 +192,79 @@ impl std::fmt::Debug for SpriteSheetCache {
 }
 
 impl SpriteSheetCache {
+    fn parse_reloadable(
+        &self,
+        source: &super::ReloadableTextureSource,
+        resolver: &MaterialResolver,
+    ) -> Result<Option<Arc<SpriteSheet>>, SpriteSheetResolveError> {
+        let parsed = self.reloadable_parsed.get_or_try_init_ref_with_error(
+            &resolver.config.cancellation,
+            || {
+                let working = resolver
+                    .config
+                    .texture_working_budget
+                    .clone()
+                    .or_else(|| resolver.config.texture_source_working_budget.clone())
+                    .unwrap_or_else(|| {
+                        Arc::new(super::TextureWorkingBudget::new(
+                            usize::try_from(Limits::default().max_input_bytes)
+                                .unwrap_or(usize::MAX),
+                        ))
+                    });
+                let Some(payload) = source.sprite_sheet_payload(
+                    &resolver.config.cancellation,
+                    &working,
+                    resolver.config.sprite_sheet_budget.metadata_bytes,
+                    0,
+                )?
+                else {
+                    let _ = self.cost.set(Ok(None));
+                    return Ok::<_, SpriteSheetResolveError>(None);
+                };
+                let cost =
+                    vformats::vtf::SpriteSheetDescriptor::from_payload(&payload.bytes)?.cost();
+                drop(payload);
+                let _ = self.cost.set(Ok(Some(cost)));
+                resolver
+                    .config
+                    .sprite_sheet_budget
+                    .admit(self.allocation_id, cost)?;
+                let reservation = SheetReservation {
+                    budget: Arc::clone(&resolver.config.sprite_sheet_budget),
+                    id: self.allocation_id,
+                };
+                let payload = source
+                    .sprite_sheet_payload(
+                        &resolver.config.cancellation,
+                        &working,
+                        resolver.config.sprite_sheet_budget.metadata_bytes,
+                        cost.metadata_bytes,
+                    )?
+                    .ok_or(SpriteSheetError::InvalidResource)?;
+                let descriptor =
+                    vformats::vtf::SpriteSheetDescriptor::from_payload(&payload.bytes)?;
+                let sheet = Arc::new(descriptor.decode(SpriteSheetLimits {
+                    max_sequences: 1024,
+                    max_frames_per_sequence: 4096,
+                    max_frames: cost.frames,
+                    max_metadata_bytes: cost.metadata_bytes,
+                })?);
+                resolver.config.cancellation.check()?;
+                Ok(Some(Arc::new(ReloadableSheet {
+                    sheet,
+                    _reservation: reservation,
+                })))
+            },
+        )?;
+        if let Some(Ok(Some(cost))) = self.cost.get() {
+            resolver
+                .config
+                .sprite_sheet_budget
+                .admit(self.allocation_id, *cost)?;
+        }
+        Ok(parsed.as_ref().map(|parsed| Arc::clone(&parsed.sheet)))
+    }
+
     fn cost(&self, asset: &TextureAsset) -> Result<Option<SpriteSheetCost>, SpriteSheetError> {
         *self.cost.get_or_init(|| {
             let bytes = asset.source_bytes();
@@ -261,6 +350,32 @@ impl MaterialResolver {
             name: name.to_owned(),
             outcome: MaterialResolutionOutcome::Unresolved,
         })?;
+        if self.config.texture_loading == super::TextureLoading::OnDemand {
+            let source = self.selected_reloadable_texture(&path).map_err(|error| {
+                SpriteSheetResolveError::Source {
+                    path: path.clone(),
+                    kind: match &error {
+                        TextureSourceError::Missing => SpriteSheetSourceFailure::Missing,
+                        TextureSourceError::Invalid { .. } => SpriteSheetSourceFailure::Invalid,
+                        TextureSourceError::EncodedBudget { .. } => {
+                            SpriteSheetSourceFailure::EncodedBudget
+                        }
+                        TextureSourceError::WorkingBudget { .. } => {
+                            SpriteSheetSourceFailure::WorkingBudget
+                        }
+                        TextureSourceError::Preparation { .. } => {
+                            SpriteSheetSourceFailure::Preparation
+                        }
+                        TextureSourceError::Read { .. } => SpriteSheetSourceFailure::Read,
+                        TextureSourceError::SourceUnavailable(_) => {
+                            SpriteSheetSourceFailure::SourceUnavailable
+                        }
+                    },
+                    message: error.to_string().into(),
+                }
+            })?;
+            return source.sprite_sheet_cache.parse_reloadable(&source, self);
+        }
         let selected = self.selected_texture_asset(&path).map_err(|error| {
             SpriteSheetResolveError::Source {
                 path,
@@ -374,6 +489,42 @@ mod tests {
         resolver
             .selected_texture_asset(&super::super::texture_path(name).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn on_demand_sheets_reuse_only_metadata_and_readmit_stricter_budgets() {
+        let resolver = fixture_resolver(sheet_texture(&[2], 0.25), sheet_texture(&[1], 0.5))
+            .with_on_demand_textures()
+            .with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(8, 4096)));
+        let first = resolver
+            .resolve_particle_sprite_sheet("test/a")
+            .unwrap()
+            .unwrap();
+        let alias = resolver
+            .resolve_particle_sprite_sheet("test/alias")
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &alias));
+        assert_eq!(
+            resolver.config.sprite_sheet_budget.stats().admitted_frames,
+            2
+        );
+        let strict = resolver.with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(1, 4096)));
+        assert!(matches!(
+            strict.resolve_particle_sprite_sheet("test/a"),
+            Err(SpriteSheetResolveError::Budget {
+                metric: SpriteSheetMetric::Frames,
+                ..
+            })
+        ));
+        assert!(Arc::ptr_eq(
+            &first,
+            &resolver
+                .resolve_particle_sprite_sheet("test/a")
+                .unwrap()
+                .unwrap()
+        ));
+        assert!(resolver.shared.texture_assets.selected_paths().is_empty());
     }
 
     #[test]
@@ -512,7 +663,10 @@ mod tests {
             .resolve_primary(&[], "test/a")
             .into_material()
             .unwrap();
-        assert_eq!(material.texture.mapping_dimensions(), Some((1, 1)));
+        assert_eq!(
+            material.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((1, 1))
+        );
         let source = selected(&resolver, "test/a");
         let first = resolver
             .resolve_particle_sprite_sheet("test/a")

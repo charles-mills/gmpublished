@@ -61,6 +61,52 @@ impl SiblingGmaIndex {
         }
     }
 
+    pub(super) fn reloadable_reader(
+        &self,
+        path: &ContentPath,
+    ) -> Result<Arc<dyn super::reloadable::TextureSourceReader>, super::TextureAssetError> {
+        use super::reloadable::{FrozenPathSource, SubrangeSource};
+        let entry = self
+            .entries
+            .get(path.as_str())
+            .ok_or(super::TextureAssetError::SourceChanged)?;
+        let archive = self
+            .archives
+            .get(entry.archive_index)
+            .ok_or(super::TextureAssetError::SourceChanged)?;
+        let (path, offset, len, header) = match (&archive.kind, &entry.location) {
+            (
+                SiblingGmaArchiveKind::Plain { path },
+                SiblingGmaEntryLocation::Plain { offset, len },
+            ) => (path, *offset, *len, None),
+            (
+                SiblingGmaArchiveKind::LegacyBin { path, header, .. },
+                SiblingGmaEntryLocation::LegacyBin { offset, len },
+            ) => (path, *offset, *len, Some(*header)),
+            _ => return Err(super::TextureAssetError::SourceChanged),
+        };
+        let file = File::open(path)
+            .map_err(|e| super::TextureAssetError::SourceRead(e.to_string().into()))?;
+        let source = FrozenPathSource::new(path.clone(), &file)?;
+        if let Some(header) = header {
+            Ok(Arc::new(LegacyTextureReader {
+                source,
+                header,
+                offset,
+                len,
+            }))
+        } else {
+            Ok(Arc::new(SubrangeSource {
+                reader: Arc::new(source),
+                range: offset
+                    ..offset
+                        .checked_add(len)
+                        .ok_or(super::TextureAssetError::WorkingCostOverflow)?,
+                prefix: Arc::from([]),
+            }))
+        }
+    }
+
     pub(super) fn texture_entry_range(
         &self,
         path: &ContentPath,
@@ -199,6 +245,64 @@ impl SiblingGmaIndex {
             });
         }
         Some(entry_bytes)
+    }
+}
+
+#[derive(Debug)]
+struct LegacyTextureReader {
+    source: super::reloadable::FrozenPathSource,
+    header: LegacyBinHeader,
+    offset: u64,
+    len: u64,
+}
+impl super::reloadable::TextureSourceReader for LegacyTextureReader {
+    fn len(&self) -> u64 {
+        self.len
+    }
+    fn decoder_working_bytes(&self) -> usize {
+        self.header.working_bytes
+    }
+    fn read_range(
+        &self,
+        range: std::ops::Range<u64>,
+        cancel: &crate::preparation::PreparationCancellation,
+    ) -> Result<Vec<u8>, super::TextureAssetError> {
+        use super::TextureAssetError;
+        cancel.check()?;
+        if range.start > range.end || range.end > self.len {
+            return Err(TextureAssetError::Selection);
+        }
+        let mut file = self.source.open_verified()?;
+        let map_error = |e: io::Error| TextureAssetError::SourceRead(e.to_string().into());
+        let actual = LegacyBinHeader::read(&mut file).map_err(map_error)?;
+        if actual != self.header {
+            return Err(TextureAssetError::SourceChanged);
+        }
+        let mut decoder = self.header.decoder(&mut file).map_err(map_error)?;
+        let mut left = self
+            .offset
+            .checked_add(range.start)
+            .ok_or(TextureAssetError::WorkingCostOverflow)?;
+        let mut discard = [0; 8192];
+        while left > 0 {
+            cancel.check()?;
+            let count = usize::try_from(left.min(discard.len() as u64)).expect("bounded chunk");
+            decoder
+                .read_exact(&mut discard[..count])
+                .map_err(map_error)?;
+            left -= count as u64;
+        }
+        let count = usize::try_from(range.end - range.start)
+            .map_err(|_| TextureAssetError::WorkingCostOverflow)?;
+        let mut output = vec![0; count];
+        for chunk in output.chunks_mut(8192) {
+            cancel.check()?;
+            decoder.read_exact(chunk).map_err(map_error)?;
+        }
+        drop(decoder);
+        self.source.verify(&file)?;
+        cancel.check()?;
+        Ok(output)
     }
 }
 

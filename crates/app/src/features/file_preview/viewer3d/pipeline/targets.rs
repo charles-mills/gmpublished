@@ -163,8 +163,6 @@ struct WaterBindingKey {
     refraction: wgpu::TextureView,
     depth: wgpu::TextureView,
     reflection: wgpu::TextureView,
-    lightmap: super::texture_upload::UploadedView,
-    raw_lightmap: super::texture_upload::UploadedView,
 }
 
 #[derive(Debug)]
@@ -179,7 +177,6 @@ pub struct WaterBindingInputs<'a> {
     pub refraction: &'a wgpu::TextureView,
     pub depth: &'a wgpu::TextureView,
     pub reflection: &'a wgpu::TextureView,
-    pub lightmap: &'a super::lightmaps::Frame,
 }
 
 impl WaterBindings {
@@ -194,7 +191,6 @@ impl WaterBindings {
             refraction,
             depth,
             reflection,
-            lightmap,
         } = inputs;
         let key = WaterBindingKey {
             layout: resources.water_frame_layout.clone(),
@@ -203,15 +199,12 @@ impl WaterBindings {
             refraction: refraction.clone(),
             depth: depth.clone(),
             reflection: reflection.clone(),
-            lightmap: lightmap.view.clone(),
-            raw_lightmap: lightmap.raw_view.clone(),
         };
         if slot.as_ref().is_some_and(|bindings| bindings.key == key) {
             return;
         }
-        let bind_group = create_water_bind_group(
-            device, resources, uniforms, refraction, depth, reflection, lightmap,
-        );
+        let bind_group =
+            create_water_bind_group(device, resources, uniforms, refraction, depth, reflection);
         *slot = Some(Self { key, bind_group });
     }
 }
@@ -223,7 +216,6 @@ fn create_water_bind_group(
     refraction: &wgpu::TextureView,
     depth: &wgpu::TextureView,
     reflection: &wgpu::TextureView,
-    lightmap: &super::lightmaps::Frame,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("file_preview.planar_frame"),
@@ -248,14 +240,6 @@ fn create_water_bind_group(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::TextureView(reflection),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::TextureView(&lightmap.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: wgpu::BindingResource::TextureView(&lightmap.raw_view),
             },
         ],
     })

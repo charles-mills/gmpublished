@@ -334,11 +334,13 @@ fn unavailable_source_without_metadata_does_not_invent_default_mapping_dimension
         .into_material()
         .unwrap();
     assert_eq!(
-        resolved.texture.load_outcome(),
+        resolved.texture.as_ref().unwrap().load_outcome(),
         TextureLoadOutcome::SourceUnavailable
     );
     assert_eq!(
-        resolved.shader.mapping_dimensions(Some(&resolved.texture)),
+        resolved
+            .shader
+            .mapping_dimensions(resolved.texture.as_deref()),
         None
     );
 }

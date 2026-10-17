@@ -4,11 +4,33 @@ use iced::{Color, Length, Size, mouse};
 use iced_runtime::{UserInterface, user_interface};
 use serde_json::{Value, json};
 
-fn prepare_views<P: iced::widget::shader::Program<Message>>(
+trait CaptureView: iced::widget::shader::Program<Message> {
+    fn feedback(&self) -> std::sync::Arc<super::super::feedback::RenderFeedback>;
+    fn observer(&self) -> super::CaptureDiagnostics;
+}
+
+impl CaptureView for FixedView {
+    fn feedback(&self) -> std::sync::Arc<super::super::feedback::RenderFeedback> {
+        std::sync::Arc::clone(&self.viewer.render_feedback)
+    }
+    fn observer(&self) -> super::CaptureDiagnostics {
+        self.diagnostics.clone()
+    }
+}
+
+struct PreparedViews {
+    size: Size<u32>,
+    feedbacks: Vec<std::sync::Arc<super::super::feedback::RenderFeedback>>,
+    observers: Vec<super::CaptureDiagnostics>,
+}
+
+fn prepare_views<P: CaptureView>(
     renderer: &mut iced::Renderer,
     views: Vec<(P, u32)>,
     height: u32,
-) -> Size<u32> {
+) -> PreparedViews {
+    let feedbacks = views.iter().map(|(view, _)| view.feedback()).collect();
+    let observers = views.iter().map(|(view, _)| view.observer()).collect();
     let width =
         views.iter().map(|(_, width)| *width).sum::<u32>() + 16 * (views.len() as u32 - 1) + 24;
     let widgets = views.into_iter().map(|(view, width)| {
@@ -35,20 +57,32 @@ fn prepare_views<P: iced::widget::shader::Program<Message>>(
         },
         mouse::Cursor::Unavailable,
     );
-    Size::new(width, height + 24)
+    PreparedViews {
+        size: Size::new(width, height + 24),
+        feedbacks,
+        observers,
+    }
 }
 
-fn pixels<P: iced::widget::shader::Program<Message>>(
+fn pixels<P: CaptureView>(
     renderer: &mut iced::Renderer,
     views: Vec<(P, u32)>,
     height: u32,
     settle: bool,
 ) -> (Vec<u8>, u32) {
-    let size = prepare_views(renderer, views, height);
-    if settle {
-        let _ = renderer.screenshot(size, 1.0, Color::BLACK);
-    }
-    (renderer.screenshot(size, 1.0, Color::BLACK), size.width)
+    let prepared = prepare_views(renderer, views, height);
+    let ready = super::capture_when_ready(
+        renderer,
+        prepared.size,
+        &prepared.feedbacks,
+        &prepared.observers,
+    );
+    let pixels = if settle {
+        renderer.screenshot(prepared.size, 1.0, Color::BLACK)
+    } else {
+        ready
+    };
+    (pixels, prepared.size.width)
 }
 
 fn crop(bytes: &[u8], width: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
@@ -182,8 +216,14 @@ fn benchmark_pair(
         first_view.diagnostics.clone(),
         second_view.diagnostics.clone(),
     ];
-    let size = prepare_views(renderer, vec![(first_view, 1280), (second_view, 1280)], 720);
-    let mut latency = super::benchmark_render(renderer, size, samples, &observers)?;
+    let prepared = prepare_views(renderer, vec![(first_view, 1280), (second_view, 1280)], 720);
+    let _ = super::capture_when_ready(
+        renderer,
+        prepared.size,
+        &prepared.feedbacks,
+        &prepared.observers,
+    );
+    let mut latency = super::benchmark_render(renderer, prepared.size, samples, &observers)?;
     latency["workload"] = json!("two simultaneous previews sharing one scene");
     latency["widget_dimensions"] = json!([[1280, 720], [1280, 720]]);
     latency["cameras"] = json!([first.name, second.name]);
@@ -203,6 +243,15 @@ impl iced::widget::shader::Program<Message> for BorrowedView<'_> {
             primitive.view_id = identity;
         }
         primitive
+    }
+}
+
+impl CaptureView for BorrowedView<'_> {
+    fn feedback(&self) -> std::sync::Arc<super::super::feedback::RenderFeedback> {
+        std::sync::Arc::clone(&self.0.viewer.render_feedback)
+    }
+    fn observer(&self) -> super::CaptureDiagnostics {
+        self.0.diagnostics.clone()
     }
 }
 

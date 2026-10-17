@@ -62,11 +62,12 @@ pub(in super::super) fn map_mesh_to_model_mesh(
                 ),
                 lightmap_uv: vertex.lightmap_uv,
                 lightmap_bump_step: vertex.lightmap_bump_step,
+                lightmap_page: vertex.lightmap_page.map_or(0, |page| page.0 + 1),
                 color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,
                 opacity: vertex.opacity,
                 illumination: Vec3::splat(1.0),
-                lighting_mode: if vertex.has_lightmap {
+                lighting_mode: if vertex.lightmap_page.is_some() {
                     crate::media::preview_model::vertex_lighting::LIGHTMAP
                 } else {
                     crate::media::preview_model::vertex_lighting::WORLD_CONSTANT

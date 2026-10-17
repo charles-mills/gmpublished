@@ -16,14 +16,21 @@ use super::{
 };
 use gmpublished_domain::math::Vec3;
 
+mod admission;
+mod background_bindings;
+mod bindings;
 mod bounds_query;
 mod clipping;
+mod completion;
 mod cubemap;
 mod draw;
+mod frame_selection;
 mod geometry;
 mod images;
 mod intersection;
 mod lighting;
+mod lightmap_demand;
+mod lightmap_ranges;
 mod lightmaps;
 mod marks;
 mod materials;
@@ -31,9 +38,11 @@ mod model_lighting;
 mod model_lighting_visibility;
 mod passes;
 mod planar;
+mod presentation;
 mod reflections;
 mod refraction;
 mod residency;
+mod residency_demand;
 mod resources;
 mod samplers;
 pub(super) mod sampling;
@@ -43,6 +52,7 @@ mod sun;
 mod surface;
 mod surface_pipelines;
 mod targets;
+mod texture_barriers;
 pub(super) mod texture_upload;
 mod transparency;
 mod uniforms;
@@ -68,6 +78,7 @@ pub(super) use uniforms::{Diagnostic, DiagnosticMode};
 
 use super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 pub(super) use geometry::ViewerScene;
+use presentation::{OutputKey, Readiness, SubmissionHistory, ViewOutput};
 use reflections::{PlanarView, SceneView, ViewUniforms};
 use resources::RenderResources;
 use std::sync::atomic::Ordering;
@@ -118,6 +129,9 @@ impl PreviewScene {
 pub struct ModelPrimitive {
     pub(super) render_feedback: Option<Arc<super::feedback::RenderFeedback>>,
     pub(super) model_lighting_time: f64,
+    pub(super) animation_clock: crate::bridge::materials::AnimationClock,
+    #[cfg(feature = "map-capture")]
+    pub(super) exact_texture_frame: bool,
     pub(super) view_id: ViewId,
     pub(super) clear_color: Option<[f32; 3]>,
     pub(super) air_fog: Option<super::MapFog>,
@@ -163,6 +177,29 @@ pub struct PreparedFrame {
     pub content_id: u64,
     pub bounds: Rectangle,
     pub live: bool,
+    readiness: Readiness,
+    admission_priority: bool,
+    presentation: SubmissionHistory<OutputKey, Arc<ViewOutput>>,
+    demand_cache: residency_demand::FrameDemandCache,
+    binding_request: Option<bindings::FrameRequest>,
+    lightmap_request: Option<lightmaps::Request>,
+    lightmap_demand_cache: lightmap_demand::Cache,
+    feedback: Option<Arc<super::feedback::RenderFeedback>>,
+    pending_clock: Option<(crate::bridge::materials::AnimationClock, f32)>,
+}
+
+impl PreparedFrame {
+    fn output_key(&self) -> OutputKey {
+        OutputKey {
+            view: self.view_id,
+            scene: self.scene_key,
+            size: self
+                .main
+                .targets
+                .as_ref()
+                .map_or((0, 0), |targets| targets.size),
+        }
+    }
 }
 
 #[cfg(feature = "map-capture")]
@@ -177,6 +214,17 @@ fn preparation_diagnostics(view: &SceneView) -> serde_json::Value {
 }
 
 impl ModelPrimitive {
+    fn retains_output(&self) -> bool {
+        #[cfg(feature = "map-capture")]
+        if self.exact_texture_frame
+            || self.reflection_target
+            || self.refraction_target
+            || self.uniforms.diagnostic.mode != DiagnosticMode::Disabled as u32
+        {
+            return false;
+        }
+        true
+    }
     pub(super) fn raster_offset(&self) -> [f32; 2] {
         #[cfg(feature = "map-capture")]
         if let Some(offset) = self.raster_offset {
@@ -280,25 +328,6 @@ impl shader::Primitive for ModelPrimitive {
         #[cfg(feature = "map-capture")]
         drop(upload_span);
 
-        if let Some(feedback) = &self.render_feedback {
-            let upload = pipeline.uploads.get(scene_key).expect("uploaded scene");
-            let uploader = pipeline
-                .resources
-                .texture_uploader
-                .lock()
-                .expect("texture uploader lock");
-            let capacity = upload.has_capacity_issues();
-            let subscription = capacity.then(|| uploader.retirement_subscription());
-            let retirement = uploader.retirement_state();
-            drop(uploader);
-            feedback.bind_retirement(subscription);
-            let unavailable_images = upload.image_upload_issues.len();
-            feedback.set(if capacity && retirement.pending != 0 {
-                super::feedback::RenderStatus::Retiring { unavailable_images }
-            } else {
-                super::feedback::RenderStatus::Ready { unavailable_images }
-            });
-        }
         let slot = unclaimed_viewer_frame_slot(
             pipeline
                 .frames
@@ -307,10 +336,11 @@ impl shader::Primitive for ModelPrimitive {
             self.view_id,
         );
         if slot == pipeline.frames.len() {
-            let lighting = lighting::Frame::new(device, &pipeline.resources.texture_uploader, map);
-            let scene = ViewerScene::new(Arc::clone(
-                pipeline.uploads.get(scene_key).expect("uploaded scene"),
-            ));
+            let lighting = lighting::Frame::new(device, map);
+            let scene = ViewerScene::new(
+                Arc::clone(pipeline.uploads.get(scene_key).expect("uploaded scene")),
+                lightmaps::Snapshot::empty(Arc::clone(&pipeline.resources.default_lightmap)),
+            );
             let marks = marks::Frame::new(device, queue, &scene);
             pipeline.frames.push(PreparedFrame {
                 view_id: self.view_id,
@@ -326,20 +356,32 @@ impl shader::Primitive for ModelPrimitive {
                 content_id: self.content_id,
                 bounds: *bounds,
                 live: false,
+                readiness: Readiness::Loading,
+                admission_priority: false,
+                presentation: SubmissionHistory::default(),
+                demand_cache: residency_demand::FrameDemandCache::default(),
+                binding_request: None,
+                lightmap_request: None,
+                lightmap_demand_cache: lightmap_demand::Cache::default(),
+                feedback: self.render_feedback.clone(),
+                pending_clock: None,
             });
         }
         self.prepared_frame.store(slot, Ordering::Relaxed);
         let frame = &mut pipeline.frames[slot];
         if frame.scene_key != scene_key {
+            frame.admission_priority = false;
+            frame.presentation.clear();
             frame.scene_key = scene_key;
-            frame.scene = ViewerScene::new(Arc::clone(
-                pipeline.uploads.get(scene_key).expect("uploaded scene"),
-            ));
+            frame.pending_clock = None;
+            frame.scene = ViewerScene::new(
+                Arc::clone(pipeline.uploads.get(scene_key).expect("uploaded scene")),
+                lightmaps::Snapshot::empty(Arc::clone(&pipeline.resources.default_lightmap)),
+            );
             frame.planar_views.clear();
             frame.water_intersection = None;
             frame.screen_overlay = None;
-            frame.lighting =
-                lighting::Frame::new(device, &pipeline.resources.texture_uploader, map);
+            frame.lighting = lighting::Frame::new(device, map);
             frame.marks = marks::Frame::new(device, queue, &frame.scene);
             frame.main = SceneView::new(
                 device,
@@ -361,6 +403,8 @@ impl shader::Primitive for ModelPrimitive {
             .lighting
             .apply_capture_timeline(map, self.capture_lighting_timeline.as_ref());
         frame.content_id = self.content_id;
+        frame.feedback.clone_from(&self.render_feedback);
+        frame.readiness = Readiness::Loading;
         frame.live = true;
         let scale = viewport.scale_factor();
         frame.bounds = Rectangle {
@@ -376,6 +420,14 @@ impl shader::Primitive for ModelPrimitive {
                 frame.bounds.height.ceil().max(1.0) as u32,
             ),
         );
+        frame.presentation.validate(&OutputKey {
+            view: self.view_id,
+            scene: scene_key,
+            size,
+        });
+        if !self.retains_output() {
+            frame.presentation.clear();
+        }
         #[cfg(feature = "map-capture")]
         if let Some(observer) = &self.capture_diagnostics {
             observer.observe_extent(size);
@@ -597,7 +649,11 @@ impl shader::Primitive for ModelPrimitive {
                 .find(|view| view.surface_index == surface_index)
                 .unwrap();
             if view.surface_indices != indices {
-                view.surface_buffer = visibility::upload_visible_indices(device, queue, &indices);
+                view.surface_buffer = visibility::upload_visible_indices(device, queue, &indices)
+                    .with_lightmaps(
+                        &upload.meshes[upload.assets.reflectors[surface_index].mesh_index],
+                        &indices,
+                    );
                 view.surface_indices = indices;
             }
         }
@@ -641,18 +697,9 @@ impl shader::Primitive for ModelPrimitive {
                     refraction: &refracted.resolve_view,
                     depth: &refracted.depth,
                     reflection: &reflected.resolve_view,
-                    lightmap: &frame.lighting.lightmap,
                 },
             );
         }
-        screen_refraction::prepare(
-            &mut frame.screen_overlay,
-            device,
-            queue,
-            &pipeline.resources,
-            upload,
-            self,
-        );
         #[cfg(feature = "map-capture")]
         drop(optical_span);
         frame.main.plans = Some(plans);
@@ -820,8 +867,8 @@ impl shader::Primitive for ModelPrimitive {
                 "clip_mode": pipeline.resources.clip_mode,
                 "device_clip_distances": pipeline.resources.clip_mode == clipping::ClipMode::Primitive,
                 "texture_upload":pipeline.resources.texture_uploader.lock().expect("texture uploader lock").stats(),
-                "image_cache":pipeline.uploads.image_stats(), "image_resources": upload.assets.image_stats(), "image_upload_issues":upload.assets.image_upload_issues,
-                "material_samplers":upload.assets.sampler_diagnostics.iter().map(samplers::SamplerDiagnostic::capture_json).collect::<Vec<_>>(),
+                "image_cache":pipeline.bindings.stats(), "image_resources": upload.bindings.image_stats(), "image_upload_issues":upload.bindings.issues().collect::<Vec<_>>(),
+                "material_samplers":upload.bindings.samplers().map(samplers::SamplerDiagnostic::capture_json).collect::<Vec<_>>(),
                 "raster_offset_physical_pixels":self.raster_offset(),"main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
                 "single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)",
                 "water_intersection":frame.water_intersection.as_ref().and_then(|intersection|intersection.selection.map(|selection|serde_json::json!({"surface_index":selection.surface_index,"body_index":selection.body_index,"preparation":preparation_diagnostics(&intersection.view)}))),
@@ -833,6 +880,70 @@ impl shader::Primitive for ModelPrimitive {
                 "surface_mark_metadata_bytes":frame.marks.buffer.size(), "world_surface_marks":frame.main.plans.as_ref().unwrap().world.surface_mark_count(), "transparent_receiver_marks":frame.main.plans.as_ref().unwrap().world.receiver_mark_count(),
                 "estimated_target_bytes":bytes,"composition":"planar depth occludes main transparency; clipped refraction includes below-plane transparency"
             });
+        }
+        let mut demand_cache = std::mem::take(&mut frame.demand_cache);
+        let demand = demand_cache.collect(frame, self);
+        frame.demand_cache = demand_cache;
+        match demand.and_then(|demand| {
+            bindings::FrameRequest::new(
+                self,
+                demand,
+                frame
+                    .pending_clock
+                    .unwrap_or((self.animation_clock, self.uniforms.water_time_sky_tint[0])),
+            )
+            .map_err(|error| residency_demand::DemandError::Animation(error.to_string()))
+        }) {
+            Ok(request) => {
+                frame.pending_clock = Some((request.clock, request.frame_water_time));
+                if frame
+                    .binding_request
+                    .as_ref()
+                    .is_some_and(|previous| previous.immersion != request.immersion)
+                {
+                    frame.screen_overlay = None;
+                }
+                frame.binding_request = Some(request);
+                let mut cache = std::mem::take(&mut frame.lightmap_demand_cache);
+                let pages = cache.collect(frame);
+                frame.lightmap_demand_cache = cache;
+                match lightmaps::Request::new(
+                    self.preview.clone(),
+                    pages,
+                    self.model_lighting_time as f32,
+                ) {
+                    Ok(request) => frame.lightmap_request = Some(request),
+                    Err(error) => {
+                        frame.binding_request = None;
+                        frame.lightmap_request = None;
+                        frame.readiness = Readiness::Rejected;
+                        frame.presentation.clear();
+                        if let Some(feedback) = &frame.feedback {
+                            feedback.bind_pages(None);
+                            feedback.bind_retirement(None);
+                            feedback.set(super::feedback::RenderStatus::Rejected {
+                                reason: error.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                frame.readiness = Readiness::Rejected;
+                frame.presentation.clear();
+                frame.binding_request = None;
+                frame.lightmap_request = None;
+                frame.pending_clock = None;
+                frame.scene.bindings = Arc::new(bindings::BindingSnapshot::default());
+                frame.screen_overlay = None;
+                if let Some(feedback) = &frame.feedback {
+                    feedback.bind_pages(None);
+                    feedback.bind_retirement(None);
+                    feedback.set(super::feedback::RenderStatus::Rejected {
+                        reason: error.to_string(),
+                    });
+                }
+            }
         }
     }
     fn render(
@@ -847,15 +958,84 @@ impl shader::Primitive for ModelPrimitive {
             .capture_diagnostics
             .as_ref()
             .and_then(|observer| observer.span(super::capture::Phase::Encode));
-        let Some(frame) = pipeline
+        let frame = pipeline
             .frames
             .get(self.prepared_frame.load(Ordering::Relaxed))
-            .filter(|frame| frame.view_id == self.view_id && frame.scene_key == self.preview.key())
-        else {
+            .filter(|frame| {
+                frame.live && frame.view_id == self.view_id && frame.scene_key == self.preview.key()
+            });
+        let retained = frame.and_then(|frame| {
+            (self.retains_output() && frame.readiness.can_retain())
+                .then(|| frame.presentation.get(&frame.output_key()))
+                .flatten()
+        });
+        #[cfg(feature = "map-capture")]
+        if let Some(observer) = &self.capture_diagnostics {
+            use super::capture::Presentation;
+            observer.observe_presentation(match frame {
+                Some(frame) if frame.readiness == Readiness::Previous => Presentation::Previous,
+                Some(frame) if frame.readiness == Readiness::Current => Presentation::Current,
+                _ if retained.is_some() => Presentation::Retained,
+                _ => Presentation::Pending,
+            });
+        }
+        let Some(frame) = frame else {
             return;
         };
+        if !frame.readiness.can_render() {
+            if let Some(output) = retained {
+                passes::compose(
+                    output.composition(),
+                    frame.bounds,
+                    &pipeline.resources,
+                    encoder,
+                    target,
+                    clip_bounds,
+                );
+                frame
+                    .presentation
+                    .stage(frame.output_key(), Arc::clone(output));
+            }
+            return;
+        }
+        #[cfg(feature = "map-capture")]
+        if let Some(observer) = self
+            .capture_diagnostics
+            .as_ref()
+            .filter(|observer| observer.recording())
+        {
+            let mut diagnostics = observer.lock().expect("capture diagnostics lock");
+            diagnostics["page_cache"] = pipeline.bindings.page_diagnostics();
+            diagnostics["image_cache"] =
+                serde_json::to_value(pipeline.bindings.stats()).expect("image cache diagnostics");
+            diagnostics["lightmap_resources"] = frame.scene.lightmaps.stats();
+            diagnostics["lightmap_cache"] = pipeline.lightmaps.stats();
+            diagnostics["image_resources"] =
+                serde_json::to_value(frame.scene.bindings.image_stats())
+                    .expect("image residency diagnostics");
+            diagnostics["image_upload_issues"] =
+                serde_json::to_value(frame.scene.bindings.issues().collect::<Vec<_>>())
+                    .expect("image issues diagnostics");
+            diagnostics["material_samplers"] = serde_json::Value::Array(
+                frame
+                    .scene
+                    .bindings
+                    .samplers()
+                    .map(samplers::SamplerDiagnostic::capture_json)
+                    .collect(),
+            );
+            diagnostics["texture_upload"] = serde_json::to_value(
+                pipeline
+                    .resources
+                    .texture_uploader
+                    .lock()
+                    .expect("texture uploader lock")
+                    .stats(),
+            )
+            .expect("texture upload diagnostics");
+        }
         let upload = &frame.scene;
-        passes::render_frame(
+        let composition = passes::render_frame(
             self,
             frame,
             &pipeline.resources,
@@ -864,6 +1044,16 @@ impl shader::Primitive for ModelPrimitive {
             target,
             clip_bounds,
         );
+        if self.retains_output() {
+            let key = frame.output_key();
+            let output = frame
+                .presentation
+                .get(&key)
+                .filter(|output| output.matches(composition))
+                .cloned()
+                .unwrap_or_else(|| Arc::new(ViewOutput::new(composition)));
+            frame.presentation.stage(key, output);
+        }
     }
 }
 
@@ -872,13 +1062,26 @@ pub struct ModelPipeline {
     resources: RenderResources,
     uploads: UploadCache,
     frames: Vec<PreparedFrame>,
+    bindings: bindings::BindingCache,
+    lightmaps: lightmaps::Pool,
+    submission: Option<residency_demand::SubmissionPins<bindings::BindingSnapshot>>,
+    lightmap_submission: Option<residency_demand::SubmissionPins<lightmaps::Snapshot>>,
 }
 impl shader::Pipeline for ModelPipeline {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let resources = RenderResources::new(device, queue, format, None);
+        let lightmaps = lightmaps::Pool::new(
+            &resources.texture_uploader,
+            Arc::clone(&resources.default_lightmap),
+        );
         Self {
-            resources: RenderResources::new(device, queue, format, None),
+            resources,
             uploads: UploadCache::new(None),
             frames: Vec::new(),
+            bindings: bindings::BindingCache::new(None),
+            submission: None,
+            lightmaps,
+            lightmap_submission: None,
         }
     }
     fn new_with_capabilities(
@@ -887,11 +1090,367 @@ impl shader::Pipeline for ModelPipeline {
         format: wgpu::TextureFormat,
         capabilities: &wgpu::DownlevelCapabilities,
     ) -> Self {
+        let resources = RenderResources::new(device, queue, format, Some(capabilities));
+        let lightmaps = lightmaps::Pool::new(
+            &resources.texture_uploader,
+            Arc::clone(&resources.default_lightmap),
+        );
         Self {
-            resources: RenderResources::new(device, queue, format, Some(capabilities)),
+            resources,
             uploads: UploadCache::new(Some(capabilities)),
             frames: Vec::new(),
+            bindings: bindings::BindingCache::new(Some(capabilities)),
+            submission: None,
+            lightmaps,
+            lightmap_submission: None,
         }
+    }
+    fn begin_prepare(&mut self) {
+        self.submission = None;
+        self.lightmap_submission = None;
+        for frame in &mut self.frames {
+            frame.presentation.begin();
+        }
+    }
+    fn finish_prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let empty_lightmaps = self.lightmaps.empty_snapshot();
+        for frame in &mut self.frames {
+            if !frame.live || frame.binding_request.is_none() || frame.lightmap_request.is_none() {
+                frame.scene.bindings = Arc::new(bindings::BindingSnapshot::default());
+                frame.scene.lightmaps = Arc::clone(&empty_lightmaps);
+                frame.screen_overlay = None;
+                frame.binding_request = None;
+                frame.lightmap_request = None;
+                frame.presentation.clear();
+            } else if frame
+                .lightmap_request
+                .as_ref()
+                .is_some_and(|request| !frame.scene.lightmaps.matches(request))
+            {
+                frame.scene.lightmaps = Arc::clone(&empty_lightmaps);
+            }
+        }
+        let (bytes, allocations) = self
+            .resources
+            .texture_uploader
+            .lock()
+            .expect("texture uploader lock")
+            .sampled_capacity();
+        let capacity = lightmaps::MissingCost { bytes, allocations };
+        let lightmap_costs: Vec<_> = self
+            .frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .lightmap_request
+                    .as_ref()
+                    .map(|request| request.working_set().map_err(|error| error.to_string()))
+            })
+            .collect();
+        let stage_requests: Vec<_> = self
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| frame.live)
+            .filter(|(index, _)| {
+                lightmap_costs[*index].as_ref().is_some_and(|cost| {
+                    cost.as_ref().is_ok_and(|cost| {
+                        cost.upper_bound()
+                            .is_ok_and(|cost| !admission::exceeds(cost, capacity))
+                    })
+                })
+            })
+            .filter_map(|(_, frame)| frame.binding_request.as_ref())
+            .collect();
+        self.bindings.stage_visible(&stage_requests);
+        self.bindings.stage_pages(device);
+        let candidates: Vec<_> = self
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let cost = (|| {
+                    let mut cost = lightmap_costs[index]
+                        .as_ref()
+                        .ok_or("preview has no lightmap request")?
+                        .clone()?;
+                    let lightmap_cost = cost.upper_bound()?;
+                    if admission::exceeds(lightmap_cost, capacity) {
+                        return Err(admission::rejection(lightmap_cost, capacity));
+                    }
+                    let request = frame
+                        .binding_request
+                        .as_ref()
+                        .ok_or("preview has no material request")?;
+                    cost.extend(&self.bindings.working_set(device, request)?);
+                    Ok(cost)
+                })();
+                admission::Candidate {
+                    priority: frame.admission_priority,
+                    cost,
+                }
+            })
+            .collect();
+        let decisions = admission::select(&candidates, capacity);
+        for (index, frame) in self.frames.iter_mut().enumerate() {
+            if decisions[index] != admission::Decision::Admitted {
+                frame.scene.bindings = Arc::new(bindings::BindingSnapshot::default());
+                frame.scene.lightmaps = Arc::clone(&empty_lightmaps);
+                frame.screen_overlay = None;
+            }
+        }
+        let lightmap_requests: Vec<_> = self
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(index, frame)| {
+                frame.live && decisions[*index] == admission::Decision::Admitted
+            })
+            .filter_map(|(_, frame)| frame.lightmap_request.as_ref())
+            .collect();
+        let lightmap_demand = self
+            .lightmaps
+            .demand(&lightmap_requests)
+            .map_err(|error| error.to_string());
+        let requests: Vec<_> = self
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(index, frame)| {
+                frame.live && decisions[*index] == admission::Decision::Admitted
+            })
+            .filter_map(|(_, frame)| frame.binding_request.as_ref())
+            .collect();
+        self.bindings.demand(device, &requests);
+        let reserved = lightmap_demand.and_then(|missing| {
+            self.bindings.reserve_lightmaps(
+                &self.resources.texture_uploader,
+                &self.lightmaps,
+                missing,
+                self.lightmaps.active_cost(),
+            )
+        });
+        let mut lightmap_results = Vec::with_capacity(self.frames.len());
+        for (index, frame) in self.frames.iter_mut().enumerate() {
+            let result = if let admission::Decision::Rejected(reason) = &decisions[index] {
+                Err(reason.clone())
+            } else if decisions[index] == admission::Decision::Pending {
+                Ok(false)
+            } else if let Some(request) = frame.lightmap_request.as_ref().filter(|_| frame.live) {
+                if frame.scene.lightmaps.matches(request) {
+                    Ok(true)
+                } else if let Some(snapshot) = self.lightmaps.cached(request) {
+                    frame.scene.lightmaps = snapshot;
+                    Ok(true)
+                } else {
+                    match &reserved {
+                        Ok(true) => self
+                            .lightmaps
+                            .prepare(device, &self.resources.lightmap_layout, request)
+                            .map(|snapshot| {
+                                frame.scene.lightmaps = snapshot;
+                                true
+                            })
+                            .map_err(|error| error.to_string()),
+                        Ok(false) => Ok(false),
+                        Err(reason) => Err(reason.clone()),
+                    }
+                }
+            } else {
+                Ok(false)
+            };
+            lightmap_results.push(result);
+        }
+        let mut pins = Vec::new();
+        let mut lightmap_pins = Vec::new();
+        for (index, frame) in self
+            .frames
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, frame)| frame.live)
+        {
+            let Some(request) = &frame.binding_request else {
+                continue;
+            };
+            let previous = std::mem::replace(
+                &mut frame.scene.bindings,
+                Arc::new(bindings::BindingSnapshot::default()),
+            );
+            let allow_previous = {
+                #[cfg(feature = "map-capture")]
+                {
+                    frame.feedback.is_some() && !request.exact_frame
+                }
+                #[cfg(not(feature = "map-capture"))]
+                {
+                    true
+                }
+            };
+            let previous = if allow_previous && previous.covers(request) {
+                Some(previous)
+            } else {
+                None
+            };
+            let lightmap_ready = lightmap_results[index].as_ref().is_ok_and(|ready| *ready);
+            let prepared = if let Some(error) = self.bindings.staged_error(request) {
+                Err(error)
+            } else {
+                match &lightmap_results[index] {
+                    Ok(true) if reserved.as_ref().is_ok_and(|ready| *ready) => self
+                        .bindings
+                        .prepare(device, queue, &self.resources, request),
+                    Ok(true) => self.bindings.cached(request),
+                    Ok(false) => Ok(None),
+                    Err(reason) => Err(reason.clone()),
+                }
+            };
+            match prepared {
+                Ok(Some(snapshot)) => {
+                    frame.readiness = Readiness::Current;
+                    frame.pending_clock = None;
+                    frame.scene.bindings = Arc::new(snapshot);
+                    if let Some(feedback) = &frame.feedback {
+                        feedback.bind_pages(None);
+                        feedback.bind_retirement(Some(
+                            self.resources
+                                .texture_uploader
+                                .lock()
+                                .expect("texture uploader lock")
+                                .retirement_subscription(),
+                        ));
+                        feedback.set(super::feedback::RenderStatus::Ready {
+                            unavailable_images: frame.scene.bindings.issues().count(),
+                        });
+                    }
+                    screen_refraction::prepare(
+                        &mut frame.screen_overlay,
+                        device,
+                        queue,
+                        &self.resources,
+                        &frame.scene,
+                        request.eye,
+                        request.water_time,
+                    );
+                    pins.push(Arc::clone(&frame.scene.bindings));
+                    lightmap_pins.push(Arc::clone(&frame.scene.lightmaps));
+                }
+                Ok(None) => {
+                    if lightmap_ready
+                        && !self.bindings.capacity_blocked()
+                        && let Some(previous) = previous
+                    {
+                        frame.scene.bindings = previous;
+                        frame.readiness = Readiness::Previous;
+                        screen_refraction::prepare(
+                            &mut frame.screen_overlay,
+                            device,
+                            queue,
+                            &self.resources,
+                            &frame.scene,
+                            request.eye,
+                            request.water_time,
+                        );
+                        pins.push(Arc::clone(&frame.scene.bindings));
+                        lightmap_pins.push(Arc::clone(&frame.scene.lightmaps));
+                    } else {
+                        frame.readiness = if self.bindings.capacity_blocked() {
+                            Readiness::Retiring
+                        } else {
+                            Readiness::Loading
+                        };
+                        frame.screen_overlay = None;
+                    }
+                    let key = frame.output_key();
+                    if frame.readiness == Readiness::Retiring
+                        && frame
+                            .presentation
+                            .get(&key)
+                            .is_some_and(|output| output.has_material_image())
+                    {
+                        frame.presentation.clear();
+                    }
+                    if frame.readiness.can_retain()
+                        && let Some(output) = frame.presentation.get(&key)
+                    {
+                        output.prepare(device, queue, &self.resources);
+                    }
+                    if let Some(feedback) = &frame.feedback {
+                        feedback.bind_pages(self.bindings.subscription());
+                        let uploader = self
+                            .resources
+                            .texture_uploader
+                            .lock()
+                            .expect("texture uploader lock");
+                        feedback.bind_retirement(Some(uploader.retirement_subscription()));
+                        drop(uploader);
+                        feedback.set(if frame.readiness.can_render() {
+                            super::feedback::RenderStatus::Ready {
+                                unavailable_images: frame.scene.bindings.issues().count(),
+                            }
+                        } else if self.bindings.capacity_blocked() {
+                            super::feedback::RenderStatus::Retiring {
+                                unavailable_images: 0,
+                            }
+                        } else {
+                            super::feedback::RenderStatus::Pending
+                        });
+                    }
+                }
+                Err(reason) => {
+                    frame.scene.lightmaps = Arc::clone(&empty_lightmaps);
+                    frame.readiness = Readiness::Rejected;
+                    frame.presentation.clear();
+                    frame.screen_overlay = None;
+                    if let Some(feedback) = &frame.feedback {
+                        feedback.bind_pages(None);
+                        feedback.bind_retirement(None);
+                        feedback.set(super::feedback::RenderStatus::Rejected { reason });
+                    }
+                }
+            }
+        }
+        if let Some(pressure) = self.bindings.pressure(&self.resources) {
+            for frame in self
+                .frames
+                .iter_mut()
+                .filter(|frame| frame.live && !frame.readiness.can_render())
+            {
+                frame.readiness = Readiness::Rejected;
+                frame.presentation.clear();
+                if let Some(feedback) = &frame.feedback {
+                    feedback.set(super::feedback::RenderStatus::Rejected {
+                        reason: pressure.to_string(),
+                    });
+                }
+            }
+        }
+        self.submission = Some(residency_demand::SubmissionPins::new(pins));
+        self.lightmap_submission = Some(residency_demand::SubmissionPins::new(lightmap_pins));
+    }
+    fn submitted(&mut self, queue: &wgpu::Queue) {
+        let completion = self
+            .resources
+            .texture_uploader
+            .lock()
+            .expect("texture uploader lock")
+            .completion();
+        if let Some(pins) = self.submission.take() {
+            pins.submitted(queue, &completion);
+        }
+        if let Some(pins) = self.lightmap_submission.take() {
+            pins.submitted(queue, &completion);
+        }
+        let mut outputs = Vec::new();
+        for frame in &mut self.frames {
+            frame.admission_priority |= frame.readiness.can_render();
+            frame
+                .presentation
+                .submitted(|output| outputs.push(Arc::clone(output)));
+        }
+        if !outputs.is_empty() {
+            residency_demand::SubmissionPins::new(outputs).submitted(queue, &completion);
+        }
+        self.bindings.trim();
     }
     fn trim(&mut self) {
         self.frames.retain(|frame| frame.live);
@@ -899,6 +1458,7 @@ impl shader::Pipeline for ModelPipeline {
             frame.live = false;
         }
         self.uploads.trim();
+        self.bindings.trim();
     }
 }
 

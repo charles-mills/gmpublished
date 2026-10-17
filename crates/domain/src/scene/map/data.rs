@@ -1,5 +1,5 @@
 use super::{
-    LightmapAtlas, MapAmbientLighting, MapCubemapProbe, MapDetailSprite, MapDoor,
+    LightmapSet, MapAmbientLighting, MapCubemapProbe, MapDetailSprite, MapDoor,
     MapEnvironmentLighting, MapFog, MapLightingCollision, MapOverlay, MapPakFile, MapPlayerStart,
     MapSkyCamera, MapSkyPaint, MapSun, MapVisibility, MapWalkCollision, MapWorldLighting,
 };
@@ -30,7 +30,7 @@ pub struct MapData {
     pub fog: Option<MapFog>,
     pub sky_camera: Option<MapSkyCamera>,
     pub skybox_completion_bounds: Option<MapBounds>,
-    pub lightmap: Option<LightmapAtlas>,
+    pub lightmap: Option<LightmapSet>,
     pub lighting_source: Option<super::LightmapSource>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
@@ -199,8 +199,8 @@ pub struct MapVertex {
     /// Compiled texdata dimensions, independent of replacement/fallback textures.
     pub texture_size: [u32; 2],
     pub lightmap_uv: [f32; 2],
-    pub has_lightmap: bool,
-    /// Horizontal atlas stride to each of the three directional lighting planes.
+    pub lightmap_page: Option<crate::scene::map::LightmapPageId>,
+    /// Horizontal page stride to each directional lighting plane.
     pub lightmap_bump_step: f32,
     pub blend_alpha: f32,
     /// Source vertex opacity: ordinary brushes use one; displacements retain authored alpha.
@@ -275,7 +275,6 @@ pub struct MapStatsRaw {
 /// Prepared receiver payloads; shared-model placements count independently.
 pub struct MapLightmapStats {
     pub unlightmapped_surfaces: u32,
-    /// Includes valid payloads rejected by atlas limits.
     pub valid_payloads: u32,
     pub missing_payloads: u32,
     pub invalid_payloads: u32,

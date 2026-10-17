@@ -60,6 +60,14 @@ impl Phase {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::features::file_preview::viewer3d) enum Presentation {
+    Current,
+    Previous,
+    Retained,
+    Pending,
+}
+
 #[derive(Clone, Default)]
 pub struct CaptureDiagnostics(Arc<State>);
 
@@ -88,6 +96,7 @@ struct State {
     samples: Mutex<Option<Samples>>,
     extent: [AtomicU32; 2],
     visibility: [AtomicU64; 4],
+    presentation: [AtomicU64; 4],
 }
 
 struct Samples {
@@ -97,6 +106,24 @@ struct Samples {
 }
 
 impl CaptureDiagnostics {
+    #[cfg(any(test, feature = "gui-benchmark"))]
+    pub fn observed_presentation(&self) -> Value {
+        let counts = self
+            .0
+            .presentation
+            .each_ref()
+            .map(|value| value.load(Ordering::Relaxed));
+        json!({"current":counts[0],"previous":counts[1],"retained":counts[2],"pending":counts[3]})
+    }
+    pub(in crate::features::file_preview::viewer3d) fn observe_presentation(
+        &self,
+        presentation: Presentation,
+    ) {
+        if self.0.profiling.load(Ordering::Relaxed) {
+            self.0.presentation[presentation as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     #[cfg(feature = "gui-benchmark")]
     pub fn observed_visibility(&self) -> Value {
         let counts = self
@@ -135,6 +162,9 @@ impl CaptureDiagnostics {
     }
     pub fn profile(&self, samples: usize) -> Profile {
         assert!(!self.0.profiling.swap(true, Ordering::Relaxed));
+        for count in &self.0.presentation {
+            count.store(0, Ordering::Relaxed);
+        }
         *self.0.samples.lock().expect("profile samples lock") = Some(Samples {
             phases: std::array::from_fn(|_| Vec::with_capacity(samples)),
             limit: samples,
@@ -270,5 +300,43 @@ mod tests {
         let summary = profile.finish();
         assert_eq!(summary["encode_total"]["samples"], 1);
         assert_eq!(summary["encode_total"]["omitted_samples"], 1);
+    }
+    #[test]
+    fn presentation_counts_are_view_specific_profiled_and_reset_on_restart() {
+        let diagnostics = CaptureDiagnostics::default();
+        let other = CaptureDiagnostics::default();
+        diagnostics.observe_presentation(Presentation::Pending);
+        assert_eq!(
+            diagnostics.observed_presentation(),
+            json!({"current":0,"previous":0,"retained":0,"pending":0})
+        );
+        let pause = diagnostics.pause();
+        let profile = diagnostics.profile(1);
+        diagnostics.observe_presentation(Presentation::Current);
+        diagnostics.observe_presentation(Presentation::Current);
+        diagnostics.observe_presentation(Presentation::Previous);
+        diagnostics.observe_presentation(Presentation::Retained);
+        diagnostics.observe_presentation(Presentation::Pending);
+        other.observe_presentation(Presentation::Pending);
+        assert_eq!(
+            diagnostics.observed_presentation(),
+            json!({"current":2,"previous":1,"retained":1,"pending":1})
+        );
+        assert_eq!(
+            other.observed_presentation(),
+            json!({"current":0,"previous":0,"retained":0,"pending":0})
+        );
+        profile.finish();
+        diagnostics.observe_presentation(Presentation::Pending);
+        assert_eq!(diagnostics.observed_presentation()["pending"], 1);
+        let profile = diagnostics.profile(1);
+        assert_eq!(
+            diagnostics.observed_presentation(),
+            json!({"current":0,"previous":0,"retained":0,"pending":0})
+        );
+        diagnostics.observe_presentation(Presentation::Previous);
+        assert_eq!(diagnostics.observed_presentation()["previous"], 1);
+        profile.finish();
+        drop(pause);
     }
 }

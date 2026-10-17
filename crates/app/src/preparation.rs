@@ -114,6 +114,13 @@ impl<T: Send + Sync + 'static> FlightCell<T> {
         cancellation: &PreparationCancellation,
         init: impl FnOnce() -> Result<T, Cancelled>,
     ) -> Result<&T, Cancelled> {
+        self.get_or_try_init_ref_with_error(cancellation, init)
+    }
+    pub(crate) fn get_or_try_init_ref_with_error<E: From<Cancelled>>(
+        &self,
+        cancellation: &PreparationCancellation,
+        init: impl FnOnce() -> Result<T, E>,
+    ) -> Result<&T, E> {
         cancellation.check()?;
         let inner = Arc::clone(&self.0);
         let registration = cancellation.register(move || {
@@ -188,6 +195,31 @@ mod tests {
             Ok(9)
         );
     }
+    #[test]
+    fn recoverable_initializer_error_retries_without_publishing() {
+        #[derive(Debug, PartialEq)]
+        enum Error {
+            Cancelled,
+            Pressure,
+        }
+        impl From<Cancelled> for Error {
+            fn from(_: Cancelled) -> Self {
+                Self::Cancelled
+            }
+        }
+        let cell = FlightCell::<usize>::default();
+        let cancel = PreparationCancellation::default();
+        assert_eq!(
+            cell.get_or_try_init_ref_with_error(&cancel, || Err(Error::Pressure)),
+            Err(Error::Pressure)
+        );
+        assert!(cell.get_ref().is_none());
+        assert_eq!(
+            cell.get_or_try_init_ref_with_error(&cancel, || Ok::<_, Error>(31)),
+            Ok(&31)
+        );
+    }
+
     #[test]
     fn unwind_releases_initializer_and_preserves_retry() {
         let cell = FlightCell::<usize>::default();

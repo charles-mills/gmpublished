@@ -44,11 +44,12 @@ pub struct SharedResources {
     pub material_layout: wgpu::BindGroupLayout,
     pub water_material_layout: wgpu::BindGroupLayout,
     pub water_frame_layout: wgpu::BindGroupLayout,
+    pub lightmap_layout: wgpu::BindGroupLayout,
+    pub(super) default_lightmap: Arc<super::lightmaps::Page>,
     pub sky_layout: wgpu::BindGroupLayout,
     pub blit_layout: wgpu::BindGroupLayout,
     pub(super) samplers: super::samplers::SamplerCache,
     pub(super) sampler_quality: super::samplers::QualityProfile,
-    pub lightmap_sampler: wgpu::Sampler,
     pub blit_sampler: wgpu::Sampler,
     pub water_refraction_sampler: wgpu::Sampler,
     pub sky_vertices: wgpu::Buffer,
@@ -137,6 +138,10 @@ impl SharedResources {
             entries: &uniform_layout_entries(),
         });
 
+        let lightmap_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("file_preview.lightmap.page"),
+            entries: &lightmap_layout_entries(),
+        });
         let material_entries = material_layout_entries();
         let water_material_entries = material_entries
             .iter()
@@ -214,13 +219,17 @@ impl SharedResources {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("file_preview.model_viewer.layout"),
-            bind_group_layouts: &[&uniform_layout, &material_layout],
+            bind_group_layouts: &[&uniform_layout, &material_layout, &lightmap_layout],
             push_constant_ranges: &[],
         });
         let refractive_water_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("file_preview.model_viewer.refractive_water_layout"),
-                bind_group_layouts: &[&water_frame_layout, &water_material_layout],
+                bind_group_layouts: &[
+                    &water_frame_layout,
+                    &water_material_layout,
+                    &lightmap_layout,
+                ],
                 push_constant_ranges: &[],
             });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -366,6 +375,13 @@ impl SharedResources {
             );
         let (surface_black_cube, surface_black_cube_allocation) =
             super::cubemap::create_black_view(device, &texture_uploader);
+        let default_lightmap = super::lightmaps::Page::white(
+            device,
+            &lightmap_layout,
+            &texture_uploader,
+            &lightmap_sampler,
+        )
+        .expect("validated default lightmap");
         texture_uploader
             .lock()
             .expect("texture uploader lock")
@@ -400,11 +416,12 @@ impl SharedResources {
             material_layout,
             water_material_layout,
             water_frame_layout,
+            lightmap_layout,
+            default_lightmap,
             sky_layout,
             blit_layout,
             samplers,
             sampler_quality,
-            lightmap_sampler,
             blit_sampler,
             water_refraction_sampler,
             sky_vertices,
@@ -895,14 +912,6 @@ pub fn uniforms(
                 resource: buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::TextureView(&lighting.lightmap.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: wgpu::BindingResource::TextureView(&lighting.lightmap.raw_view),
-            },
-            wgpu::BindGroupEntry {
                 binding: 7,
                 resource: lighting.model_lights.as_entire_binding(),
             },
@@ -1161,6 +1170,14 @@ pub fn skybox_face_corners(face: SkyboxFace) -> [Vec3; 4] {
     }
 }
 
+fn lightmap_layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+    [
+        lightmap_layout_entry(0),
+        lightmap_layout_entry(1),
+        sampler_layout_entry(2),
+    ]
+}
+
 fn lightmap_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -1225,7 +1242,7 @@ mod tests {
 }
 
 pub(super) fn water_material_binding(binding: u32) -> bool {
-    matches!(binding, 0 | 3 | 4 | 5 | 6 | 22)
+    matches!(binding, 0 | 3 | 5 | 6 | 22)
 }
 
 fn sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -1261,12 +1278,6 @@ fn material_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         },
         wgpu::BindGroupLayoutEntry {
             binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 4,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
@@ -1409,8 +1420,6 @@ fn water_frame_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
             },
             count: None,
         },
-        lightmap_layout_entry(5),
-        lightmap_layout_entry(6),
     ]
 }
 
@@ -1426,8 +1435,6 @@ fn uniform_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
             },
             count: None,
         },
-        lightmap_layout_entry(5),
-        lightmap_layout_entry(6),
         wgpu::BindGroupLayoutEntry {
             binding: 7,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -1528,6 +1535,7 @@ mod sampler_layout_tests {
                 normal2: normal,
             },
             MaterialUploadMode {
+                frames: None,
                 name: "sampler-test",
                 material: PreparedMaterial::Fallback,
                 base_flags: primary.flags,
@@ -1574,14 +1582,18 @@ mod sampler_layout_tests {
         let main = counts(
             uniform_layout_entries()
                 .into_iter()
-                .chain(material_layout_entries()),
+                .chain(material_layout_entries())
+                .chain(lightmap_layout_entries()),
         );
         let water = counts(
-            water_frame_layout_entries().into_iter().chain(
-                material_layout_entries()
-                    .into_iter()
-                    .filter(|entry| water_material_binding(entry.binding)),
-            ),
+            water_frame_layout_entries()
+                .into_iter()
+                .chain(
+                    material_layout_entries()
+                        .into_iter()
+                        .filter(|entry| water_material_binding(entry.binding)),
+                )
+                .chain(lightmap_layout_entries()),
         );
         assert_eq!(main, (14, 13));
         assert_eq!(water, (7, 4));

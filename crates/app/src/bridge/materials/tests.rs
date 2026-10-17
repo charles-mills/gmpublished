@@ -595,9 +595,9 @@ fn alpha_test_excludes_texture_blending_while_additive_keeps_its_blend_identity(
             .force_opaque()
     );
     assert!(!additive.render_mode.texture_alpha_policy().force_opaque());
-    assert_eq!(texture_rgba(&opaque.texture), rgba);
-    assert_eq!(texture_rgba(&translucent.texture), rgba);
-    assert_eq!(texture_rgba(&additive.texture), rgba);
+    assert_eq!(texture_rgba(opaque.texture.as_deref().unwrap()), rgba);
+    assert_eq!(texture_rgba(translucent.texture.as_deref().unwrap()), rgba);
+    assert_eq!(texture_rgba(additive.texture.as_deref().unwrap()), rgba);
 }
 
 #[test]
@@ -743,10 +743,10 @@ fn bc_texture_cache_reuses_path_across_alpha_modes() {
     assert!(!cutout.render_mode.texture_alpha_policy().force_opaque());
     assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
     assert!(Arc::ptr_eq(
-        cutout.texture.resident().unwrap(),
-        opaque.texture.resident().unwrap()
+        cutout.texture.as_ref().unwrap().resident().unwrap(),
+        opaque.texture.as_ref().unwrap().resident().unwrap()
     ));
-    assert!(cutout.texture.is_bc());
+    assert!(cutout.texture.as_ref().unwrap().is_bc());
 }
 
 #[test]
@@ -2001,7 +2001,7 @@ fn missing_water_textures_keep_shader_and_use_single_flat_normal_fallback() {
     let water = resolved.shader.water().unwrap();
     assert!(!water.has_base_texture);
     assert!(water.normal_map.is_none());
-    assert!(resolved.texture.is_water_fallback());
+    assert!(resolved.texture.as_ref().unwrap().is_water_fallback());
 }
 
 #[test]
@@ -2109,7 +2109,10 @@ fn reflective_glass_keeps_shader_identity_without_a_base_texture() {
     assert_eq!(mirror.max_reflectivity, 1.0);
     assert_eq!(mirror.fresnel_power, 0.0);
     assert!((mirror.refract_tint_linear[2] - 0.6_f32.powf(2.2)).abs() < 1e-6);
-    assert_eq!(resolved.texture.rgba_bytes().unwrap(), &[255; 4]);
+    assert_eq!(
+        resolved.texture.as_ref().unwrap().rgba_bytes().unwrap(),
+        &[255; 4]
+    );
 }
 
 #[test]
@@ -2261,16 +2264,16 @@ fn unlit_vertex_alpha_blends_partial_texture_alpha_without_changing_opaque_mater
         .unwrap();
     assert_eq!(blended.render_mode, RenderMode::Translucent);
     assert!(!blended.render_mode.texture_alpha_policy().force_opaque());
-    assert_eq!(texture_rgba(&blended.texture), rgba);
+    assert_eq!(texture_rgba(blended.texture.as_deref().unwrap()), rgba);
     assert_eq!(texture_rgba(with_base2.texture.as_ref().unwrap()), rgba);
     let unlit = blended.shader.unlit().unwrap();
     assert!(unlit.vertex_alpha && unlit.vertex_color);
     assert_eq!(opaque.render_mode, RenderMode::Opaque);
     assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
-    assert_eq!(texture_rgba(&opaque.texture), rgba);
+    assert_eq!(texture_rgba(opaque.texture.as_deref().unwrap()), rgba);
     assert!(Arc::ptr_eq(
-        opaque.texture.resident().unwrap(),
-        blended.texture.resident().unwrap()
+        opaque.texture.as_ref().unwrap().resident().unwrap(),
+        blended.texture.as_ref().unwrap().resident().unwrap()
     ));
 }
 
@@ -2314,8 +2317,8 @@ fn vtf_alpha_capability_controls_texture_blending_without_destroying_stored_chan
         assert_eq!(opaque.render_mode, RenderMode::Opaque);
         assert_eq!(blended.render_mode, RenderMode::Translucent);
         assert!(opaque.shader.surface().unwrap().translucent);
-        assert_eq!(texture_rgba(&opaque.texture), rgba);
-        assert_eq!(texture_rgba(&blended.texture), rgba);
+        assert_eq!(texture_rgba(opaque.texture.as_deref().unwrap()), rgba);
+        assert_eq!(texture_rgba(blended.texture.as_deref().unwrap()), rgba);
     }
 }
 
@@ -2975,12 +2978,14 @@ fn shared_base_texture_cache_separates_raw_and_srgb_mip_filters() {
             .resolve_primary(&[], "decals/linear")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         let encoded = resolver
             .resolve_primary(&[], "decals/encoded")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert!(Arc::ptr_eq(
             linear.resident().unwrap(),
             encoded.resident().unwrap()
@@ -3049,7 +3054,9 @@ fn representative_mapping_uses_effective_role_priority_and_source_dimensions() {
                 .into_material()
                 .unwrap();
             assert_eq!(
-                material.shader.mapping_dimensions(Some(&material.texture)),
+                material
+                    .shader
+                    .mapping_dimensions(material.texture.as_deref()),
                 Some((u32::from(dimension), u32::from(dimension)))
             );
             let constrained = resolver
@@ -3060,7 +3067,7 @@ fn representative_mapping_uses_effective_role_priority_and_source_dimensions() {
             assert_eq!(
                 constrained
                     .shader
-                    .mapping_dimensions(Some(&constrained.texture)),
+                    .mapping_dimensions(constrained.texture.as_deref()),
                 Some((u32::from(dimension), u32::from(dimension)))
             );
         }
@@ -3079,7 +3086,9 @@ fn representative_mapping_uses_effective_role_priority_and_source_dimensions() {
         .into_material()
         .unwrap();
     assert_eq!(
-        material.shader.mapping_dimensions(Some(&material.texture)),
+        material
+            .shader
+            .mapping_dimensions(material.texture.as_deref()),
         Some((2, 1))
     );
     assert_eq!(material.shader.mapping_dimensions(None), Some((8, 1)));
@@ -3095,17 +3104,19 @@ fn representative_mapping_uses_effective_role_priority_and_source_dimensions() {
         .into_material()
         .unwrap();
     assert_eq!(
-        error.texture.load_outcome(),
+        error.texture.as_ref().unwrap().load_outcome(),
         TextureLoadOutcome::MissingSource
     );
     assert_eq!(
-        error.shader.mapping_dimensions(Some(&error.texture)),
+        error.shader.mapping_dimensions(error.texture.as_deref()),
         Some((32, 32))
     );
     for name in ["test/water", "test/mirror"] {
         let material = resolver.resolve_primary(&[], name).into_material().unwrap();
         assert_eq!(
-            material.shader.mapping_dimensions(Some(&material.texture)),
+            material
+                .shader
+                .mapping_dimensions(material.texture.as_deref()),
             Some((32, 32))
         );
     }
@@ -3267,7 +3278,7 @@ fn rejected_vpk_index_never_turns_into_a_lower_mount_lookup() {
         resolver.resolve_primary(&[], "target"),
         MaterialResolution::IndexUnavailable { .. }
     ));
-    assert_eq!(resolver.game_vpks().unwrap().len(), 1);
+    assert_eq!(resolver.game_vpks().unwrap().archives.len(), 1);
     assert_eq!(resolver.archive_index_stats().archives, 0);
 }
 
@@ -3363,4 +3374,299 @@ fn already_cancelled_source_factory_stops_before_discovery_or_pak_index() {
         Err(crate::preparation::Cancelled)
     ));
     assert_eq!(pak.indexed_entries().unwrap().len(), 1);
+}
+
+fn on_demand_policy_fixture(kind: &str) -> (tempfile::TempDir, MaterialResolver) {
+    let root = tempfile::TempDir::new().unwrap();
+    let path = "materials/test/policy.vtf";
+    let bytes = fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[3; 4], &[7; 16]]);
+    let resolver = match kind {
+        "gma" => MaterialResolver::new(
+            Arc::new(
+                PreviewArchive::from_gma(
+                    GmaFixtureBuilder::new("Policy").entry(path, bytes).build(),
+                )
+                .unwrap(),
+            ),
+            None,
+        ),
+        "vpk" => {
+            write_vpk_fixture(
+                &root.path().join("garrysmod/garrysmod_dir.vpk"),
+                vec![(path, bytes)],
+            );
+            MaterialResolver::new(Arc::new(empty_archive()), Some(root.path().to_owned()))
+        }
+        "zip" | "lzma" => {
+            let entry = if kind == "zip" {
+                zip_stored_entry(path, bytes)
+            } else {
+                zip_lzma_entry(path, bytes)
+            };
+            MaterialResolver::with_pakfile_source(
+                Arc::new(empty_archive()),
+                None,
+                MapPakFile::from_pak_bytes(zip_fixture([entry])),
+            )
+        }
+        _ => unreachable!(),
+    };
+    (root, resolver.with_on_demand_textures())
+}
+
+#[test]
+fn on_demand_resource_policy_is_checked_after_cached_selection_without_poisoning_source() {
+    let path = ContentPath::new("materials/test/policy.vtf").unwrap();
+    for kind in ["gma", "vpk", "zip", "lzma"] {
+        for strict_first in [false, true] {
+            let (_root, resolver) = on_demand_policy_fixture(kind);
+            let strict = resolver.with_texture_resource_limit(4);
+            let first = if strict_first { &strict } else { &resolver };
+            let source = first.selected_reloadable_texture(&path).unwrap();
+            let rejected = strict.reloadable_residency(Arc::clone(&source), 0, 0..1, true);
+            assert!(
+                matches!(
+                    rejected,
+                    Err(TextureAssetError::Vtf(
+                        vformats::vtf::VtfError::DecodedTooLarge { size: 20, max: 4 }
+                    ))
+                ),
+                "{kind}, strict first: {strict_first}"
+            );
+            let cached = resolver.selected_reloadable_texture(&path).unwrap();
+            assert!(Arc::ptr_eq(&source, &cached));
+            let accepted = resolver
+                .reloadable_residency(cached, 0, 0..1, true)
+                .unwrap();
+            let (source, request) = accepted.on_demand().unwrap();
+            assert_eq!(source.page_cost(request).unwrap().resident_bytes, 20);
+            let page = source
+                .load_page(
+                    request,
+                    &crate::preparation::PreparationCancellation::default(),
+                    &Arc::new(TextureWorkingBudget::new(16 * 1024 * 1024)),
+                )
+                .unwrap();
+            assert_eq!(page.resident().byte_len(), 20);
+            // A recipe that already has a materialized page cannot authorize a stricter caller.
+            assert!(
+                strict
+                    .reloadable_residency(Arc::clone(source), 0, 0..1, true)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn on_demand_page_working_policy_is_checked_for_every_resolver_variant() {
+    let path = ContentPath::new("materials/test/policy.vtf").unwrap();
+    for kind in ["gma", "vpk", "zip", "lzma"] {
+        let (_root, resolver) = on_demand_policy_fixture(kind);
+        let source = resolver.selected_reloadable_texture(&path).unwrap();
+        let request = source
+            .frame_request(0, 0..1, 0, 2, TextureStorage::Rgba8)
+            .unwrap();
+        let required = source.page_cost(&request).unwrap().decode_working_bytes;
+        let strict = resolver.with_texture_decoder_limit(required - 1);
+        assert!(
+            matches!(
+                strict.reloadable_residency(Arc::clone(&source), 0, 0..1, true),
+                Err(TextureAssetError::WorkingLimit { required: actual, capacity })
+                    if actual == required && capacity == required - 1
+            ),
+            "{kind}"
+        );
+        assert!(
+            resolver
+                .with_texture_decoder_limit(required)
+                .reloadable_residency(source, 0, 0..1, true)
+                .is_ok(),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn on_demand_compressed_source_decoder_policy_is_checked_on_cold_and_cached_sources() {
+    let path = ContentPath::new("materials/test/policy.vtf").unwrap();
+    for warm in [false, true] {
+        let (_root, resolver) = on_demand_policy_fixture("lzma");
+        let decoder = SourceRef::Pakfile(resolver.config.pakfile.as_ref().unwrap())
+            .descriptor(&path)
+            .unwrap()
+            .unwrap()
+            .cost()
+            .unwrap()
+            .decoder_bytes;
+        assert!(decoder > 0);
+        let exact = resolver.with_texture_decoder_limit(decoder);
+        let cached = warm.then(|| exact.selected_reloadable_texture(&path).unwrap());
+        let strict = resolver.with_texture_decoder_limit(decoder - 1);
+        assert!(matches!(
+            strict.selected_reloadable_texture(&path),
+            Err(TextureSourceError::WorkingBudget {
+                error: TextureAssetError::WorkingLimit { required, capacity }, ..
+            }) if required == decoder && capacity == decoder - 1
+        ));
+        let recovered = exact.selected_reloadable_texture(&path).unwrap();
+        if let Some(cached) = cached {
+            assert!(Arc::ptr_eq(&cached, &recovered));
+        }
+    }
+}
+
+#[test]
+fn on_demand_bc_handle_preserves_limits_for_capability_conversion() {
+    let resolver = MaterialResolver::prop_lighting_fixture(
+        vec![(
+            "materials/test/bc.vtf",
+            fixture_vtf_bytes(2, 2, VtfFormat::Dxt1, &[&[0; 8]]),
+        )],
+        Vec::new(),
+    )
+    .with_on_demand_textures()
+    .with_texture_resource_limit(8)
+    .with_texture_decoder_limit(8);
+    let source = resolver
+        .selected_reloadable_texture(&ContentPath::new("materials/test/bc.vtf").unwrap())
+        .unwrap();
+    let residency = resolver
+        .reloadable_residency(source, 0, 0..1, false)
+        .unwrap();
+    let (source, recipe) = residency.on_demand().unwrap();
+    assert_eq!(
+        recipe.limits,
+        TexturePageLimits {
+            resident_bytes: 8,
+            decode_working_bytes: 8
+        }
+    );
+    assert_eq!(source.validate_page(recipe).unwrap().resident_bytes, 8);
+    let mut converted = recipe.clone();
+    converted.storage = TextureStorage::Rgba8;
+    assert!(matches!(
+        source.validate_page(&converted),
+        Err(TextureAssetError::Vtf(
+            vformats::vtf::VtfError::DecodedTooLarge { size: 16, max: 8 }
+        ))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn sparse_large_animation_sources_keep_last_frame_reads_and_policy_bounded() {
+    use std::io::{Seek, SeekFrom};
+    const IMAGE_BYTES: u64 = 524_288;
+    const FRAME: u32 = 4095;
+    let path = "materials/test/large.vtf";
+    let mut header = fixture_vtf_bytes(1024, 1024, VtfFormat::Dxt1, &[&[]]);
+    header[24..26].copy_from_slice(&4096_u16.to_le_bytes());
+    let declared_len = header.len() as u64 + 4096 * IMAGE_BYTES;
+    for kind in ["loose", "gma", "vpk"] {
+        let root = tempfile::TempDir::new().unwrap();
+        let game = root.path().join("game");
+        let (disk, prefix, trailer) = match kind {
+            "gma" => {
+                let disk = root.path().join("large.gma");
+                write_gma_fixture(
+                    &disk,
+                    &GmaFixtureBuilder::new("Large")
+                        .entry(path, header.clone())
+                        .build(),
+                );
+                let bytes = fs::read(&disk).unwrap();
+                let data_offset = bytes.len() - header.len() - 4;
+                let mut prefix = bytes[..data_offset].to_vec();
+                let size_offset = prefix
+                    .windows(path.len())
+                    .position(|bytes| bytes == path.as_bytes())
+                    .unwrap()
+                    + path.len()
+                    + 1;
+                prefix[size_offset..size_offset + 8].copy_from_slice(&declared_len.to_le_bytes());
+                (disk, prefix, 4)
+            }
+            "vpk" => {
+                let tree = build_tree(vec![PreparedEntry {
+                    extension: "vtf".to_owned(),
+                    directory: "materials/test".to_owned(),
+                    filename: "large".to_owned(),
+                    crc: 0,
+                    entry_offset: 0,
+                    entry_length: u32::try_from(declared_len).unwrap(),
+                }]);
+                let mut prefix = VPK_SIGNATURE.to_le_bytes().to_vec();
+                prefix.extend_from_slice(&1_u32.to_le_bytes());
+                prefix.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+                prefix.extend_from_slice(&tree);
+                (game.join("garrysmod/garrysmod_dir.vpk"), prefix, 0)
+            }
+            _ => (root.path().join("large.vtf"), Vec::new(), 0),
+        };
+        fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&disk)
+            .unwrap();
+        file.write_all(&prefix).unwrap();
+        file.write_all(&header).unwrap();
+        file.set_len(prefix.len() as u64 + declared_len + trailer)
+            .unwrap();
+        let offset = header.len() as u64 + u64::from(FRAME) * IMAGE_BYTES;
+        assert!(offset > vformats::Limits::default().max_input_bytes);
+        file.seek(SeekFrom::Start(prefix.len() as u64 + offset))
+            .unwrap();
+        file.write_all(&vec![173; IMAGE_BYTES as usize]).unwrap();
+        drop(file);
+        let resolver = match kind {
+            "gma" => MaterialResolver::new(Arc::new(PreviewArchive::open(&disk).unwrap()), None),
+            "vpk" => MaterialResolver::new(Arc::new(empty_archive()), Some(game)),
+            _ => MaterialResolver::new(
+                PreviewArchiveSource::from_folder([(path.to_owned(), declared_len, disk)]),
+                None,
+            ),
+        }
+        .with_on_demand_textures();
+        let source = resolver
+            .selected_reloadable_texture(&ContentPath::new(path).unwrap())
+            .unwrap();
+        assert_eq!(source.metadata().frame_count, 4096, "{kind}");
+        assert!(matches!(
+            resolver
+                .with_texture_resource_limit(8192)
+                .reloadable_residency(Arc::clone(&source), FRAME, 0..1, false),
+            Err(TextureAssetError::Vtf(
+                vformats::vtf::VtfError::DecodedTooLarge {
+                    size: IMAGE_BYTES,
+                    max: 8192
+                }
+            ))
+        ));
+        let residency = resolver
+            .reloadable_residency(source, FRAME, 0..1, false)
+            .unwrap();
+        let (source, recipe) = residency.on_demand().unwrap();
+        let working = Arc::new(TextureWorkingBudget::new(IMAGE_BYTES as usize));
+        let page = source
+            .load_page(
+                recipe,
+                &crate::preparation::PreparationCancellation::default(),
+                &working,
+            )
+            .unwrap();
+        assert_eq!(page.resident().byte_len(), IMAGE_BYTES as usize, "{kind}");
+        assert!(
+            page.resident().layers()[0].mips[0]
+                .bytes
+                .as_slice()
+                .iter()
+                .all(|&byte| byte == 173),
+            "{kind}"
+        );
+        assert_eq!(working.peak_bytes(), IMAGE_BYTES as usize);
+        assert_eq!(working.current_bytes(), 0);
+    }
 }

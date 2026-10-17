@@ -317,6 +317,26 @@ impl PreviewArchive {
             .map_err(|_| GmaError::EntryNotFound)
     }
 
+    pub(crate) fn texture_source_unchanged(&self) -> std::io::Result<bool> {
+        self.view.source_unchanged()
+    }
+    pub(crate) fn entry_range(
+        &self,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, GmaError> {
+        let entry = self.entry(path)?;
+        if range.start > range.end || range.end > entry.size {
+            return Err(GmaError::FormatError);
+        }
+        let offset = entry
+            .data_offset
+            .checked_add(range.start)
+            .ok_or(GmaError::FormatError)?;
+        self.view
+            .read_payload_bytes(offset, range.end - range.start)
+    }
+
     pub(crate) fn entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, GmaError> {
         let entry = self.entry(path)?;
         self.view

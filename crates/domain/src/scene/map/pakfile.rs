@@ -110,6 +110,25 @@ impl MapPakFile {
             .transpose()
     }
 
+    pub fn entry_range_by_index_with_decoder_limit(
+        &self,
+        index: usize,
+        range: std::ops::Range<u64>,
+        decoder_limit: u64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Option<Vec<u8>>, BspError> {
+        let reader = self.archive.reader().map_err(pakfile_error)?;
+        reader
+            .entries()
+            .get(index)
+            .map(|entry| {
+                reader
+                    .entry_range_with_decoder_limit(entry, range, decoder_limit, cancelled)
+                    .map_err(pakfile_error)
+            })
+            .transpose()
+    }
+
     pub fn entry_bytes_by_index_with_limit(
         &self,
         index: usize,

@@ -109,6 +109,7 @@ impl TexturePreparationResources {
             policy.sprite_sheet_metadata_bytes,
         ));
         let resolver = resolver
+            .with_on_demand_textures()
             .with_encoded_texture_budget(Arc::clone(&encoded_budget))
             .with_texture_resource_limit(policy.resource_resident_bytes)
             .with_texture_decoder_limit(policy.source_decoder_bytes)

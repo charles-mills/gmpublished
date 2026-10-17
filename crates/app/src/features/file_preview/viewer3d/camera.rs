@@ -6,6 +6,7 @@ use super::{
     ModelPrimitive, MovementMode, OrbitPose, Point, Rectangle, SOURCE_UP, Uniforms,
     door_world_bounds, half_extent, initial_door_swing, mid, mouse, shader,
 };
+use crate::bridge::materials::AnimationClock;
 use gmpublished_domain::math::QAngle;
 use gmpublished_domain::math::Vec3;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,6 +43,9 @@ pub struct Camera {
     /// `distance` is a multiplier over the model's auto-framed distance.
     pub(super) orbit: Orbit,
     pub(super) drag_from: Option<Point>,
+    animation_started_at: Option<std::time::Instant>,
+    animation_last_frame: Option<std::time::Instant>,
+    animation_clock: AnimationClock,
 }
 
 impl Default for Camera {
@@ -51,6 +55,9 @@ impl Default for Camera {
             content_id: None,
             orbit: Orbit::new(ZoomFloor::SolidMesh),
             drag_from: None,
+            animation_started_at: None,
+            animation_last_frame: None,
+            animation_clock: AnimationClock::default(),
         }
     }
 }
@@ -63,6 +70,20 @@ impl Camera {
         self.content_id = Some(content_id);
         self.orbit = Orbit::from_pose(pose.unwrap_or_default(), ZoomFloor::SolidMesh);
         self.drag_from = None;
+        self.animation_started_at = None;
+        self.animation_last_frame = None;
+        self.animation_clock = AnimationClock::default();
+    }
+
+    fn advance_animation(&mut self, now: std::time::Instant) {
+        let started = self.animation_started_at.get_or_insert(now);
+        self.animation_clock = AnimationClock {
+            time_seconds: now.saturating_duration_since(*started).as_secs_f32(),
+            frame_seconds: self.animation_last_frame.map_or(0.0, |previous| {
+                now.saturating_duration_since(previous).as_secs_f32()
+            }),
+        };
+        self.animation_last_frame = Some(now);
     }
 
     pub(super) fn pose(&self) -> OrbitPose {
@@ -107,10 +128,15 @@ impl shader::Program<Message> for Viewer3d {
                 camera.orbit.zoom(steps);
                 Some(Action::publish(Message::OrbitPoseChanged(camera.pose())).and_capture())
             }
-            Event::Window(iced::window::Event::RedrawRequested(now)) => self
-                .render_feedback
-                .wants_redraw(*now)
-                .then(Action::request_redraw),
+            Event::Window(iced::window::Event::RedrawRequested(now)) => {
+                camera.advance_animation(*now);
+                (self.model.scene.materials.iter().any(|slot| {
+                    slot.shader
+                        .surface()
+                        .is_some_and(crate::bridge::materials::SurfaceMaterial::is_animated)
+                }) || self.render_feedback.wants_redraw(*now))
+                .then(Action::request_redraw)
+            }
             _ => None,
         }
     }
@@ -120,6 +146,9 @@ impl shader::Program<Message> for Viewer3d {
             render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: None,
             model_lighting_time: 0.0,
+            animation_clock: camera.animation_clock,
+            #[cfg(feature = "map-capture")]
+            exact_texture_frame: false,
             view_id: camera.view_id,
             air_fog: None,
             clear_color: None,
@@ -247,6 +276,8 @@ pub struct FlyCamera {
     pub(super) input_captured: bool,
     pub(super) last_frame: Option<std::time::Instant>,
     pub(super) animation_started_at: Option<std::time::Instant>,
+    pub(super) animation_last_frame: Option<std::time::Instant>,
+    pub(super) animation_frame_seconds: f32,
     pub(super) animated_scene: bool,
     pub(super) water_time: f32,
     pub(super) model_lighting_time: f64,
@@ -419,12 +450,14 @@ impl FlyCamera {
         self.held = HeldKeys::default();
         self.last_frame = None;
         self.animation_started_at = None;
+        self.animation_last_frame = None;
+        self.animation_frame_seconds = 0.0;
         self.water_time = 0.0;
         self.model_lighting_time = 0.0;
         self.animated_scene = scene
             .lightmap
             .as_ref()
-            .is_some_and(gmpublished_domain::scene::map::LightmapAtlas::is_animated)
+            .is_some_and(gmpublished_domain::scene::map::LightmapSet::is_animated)
             || scene
                 .model_lighting_inputs
                 .as_ref()
@@ -441,6 +474,10 @@ impl FlyCamera {
                 slot.shader
                     .water()
                     .is_some_and(crate::bridge::materials::WaterMaterial::is_animated)
+                    || slot
+                        .shader
+                        .surface()
+                        .is_some_and(crate::bridge::materials::SurfaceMaterial::is_animated)
             });
         self.mode = MovementMode::Fly;
         self.reset_walk_state();
@@ -844,6 +881,11 @@ impl shader::Program<Message> for FlyViewer {
             }
             Event::Window(iced::window::Event::RedrawRequested(now)) => {
                 let started = camera.animation_started_at.get_or_insert(*now);
+                camera.animation_frame_seconds =
+                    camera.animation_last_frame.map_or(0.0, |previous| {
+                        now.saturating_duration_since(previous).as_secs_f32()
+                    });
+                camera.animation_last_frame = Some(*now);
                 camera.water_time = now.saturating_duration_since(*started).as_secs_f32();
                 camera.model_lighting_time = now.saturating_duration_since(*started).as_secs_f64();
                 #[cfg(feature = "gui-benchmark")]
@@ -854,6 +896,7 @@ impl shader::Program<Message> for FlyViewer {
                 {
                     camera.water_time = clock as f32;
                     camera.model_lighting_time = clock;
+                    camera.animation_frame_seconds = 0.0;
                 }
                 if !camera.needs_movement_tick() {
                     camera.last_frame = None;
@@ -931,6 +974,12 @@ impl shader::Program<Message> for FlyViewer {
                 uniforms.water_depth_params[1],
             )),
             model_lighting_time: camera.model_lighting_time,
+            animation_clock: AnimationClock {
+                time_seconds: camera.water_time,
+                frame_seconds: camera.animation_frame_seconds,
+            },
+            #[cfg(feature = "map-capture")]
+            exact_texture_frame: false,
             view_id: camera.view_id,
             air_fog: self.fog.filter(|_| self.fog_enabled),
             clear_color: self
@@ -1239,16 +1288,28 @@ mod tests {
     }
 
     fn animated_scene_viewer() -> FlyViewer {
+        scene_with_animated_material(
+            br#"Water {
+            "$normalmap" "normal" "$scroll1" "[.01 .01 .05]"
+            Proxies { TextureScroll { texturescrollvar "$bumptransform" texturescrollrate ".02" } }
+        }"#,
+        )
+    }
+
+    fn scene_with_animated_material(material: &[u8]) -> FlyViewer {
         use crate::bridge::{gma::PreviewArchive, materials::MaterialResolver};
         use crate::test_support::{GmaFixtureBuilder, fixture_vtf_bytes};
         let normal = [128, 144, 250, 255].repeat(4);
-        let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("Animated Water")
-            .entry("materials/water.vmt", br#"Water {
-                "$normalmap" "normal" "$scroll1" "[.01 .01 .05]"
-                Proxies { TextureScroll { texturescrollvar "$bumptransform" texturescrollrate ".02" } }
-            }"#.to_vec())
-            .entry("materials/normal.vtf", fixture_vtf_bytes(2, 2, vformats::vtf::VtfFormat::Rgba8888, &[&normal]))
-            .build()).unwrap();
+        let archive = PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Animated Water")
+                .entry("materials/water.vmt", material.to_vec())
+                .entry(
+                    "materials/normal.vtf",
+                    fixture_vtf_bytes(2, 2, vformats::vtf::VtfFormat::Rgba8888, &[&normal]),
+                )
+                .build(),
+        )
+        .unwrap();
         let resolved = MaterialResolver::new(Arc::new(archive), None)
             .resolve_primary(&[], "water")
             .into_material()
@@ -1262,7 +1323,7 @@ mod tests {
                 canonical_name: Some("water".into()),
                 name: "water".into(),
                 shader: resolved.shader,
-                texture: Some(resolved.texture),
+                texture: resolved.texture,
                 texture2: None,
                 render_mode: resolved.render_mode,
                 alpha_policy: resolved.render_mode.texture_alpha_policy(),
@@ -1361,6 +1422,7 @@ mod tests {
             assert_eq!(camera.position, Some(Vec3::new(10.0, 20.0, 30.0)));
             assert_eq!(camera.model_lighting_time, 7.5);
             assert_eq!(camera.water_time, 7.5);
+            assert_eq!(camera.animation_frame_seconds, 0.0);
             assert_eq!(camera.mode(), MovementMode::Fly);
         }
     }
@@ -1472,6 +1534,56 @@ mod tests {
             assert_eq!([camera.yaw, camera.pitch], angles);
             assert!(!camera.needs_movement_tick());
         }
+    }
+
+    #[test]
+    fn generic_texture_animation_redraws_without_camera_messages_and_keeps_view_clocks_independent()
+    {
+        let viewer = scene_with_animated_material(
+            br#"UnlitGeneric {
+            "$basetexture" "normal"
+            Proxies { AnimatedTexture {
+                animatedtexturevar "$basetexture"
+                animatedtextureframenumvar "$frame"
+                animatedtextureframerate "30"
+            } }
+        }"#,
+        );
+        let mut first = FlyCamera::default();
+        let mut second = FlyCamera::default();
+        let now = std::time::Instant::now();
+        let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));
+        let redraw = |camera: &mut FlyCamera, elapsed| {
+            viewer.update(
+                camera,
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    now + std::time::Duration::from_millis(elapsed),
+                )),
+                bounds,
+                mouse::Cursor::Unavailable,
+            )
+        };
+        redraw(&mut first, 0).unwrap();
+        redraw(&mut second, 1000).unwrap();
+        let positions = [first.position, second.position];
+        for (camera, elapsed, expected_time) in [(&mut first, 2000, 2.0), (&mut second, 2000, 1.0)]
+        {
+            let (message, request, _) = redraw(camera, elapsed).unwrap().into_inner();
+            assert!(message.is_none());
+            assert_eq!(request, iced::window::RedrawRequest::NextFrame);
+            assert_eq!(camera.water_time, expected_time);
+            assert_eq!(
+                viewer
+                    .draw(camera, mouse::Cursor::Unavailable, bounds)
+                    .animation_clock,
+                AnimationClock {
+                    time_seconds: expected_time,
+                    frame_seconds: expected_time
+                }
+            );
+            assert!(!camera.needs_movement_tick());
+        }
+        assert_eq!([first.position, second.position], positions);
     }
 
     #[test]
@@ -1640,6 +1752,72 @@ mod tests {
     }
 
     #[test]
+    fn orbit_texture_animation_owns_its_clock_and_redraws_without_pose_messages() {
+        let fly = scene_with_animated_material(
+            br#"UnlitGeneric {
+            "$basetexture" "normal"
+            Proxies { AnimatedTexture {
+                animatedtexturevar "$basetexture"
+                animatedtextureframenumvar "$frame"
+            } }
+        }"#,
+        );
+        let viewer = Viewer3d {
+            render_feedback: Default::default(),
+            model: Arc::new(ModelPreview {
+                scene: Arc::clone(&fly.scene.scene),
+                skin_tables: Vec::new(),
+                bodygroups: Vec::new(),
+            }),
+            content_id: 8,
+            skin_remap: Vec::new(),
+            bodygroup_choices: Vec::new(),
+            phy_debug_visible: false,
+            pose: None,
+        };
+        let mut first = Camera::default();
+        let mut second = Camera::default();
+        let now = std::time::Instant::now();
+        let bounds = Rectangle::with_size(iced::Size::new(1280.0, 720.0));
+        let redraw = |camera: &mut Camera, elapsed| {
+            viewer
+                .update(
+                    camera,
+                    &Event::Window(iced::window::Event::RedrawRequested(
+                        now + std::time::Duration::from_millis(elapsed),
+                    )),
+                    bounds,
+                    mouse::Cursor::Unavailable,
+                )
+                .unwrap()
+        };
+        redraw(&mut first, 0);
+        redraw(&mut second, 1000);
+        let poses = [first.pose(), second.pose()];
+        for (camera, time_seconds) in [(&mut first, 2.0), (&mut second, 1.0)] {
+            let (message, request, _) = redraw(camera, 2000).into_inner();
+            assert!(message.is_none());
+            assert_eq!(request, iced::window::RedrawRequest::NextFrame);
+            let primitive = viewer.draw(camera, mouse::Cursor::Unavailable, bounds);
+            assert_eq!(
+                primitive.animation_clock,
+                AnimationClock {
+                    time_seconds,
+                    frame_seconds: time_seconds,
+                }
+            );
+            assert_eq!(primitive.model_lighting_time, 0.0);
+        }
+        assert_eq!([first.pose(), second.pose()], poses);
+        first.ensure_spawn(8, None);
+        assert_eq!(first.animation_clock.time_seconds, 2.0);
+        first.ensure_spawn(9, None);
+        assert_eq!(first.animation_clock, AnimationClock::default());
+        first.advance_animation(now + std::time::Duration::from_secs(3));
+        assert_eq!(first.animation_clock, AnimationClock::default());
+    }
+
+    #[test]
     fn orbit_camera_fresh_state_seeds_from_pose() {
         let mut camera = Camera::default();
         let pose = OrbitPose {
@@ -1668,6 +1846,7 @@ mod tests {
                 super::super::super::orbit::ZoomFloor::SolidMesh,
             ),
             drag_from: Some(Point::new(1.0, 2.0)),
+            ..Camera::default()
         };
 
         camera.ensure_spawn(7, None);

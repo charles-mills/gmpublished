@@ -1,6 +1,7 @@
 use super::wgpu;
 use crate::bridge::materials::{
-    ResidentTexture, TextureReadTransfer, TextureResidentId, TextureStorage,
+    CachedTexturePage, ResidentTexture, TextureFrameRequest, TextureMetadata, TexturePageIdentity,
+    TextureReadTransfer, TextureResidentId, TextureStorage,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -24,6 +25,12 @@ struct ImageKey {
     transfer: Option<TextureReadTransfer>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PageImageKey {
+    identity: TexturePageIdentity,
+    transfer: Option<TextureReadTransfer>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum UploadError {
     #[error("texture has no resident image data")]
@@ -36,6 +43,8 @@ pub(super) enum UploadError {
     InvalidMip { layer: usize, mip: usize },
     #[error("texture allocation size overflows")]
     SizeOverflow,
+    #[error("texture page request is inconsistent with source metadata")]
+    InvalidPage,
     #[error("texture view is incompatible with its image allocation")]
     InvalidView,
     #[error(transparent)]
@@ -44,6 +53,7 @@ pub(super) enum UploadError {
 
 #[derive(Debug)]
 pub(super) struct Image {
+    resident_id: TextureResidentId,
     texture: super::texture_upload::UploadedTexture,
     format: wgpu::TextureFormat,
     layers: u32,
@@ -53,6 +63,13 @@ pub(super) struct Image {
 }
 
 impl Image {
+    pub(super) fn resident_id(&self) -> &TextureResidentId {
+        &self.resident_id
+    }
+    pub(super) fn byte_len(&self) -> u64 {
+        self.bytes
+    }
+
     fn view(&self, key: ViewKey) -> Result<super::texture_upload::UploadedView, UploadError> {
         let (dimension, first, count) = match key.dimension {
             ImageView::D2(layer) => (wgpu::TextureViewDimension::D2, layer, 1),
@@ -85,6 +102,7 @@ impl Image {
     }
 }
 
+#[cfg(any(test, feature = "map-capture"))]
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub(super) struct ImageStats {
     pub allocations: usize,
@@ -94,12 +112,14 @@ pub(super) struct ImageStats {
     pub compatible_transfer_views: bool,
 }
 
+#[cfg(any(test, feature = "map-capture"))]
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub(super) struct ImageResidency {
     pub allocations: usize,
     pub estimated_bytes: u64,
 }
 
+#[cfg(any(test, feature = "map-capture"))]
 pub(super) fn lease_stats(images: &[Arc<Image>]) -> ImageResidency {
     let mut seen = std::collections::HashSet::new();
     let mut stats = ImageResidency::default();
@@ -115,6 +135,7 @@ pub(super) fn lease_stats(images: &[Arc<Image>]) -> ImageResidency {
 #[derive(Debug, Default)]
 pub(super) struct ImageCache {
     images: HashMap<ImageKey, Weak<Image>>,
+    pages: HashMap<PageImageKey, Weak<Image>>,
     compatible_views: bool,
     uploads: u64,
     hits: u64,
@@ -132,6 +153,109 @@ impl ImageCache {
         }
     }
 
+    pub(super) fn compatible_transfer_views(&self) -> bool {
+        self.compatible_views
+    }
+
+    pub(super) fn page_request_for_device(
+        device: &wgpu::Device,
+        request: &TextureFrameRequest,
+        metadata: &TextureMetadata,
+    ) -> TextureFrameRequest {
+        let mut normalized = request.clone();
+        normalized.storage = storage_for_device(
+            request.storage,
+            selected_dimensions(request, metadata),
+            super::materials::bc_upload_enabled(device),
+        );
+        normalized
+    }
+
+    pub(super) fn alias_page(
+        &mut self,
+        request: &TextureFrameRequest,
+        transfer: TextureReadTransfer,
+        image: &Arc<Image>,
+    ) {
+        self.pages
+            .insert(self.page_key(request, transfer), Arc::downgrade(image));
+    }
+
+    pub(super) fn forget_page(
+        &mut self,
+        request: &TextureFrameRequest,
+        transfer: TextureReadTransfer,
+    ) {
+        self.pages.remove(&self.page_key(request, transfer));
+    }
+
+    pub(super) fn lookup_allocation(
+        &mut self,
+        resident: &TextureResidentId,
+        transfer: TextureReadTransfer,
+    ) -> Option<Arc<Image>> {
+        let image = self
+            .images
+            .get(&ImageKey {
+                resident: resident.clone(),
+                transfer: (!self.compatible_views).then_some(transfer),
+            })
+            .and_then(Weak::upgrade)?;
+        self.hits = self.hits.saturating_add(1);
+        Some(image)
+    }
+
+    pub(super) fn allocation_id(
+        device: &wgpu::Device,
+        source: &ResidentTexture,
+    ) -> TextureResidentId {
+        let dimensions = source
+            .layers()
+            .first()
+            .and_then(|layer| layer.mips.first())
+            .map_or([0, 0], |mip| mip.dimensions);
+        let mut id = source.id().clone();
+        id.storage = storage_for_device(
+            id.storage,
+            dimensions,
+            super::materials::bc_upload_enabled(device),
+        );
+        id
+    }
+
+    pub(super) fn resident_allocation_cost(
+        device: &wgpu::Device,
+        source: &ResidentTexture,
+    ) -> Result<u64, UploadError> {
+        let storage = Self::allocation_id(device, source).storage;
+        source
+            .layers()
+            .iter()
+            .flat_map(|layer| &layer.mips)
+            .try_fold(0u64, |total, mip| {
+                total
+                    .checked_add(
+                        byte_len(storage, mip.dimensions).ok_or(UploadError::SizeOverflow)?,
+                    )
+                    .ok_or(UploadError::SizeOverflow)
+            })
+    }
+
+    pub(super) fn page_allocation_cost(
+        device: &wgpu::Device,
+        request: &TextureFrameRequest,
+        metadata: &TextureMetadata,
+    ) -> Result<u64, UploadError> {
+        let limits = device.limits();
+        page_cost(
+            request,
+            metadata,
+            &limits,
+            super::materials::bc_upload_enabled(device),
+        )
+    }
+
+    #[cfg(any(test, feature = "map-capture"))]
     pub(super) fn stats(&self) -> ImageStats {
         let mut stats = ImageStats {
             uploads: self.uploads,
@@ -148,6 +272,31 @@ impl ImageCache {
 
     pub(super) fn trim(&mut self) {
         self.images.retain(|_, image| image.strong_count() != 0);
+        self.pages.retain(|_, image| image.strong_count() != 0);
+    }
+
+    fn page_key(
+        &self,
+        request: &TextureFrameRequest,
+        transfer: TextureReadTransfer,
+    ) -> PageImageKey {
+        PageImageKey {
+            identity: request.identity(),
+            transfer: (!self.compatible_views).then_some(transfer),
+        }
+    }
+
+    pub(super) fn lookup_page(
+        &mut self,
+        request: &TextureFrameRequest,
+        transfer: TextureReadTransfer,
+    ) -> Option<Arc<Image>> {
+        let image = self
+            .pages
+            .get(&self.page_key(request, transfer))
+            .and_then(Weak::upgrade)?;
+        self.hits = self.hits.saturating_add(1);
+        Some(image)
     }
 
     fn get(
@@ -157,20 +306,13 @@ impl ImageCache {
         source: &ResidentTexture,
         transfer: TextureReadTransfer,
     ) -> Result<Arc<Image>, UploadError> {
-        let dimensions = source
+        source
             .layers()
             .first()
             .and_then(|layer| layer.mips.first())
-            .ok_or(UploadError::Empty)?
-            .dimensions;
-        let mut resident = source.id().clone();
-        resident.storage = storage_for_device(
-            resident.storage,
-            dimensions,
-            super::materials::bc_upload_enabled(device),
-        );
+            .ok_or(UploadError::Empty)?;
         let key = ImageKey {
-            resident,
+            resident: Self::allocation_id(device, source),
             transfer: (!self.compatible_views).then_some(transfer),
         };
         if let Some(image) = self.images.get(&key).and_then(Weak::upgrade) {
@@ -238,9 +380,6 @@ impl ImageUploadIssue {
             reason: error.to_string(),
         }
     }
-    pub(super) fn retry_after_retirement(&self, rejected_epoch: u64, current_epoch: u64) -> bool {
-        self.cause == ImageUploadCause::Capacity && current_epoch != rejected_epoch
-    }
 }
 
 pub(super) struct ImageLease<'a> {
@@ -251,6 +390,44 @@ pub(super) struct ImageLease<'a> {
 }
 
 impl ImageLease<'_> {
+    pub(super) fn cached_page_view(
+        &mut self,
+        request: &TextureFrameRequest,
+        transfer: TextureReadTransfer,
+        dimension: ImageView,
+    ) -> Option<Result<super::texture_upload::UploadedView, UploadError>> {
+        let image = self.cache.lookup_page(request, transfer)?;
+        Some(
+            image
+                .view(ViewKey {
+                    dimension,
+                    transfer,
+                })
+                .inspect(|_| self.images.push(Arc::clone(&image))),
+        )
+    }
+
+    pub(super) fn page_view(
+        &mut self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        page: &CachedTexturePage,
+        transfer: TextureReadTransfer,
+        dimension: ImageView,
+    ) -> Result<super::texture_upload::UploadedView, UploadError> {
+        validate_view(page.resident(), dimension)?;
+        let image = self
+            .cache
+            .get(device, &self.uploader, page.resident(), transfer)?;
+        let view = image.view(ViewKey {
+            dimension,
+            transfer,
+        })?;
+        self.cache.alias_page(page.request(), transfer, &image);
+        self.images.push(image);
+        Ok(view)
+    }
+
     pub(super) fn view(
         &mut self,
         device: &wgpu::Device,
@@ -346,6 +523,74 @@ fn format(storage: TextureStorage) -> wgpu::TextureFormat {
         TextureStorage::Bc(BcFormat::Bc2) => wgpu::TextureFormat::Bc2RgbaUnorm,
         TextureStorage::Bc(BcFormat::Bc3) => wgpu::TextureFormat::Bc3RgbaUnorm,
     }
+}
+
+fn selected_dimensions(request: &TextureFrameRequest, metadata: &TextureMetadata) -> [u32; 2] {
+    metadata.original_dimensions.map(|side| {
+        side.checked_shr(u32::from(request.first_source_mip))
+            .unwrap_or(0)
+            .max(1)
+    })
+}
+
+fn page_cost(
+    request: &TextureFrameRequest,
+    metadata: &TextureMetadata,
+    limits: &wgpu::Limits,
+    supports_bc: bool,
+) -> Result<u64, UploadError> {
+    let layers = request
+        .faces
+        .end
+        .checked_sub(request.faces.start)
+        .filter(|&count| count != 0)
+        .ok_or(UploadError::InvalidPage)?;
+    let end = request
+        .first_source_mip
+        .checked_add(request.mip_count)
+        .ok_or(UploadError::InvalidPage)?;
+    if metadata.original_dimensions.contains(&0)
+        || request.frame >= metadata.frame_count
+        || request.faces.end > metadata.face_count
+        || request.mip_count == 0
+        || end > metadata.mip_count
+        || matches!(request.storage, TextureStorage::Bc(format) if metadata.format.and_then(vformats::vtf::VtfFormat::bc) != Some(format))
+    {
+        return Err(UploadError::InvalidPage);
+    }
+    let dimensions = selected_dimensions(request, metadata);
+    if dimensions
+        .iter()
+        .any(|&side| side > limits.max_texture_dimension_2d)
+        || layers > limits.max_texture_array_layers
+    {
+        return Err(UploadError::DeviceLimit);
+    }
+    if usize::from(request.mip_count)
+        > (u32::BITS - dimensions[0].max(dimensions[1]).leading_zeros()) as usize
+    {
+        return Err(UploadError::InvalidPage);
+    }
+    chain_byte_len(
+        storage_for_device(request.storage, dimensions, supports_bc),
+        dimensions,
+        request.mip_count,
+        layers,
+    )
+    .ok_or(UploadError::SizeOverflow)
+}
+
+fn chain_byte_len(
+    storage: TextureStorage,
+    dimensions: [u32; 2],
+    mips: u8,
+    layers: u32,
+) -> Option<u64> {
+    (0..mips).try_fold(0_u64, |total, mip| {
+        let dimensions =
+            dimensions.map(|side| side.checked_shr(u32::from(mip)).unwrap_or(0).max(1));
+        total.checked_add(byte_len(storage, dimensions)?.checked_mul(u64::from(layers))?)
+    })
 }
 
 fn byte_len(storage: TextureStorage, dimensions: [u32; 2]) -> Option<u64> {
@@ -461,7 +706,7 @@ fn upload(
         }
     }
     let alternate_format = [format.add_srgb_suffix()];
-    let texture = uploader.allocate_material(&wgpu::TextureDescriptor {
+    let texture = uploader.allocate_sampled(&wgpu::TextureDescriptor {
         label: Some("file_preview.image"),
         size: wgpu::Extent3d {
             width: dimensions[0],
@@ -499,7 +744,10 @@ fn upload(
         }
     }
     drop(uploader);
+    let mut resident_id = source.id().clone();
+    resident_id.storage = storage;
     Ok(Image {
+        resident_id,
         texture,
         format,
         layers: layer_count,
@@ -513,6 +761,23 @@ fn upload(
 mod tests {
     use super::*;
     use vformats::vtf::BcFormat;
+
+    #[test]
+    fn selected_page_cost_counts_all_mips_faces_and_actual_bc_fallback() {
+        let native = chain_byte_len(TextureStorage::Bc(BcFormat::Bc1), [8, 8], 4, 6).unwrap();
+        assert_eq!(native, (32 + 8 + 8 + 8) * 6);
+        let fallback = storage_for_device(TextureStorage::Bc(BcFormat::Bc1), [8, 8], false);
+        assert_eq!(
+            chain_byte_len(fallback, [8, 8], 4, 6),
+            Some((256 + 64 + 16 + 4) * 6)
+        );
+        let non_block_base = storage_for_device(TextureStorage::Bc(BcFormat::Bc1), [6, 8], true);
+        assert_eq!(
+            chain_byte_len(non_block_base, [6, 8], 3, 1),
+            Some(192 + 48 + 8)
+        );
+        assert!(chain_byte_len(TextureStorage::Rgba8, [u32::MAX; 2], 1, u32::MAX).is_none());
+    }
 
     #[test]
     fn compressed_base_extents_require_both_device_support_and_complete_blocks() {
@@ -767,6 +1032,37 @@ mod tests {
         assert_eq!(cube_lease.len(), 1);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
+    fn wait_for_image_retirement(uploader: &super::super::texture_upload::SharedUploader) {
+        use std::time::{Duration, Instant};
+        let (completion, retirement) = {
+            let uploader = uploader.lock().unwrap();
+            let pair = (uploader.completion(), uploader.retirement_subscription());
+            drop(uploader);
+            pair
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            completion.check().expect("GPU completion worker");
+            let stats = uploader.lock().unwrap().stats();
+            let retirement = *retirement.receiver.borrow();
+            assert_eq!(retirement.failure, None);
+            if stats.sampled_image_bytes == 0
+                && stats.sampled_image_allocations == 0
+                && stats.owned_image_allocations == 0
+                && stats.owned_image_texel_bytes == 0
+                && stats.staging_bytes == 0
+                && retirement.pending == 0
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "image retirement did not drain autonomously: {stats:?}; {retirement:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     #[ignore = "requires an exclusively reserved Vulkan GPU"]
     fn gpu_material_budget_shares_views_retires_and_flushes_cancelled_leases() {
@@ -812,8 +1108,8 @@ mod tests {
             UploadPolicy {
                 aggregate_staging_bytes: 512,
                 batch_bytes: 256,
-                material_image_bytes: 168,
-                material_image_allocations: 1,
+                sampled_image_bytes: 168,
+                sampled_image_allocations: 1,
             },
         )
         .unwrap();
@@ -869,14 +1165,12 @@ mod tests {
         assert_eq!(uploader.lock().unwrap().stats().copied_bytes, copied);
         drop(first);
         drop(second);
-        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 168);
+        assert_eq!(uploader.lock().unwrap().stats().sampled_image_bytes, 168);
         drop(raw);
         drop(srgb);
         drop(shared);
-        for _ in 0..2 {
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        }
-        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 0);
+        wait_for_image_retirement(&uploader);
+        assert_eq!(uploader.lock().unwrap().stats().sampled_image_bytes, 0);
         cache.trim();
         let mut reload = cache.lease(&uploader);
         let reloaded = reload
@@ -891,9 +1185,7 @@ mod tests {
         let (reload, _) = reload.finish();
         drop(reload);
         drop(reloaded);
-        for _ in 0..2 {
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        }
+        wait_for_image_retirement(&uploader);
         assert_eq!(cache.stats().uploads, 2);
         let submissions = uploader.lock().unwrap().stats().submissions;
         let mut cancelled = cache.lease(&uploader);
@@ -908,10 +1200,8 @@ mod tests {
             .unwrap();
         drop(cancelled);
         assert!(uploader.lock().unwrap().stats().submissions > submissions);
-        for _ in 0..2 {
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        }
-        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 0);
+        wait_for_image_retirement(&uploader);
+        assert_eq!(uploader.lock().unwrap().stats().sampled_image_bytes, 0);
         let mut incompatible = ImageCache::new(None);
         let mut lease = incompatible.lease(&uploader);
         lease
@@ -937,23 +1227,21 @@ mod tests {
         ));
         let (images, _) = lease.finish();
         assert_eq!(images.len(), 1);
-        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 168);
+        assert_eq!(uploader.lock().unwrap().stats().sampled_image_bytes, 168);
         drop(images);
-        for _ in 0..2 {
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        }
+        wait_for_image_retirement(&uploader);
         assert_eq!(
-            uploader.lock().unwrap().stats().material_image_allocations,
+            uploader.lock().unwrap().stats().sampled_image_allocations,
             0
         );
     }
 }
 
 #[cfg(test)]
-mod retry_tests {
+mod classification_tests {
     use super::*;
     #[test]
-    fn only_typed_capacity_refusals_retry_after_actual_retirement() {
+    fn capacity_pressure_remains_distinct_from_invalid_resources() {
         let capacity = ImageUploadIssue::from_upload(
             "wall",
             "base",
@@ -965,11 +1253,8 @@ mod retry_tests {
         let device = ImageUploadIssue::from_upload("wall", "base", &UploadError::DeviceLimit);
         let view = ImageUploadIssue::from_upload("wall", "base", &UploadError::InvalidView);
         assert_eq!(capacity.cause, ImageUploadCause::Capacity);
-        assert!(!capacity.retry_after_retirement(4, 4));
-        assert!(capacity.retry_after_retirement(4, 5));
         for intrinsic in [device, view] {
             assert_eq!(intrinsic.cause, ImageUploadCause::Resource);
-            assert!(!intrinsic.retry_after_retirement(4, 5));
         }
     }
 }

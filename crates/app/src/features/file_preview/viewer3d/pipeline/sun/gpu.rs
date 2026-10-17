@@ -258,6 +258,19 @@ pub struct Inputs<'a> {
 }
 
 impl Frame {
+    pub(in crate::features::file_preview::viewer3d::pipeline) fn material_slots(
+        &self,
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.entries.iter().flat_map(|entry| {
+            (0..2).filter_map(|layer| {
+                (entry.layers[layer]
+                    && entry.modes[layer].draws()
+                    && entry.modes[layer] != RenderMode::Modulate)
+                    .then_some(entry.materials[layer])
+            })
+        })
+    }
+
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -476,14 +489,10 @@ impl Frame {
                     RenderMode::Opaque | RenderMode::Cutout => &resources.opaque,
                     RenderMode::Translucent => &resources.transparent,
                     RenderMode::Additive => &resources.additive,
-                    RenderMode::Modulate => continue,
+                    RenderMode::NoDraw | RenderMode::Modulate => continue,
                 });
                 pass.set_bind_group(0, &entry.draw_group, &[]);
-                pass.set_bind_group(
-                    1,
-                    &upload.assets.material_bind_groups[entry.materials[layer]],
-                    &[],
-                );
+                pass.set_bind_group(1, &upload.bindings.materials[entry.materials[layer]], &[]);
                 pass.draw(0..6, layer as u32..layer as u32 + 1);
             }
         }

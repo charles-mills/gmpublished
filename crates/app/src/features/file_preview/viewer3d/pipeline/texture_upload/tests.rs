@@ -257,7 +257,7 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
         let texture = uploader
             .lock()
             .unwrap()
-            .allocate_material(&wgpu::TextureDescriptor {
+            .allocate_sampled(&wgpu::TextureDescriptor {
                 label: Some("bounded fallback fixture"),
                 size: wgpu::Extent3d {
                     width: 8,
@@ -445,7 +445,7 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
                 .sum::<u64>()
                 * 12
         );
-        assert_eq!(stats.material_image_bytes, stats.owned_image_texel_bytes);
+        assert_eq!(stats.sampled_image_bytes, stats.owned_image_texel_bytes);
         drop(texture);
         assert_eq!(uploader.lock().unwrap().stats().owned_image_allocations, 1);
         drop(_array);
@@ -453,7 +453,7 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
         device.poll(wgpu::PollType::Poll).unwrap();
         let retired = uploader.lock().unwrap().stats();
         assert_eq!(retired.owned_image_allocations, 0);
-        assert_eq!(retired.material_image_bytes, 0);
+        assert_eq!(retired.sampled_image_bytes, 0);
     }
 }
 
@@ -608,8 +608,8 @@ fn image_cost_counts_actual_storage_all_mips_and_layers() {
 #[test]
 fn material_admission_is_transactional_and_releases_only_owned_allocations() {
     let policy = UploadPolicy {
-        material_image_bytes: 100,
-        material_image_allocations: 2,
+        sampled_image_bytes: 100,
+        sampled_image_allocations: 2,
         ..Default::default()
     };
     let mut admission = ImageAdmission::default();
@@ -634,4 +634,99 @@ fn material_admission_is_transactional_and_releases_only_owned_allocations() {
     admission.release(60);
     assert_eq!((admission.bytes, admission.allocations), (0, 0));
     assert_eq!((admission.peak_bytes, admission.peak_allocations), (100, 2));
+}
+
+#[test]
+#[ignore = "requires an exclusively reserved Vulkan GPU"]
+fn gpu_final_close_drains_submission_staging_and_image_retirement_without_another_render() {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    let adapter = iced::futures::executor::block_on(
+        instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .unwrap();
+    let (device, queue) = iced::futures::executor::block_on(
+        adapter.request_device(&wgpu::DeviceDescriptor::default()),
+    )
+    .unwrap();
+    let uploader = TextureUploader::shared(
+        &device,
+        &queue,
+        UploadPolicy {
+            aggregate_staging_bytes: 512,
+            batch_bytes: 256,
+            sampled_image_bytes: 64,
+            sampled_image_allocations: 1,
+        },
+    )
+    .unwrap();
+    let completion = uploader.lock().unwrap().completion();
+    let shared = super::super::completion::CompletionDriver::shared(&device).unwrap();
+    assert!(
+        Arc::ptr_eq(&completion, &shared),
+        "one completion driver per actual device"
+    );
+    drop(shared);
+    let driver_weak = Arc::downgrade(&completion);
+    let texture = uploader
+        .lock()
+        .unwrap()
+        .allocate_sampled(&wgpu::TextureDescriptor {
+            label: Some("idle retirement fixture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+        .unwrap();
+    let ledger = Arc::clone(&uploader.lock().unwrap().ledger);
+    uploader
+        .lock()
+        .unwrap()
+        .write(
+            &texture,
+            0,
+            wgpu::Origin3d::ZERO,
+            Input {
+                storage: TextureStorage::Rgba8,
+                dimensions: [1, 1],
+                bytes: &[1, 2, 3, 255],
+            },
+        )
+        .unwrap();
+    uploader.lock().unwrap().flush();
+    queue.submit([]);
+    super::super::residency_demand::SubmissionPins::new(vec![Arc::new(texture)])
+        .submitted(&queue, &completion);
+    drop(uploader);
+    drop(completion);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let usage = ledger.sampled_images.lock().unwrap();
+        let released = usage.bytes == 0 && usage.allocations == 0;
+        drop(usage);
+        if released
+            && ledger.owned_images.load(Ordering::Acquire) == 0
+            && ledger.staging.load(Ordering::Acquire) == 0
+            && ledger.retirements.state().pending == 0
+            && driver_weak.strong_count() == 0
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "idle completion driver did not release final-close resources"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(ledger.retirements.state().failure, None);
 }

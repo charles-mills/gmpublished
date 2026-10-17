@@ -18,10 +18,17 @@ pub struct Frame {
     texture: std::sync::Arc<Texture>,
     uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
+    parameters: Uniform,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Snapshot {
+    texture: std::sync::Arc<Texture>,
+    parameters: Uniform,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniform {
     bump_s: [f32; 4],
     bump_t: [f32; 4],
@@ -131,36 +138,12 @@ impl Resources {
     }
 }
 
-pub fn prepare(
-    slot: &mut Option<Frame>,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    resources: &RenderResources,
-    upload: &ViewerScene,
-    primitive: &super::ModelPrimitive,
-) {
-    let eye = super::Vec3::from([
-        primitive.uniforms.camera_position[0],
-        primitive.uniforms.camera_position[1],
-        primitive.uniforms.camera_position[2],
-    ]);
-    let overlay = primitive
-        .preview
-        .map()
-        .and_then(|map| map.immersion_material(eye))
-        .and_then(|water| water.underwater_overlay.as_deref());
-    let Some(effect) = overlay else {
-        *slot = None;
-        return;
-    };
-    let Some(normal) = upload.assets.screen_refraction_normals.get(&effect.name) else {
-        *slot = None;
-        return;
-    };
-    if slot
-        .as_ref()
-        .is_none_or(|frame| !std::sync::Arc::ptr_eq(&frame.texture, normal))
-    {
+impl Frame {
+    fn new(
+        device: &wgpu::Device,
+        resources: &RenderResources,
+        normal: &std::sync::Arc<Texture>,
+    ) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("file_preview.underwater.overlay_uniform"),
             size: std::mem::size_of::<Uniform>() as u64,
@@ -190,15 +173,76 @@ pub fn prepare(
                 },
             ],
         });
-        *slot = Some(Frame {
+        Self {
             texture: std::sync::Arc::clone(normal),
             uniform,
             bind_group,
-        });
+            parameters: Uniform::default(),
+        }
+    }
+    fn write(&mut self, queue: &wgpu::Queue, parameters: Uniform) {
+        self.parameters = parameters;
+        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&parameters));
+    }
+    pub(super) fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            texture: std::sync::Arc::clone(&self.texture),
+            parameters: self.parameters,
+        }
+    }
+}
+impl Snapshot {
+    pub(super) fn matches(&self, frame: &Frame) -> bool {
+        std::sync::Arc::ptr_eq(&self.texture, &frame.texture) && self.parameters == frame.parameters
+    }
+    pub(super) fn freeze(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &RenderResources,
+    ) -> Frame {
+        let mut frame = Frame::new(device, resources, &self.texture);
+        frame.write(queue, self.parameters);
+        frame
+    }
+}
+
+pub fn prepare(
+    slot: &mut Option<Frame>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    resources: &RenderResources,
+    upload: &ViewerScene,
+    eye: super::Vec3,
+    water_time: f32,
+) {
+    let overlay = upload
+        .assets
+        .map()
+        .and_then(|map| map.immersion_material(eye))
+        .and_then(|water| water.underwater_overlay.as_deref());
+    let Some(effect) = overlay else {
+        *slot = None;
+        return;
+    };
+    let Some(normal) = upload
+        .bindings
+        .background
+        .screen_refraction_normals
+        .get(&effect.name)
+    else {
+        *slot = None;
+        return;
+    };
+    if slot
+        .as_ref()
+        .is_none_or(|frame| !std::sync::Arc::ptr_eq(&frame.texture, normal))
+    {
+        *slot = Some(Frame::new(device, resources, normal));
     }
     let mut bump = effect.bump_transform;
     for (row, scroll) in bump.iter_mut().zip(effect.proxy_scroll) {
-        row[3] += scroll * primitive.uniforms.water_time_sky_tint[0];
+        row[3] += scroll * water_time;
     }
     let data = Uniform {
         bump_s: bump[0],
@@ -210,20 +254,20 @@ pub fn prepare(
             effect.refract_amount,
         ],
         params: [
-            effect
-                .bump_frame
-                .floor()
-                .rem_euclid(effect.normal_map.frame_count().max(1) as f32),
+            if effect.normal_map.on_demand().is_some() {
+                0.0
+            } else {
+                effect
+                    .bump_frame
+                    .floor()
+                    .rem_euclid(effect.normal_map.frame_count().max(1) as f32)
+            },
             f32::from(effect.blur),
             0.0,
             0.0,
         ],
     };
-    queue.write_buffer(
-        &slot.as_ref().unwrap().uniform,
-        0,
-        bytemuck::bytes_of(&data),
-    );
+    slot.as_mut().unwrap().write(queue, data);
 }
 
 #[cfg(test)]

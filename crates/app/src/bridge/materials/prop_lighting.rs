@@ -10,7 +10,7 @@ impl MaterialResolver {
             format!("sp_{index}.vhv")
         };
         let path = ContentPath::new(&name)?;
-        let source = self.config.pakfile.as_deref()?;
+        let source = self.config.pakfile.as_ref()?;
         Self::tier_bytes(&SourceRef::Pakfile(source), &path)
     }
 

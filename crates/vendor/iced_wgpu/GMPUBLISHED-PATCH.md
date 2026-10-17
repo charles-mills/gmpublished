@@ -18,3 +18,6 @@ linear/sRGB image views only on adapters supporting `VIEW_FORMATS`.
 
 Viewer shaders select primitive clipping from the enabled device feature. Devices
 without clip distances retain fragment clipping.
+
+Both device initializers request three bind groups for independent viewer,
+material and lightmap bindings. This remains within WGPU default limits.

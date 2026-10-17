@@ -13,6 +13,17 @@ pub(super) fn resolve_texture_jobs<T: Sync + Send, R: Send>(
     resolver: &MaterialResolver,
     resolve: impl Fn(&T, &MaterialResolver) -> R + Sync,
 ) -> Vec<R> {
+    if resolver.texture_loading() == crate::bridge::materials::TextureLoading::OnDemand {
+        return parallel_collect(jobs, |job| {
+            resolver
+                .check_cancelled()
+                .is_ok()
+                .then(|| resolve(job, resolver))
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+    }
     let mut requests = crate::bridge::materials::TextureRequestPlan::default();
     for job in jobs {
         if resolver.check_cancelled().is_err() {
@@ -391,6 +402,13 @@ pub(super) fn push_map_material_slot(
     let resolved = resolution.material();
     let texture = resolved.and_then(|material| material.texture.as_ref().map(Arc::clone));
     let texture2 = resolved.and_then(|material| material.texture2.as_ref().map(Arc::clone));
+    let render_mode = resolved.map_or(render_mode, |material| {
+        if material.render_mode.draws() {
+            render_mode
+        } else {
+            material.render_mode
+        }
+    });
     table.push_unindexed(MaterialSlot {
         resolution: resolution.outcome(),
         canonical_name: resolution.canonical_name().map(str::to_owned),
@@ -419,11 +437,12 @@ pub(super) fn overlay_primitive(overlay: &MapOverlay, material_index: usize) -> 
                     uv: vertex.uv,
                     lightmap_uv: surface.lightmap_uv,
                     lightmap_bump_step: surface.lightmap_bump_step,
+                    lightmap_page: surface.lightmap_page.map_or(0, |page| page.0 + 1),
                     color: super::Vec3::splat(1.0),
                     blend_alpha: 0.0,
                     opacity: 1.0,
                     illumination: super::Vec3::splat(1.0),
-                    lighting_mode: (if surface.has_lightmap {
+                    lighting_mode: (if surface.lightmap_page.is_some() {
                         vertex_lighting::RECEIVER_LIGHTMAP
                     } else {
                         vertex_lighting::RECEIVER_CONSTANT
@@ -530,6 +549,11 @@ pub(super) fn resolve_sun_materials(
                     )
                 });
                 if table
+                    .get(index)
+                    .is_some_and(|material| !material.render_mode.draws())
+                {
+                    None
+                } else if table
                     .get(index)
                     .is_some_and(|material| material.render_mode == RenderMode::Modulate)
                 {

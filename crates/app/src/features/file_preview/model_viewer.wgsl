@@ -3,13 +3,13 @@
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(1) var base_texture2: texture_2d<f32>;
-@group(0) @binding(5) var lightmap_texture: texture_2d<f32>;
+@group(2) @binding(0) var lightmap_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
 @group(1) @binding(21) var base2_sampler:sampler;
 @group(1) @binding(22) var normal_sampler:sampler;
 @group(1) @binding(23) var normal2_sampler:sampler;
 @group(1) @binding(28) var model_exponent_sampler:sampler;
-@group(1) @binding(4) var lightmap_sampler: sampler;
+@group(2) @binding(2) var lightmap_sampler: sampler;
 @group(1) @binding(5) var<uniform> material: Material;
 @group(1) @binding(6) var normal_texture: texture_2d_array<f32>;
 @group(1) @binding(7) var normal_texture2: texture_2d_array<f32>;
@@ -64,7 +64,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) lightmap_uv: vec2<f32>,
+    @location(2) @interpolate(perspective, centroid) lightmap_uv: vec2<f32>,
     @location(3) color: vec3<f32>,
     @location(4) blend_alpha: f32,
     @location(5) world_position_clip: vec4<f32>,

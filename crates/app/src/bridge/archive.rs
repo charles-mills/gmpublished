@@ -172,6 +172,15 @@ impl PreviewArchiveSource {
         matches!(self, Self::Gma(_))
     }
 
+    pub(crate) fn folder_entry_path(&self, path: &str) -> Option<&std::path::Path> {
+        let Self::Folder(folder) = self else {
+            return None;
+        };
+        folder
+            .entries
+            .get(path)
+            .map(|entry| entry.disk_path.as_path())
+    }
     pub(crate) fn folder_entry_file(
         &self,
         path: &str,

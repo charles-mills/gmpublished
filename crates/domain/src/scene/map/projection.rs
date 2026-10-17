@@ -853,7 +853,9 @@ fn affine_surface(triangle: &[MapVertex; 3], [u, v]: [f32; 2]) -> MapVertex {
                 c.lightmap_uv[axis],
             )
         }),
-        has_lightmap: a.has_lightmap && b.has_lightmap && c.has_lightmap,
+        lightmap_page: a
+            .lightmap_page
+            .filter(|page| b.lightmap_page == Some(*page) && c.lightmap_page == Some(*page)),
         lightmap_bump_step: a.lightmap_bump_step,
         blend_alpha: scalar(a.blend_alpha, b.blend_alpha, c.blend_alpha),
         opacity: scalar(a.opacity, b.opacity, c.opacity),
@@ -871,7 +873,9 @@ pub(super) fn interpolate_surface(a: MapVertex, b: MapVertex, t: f32) -> MapVert
         tex_t: a.tex_t + (b.tex_t - a.tex_t) * t,
         texture_size: a.texture_size,
         lightmap_uv: interpolate_pair(a.lightmap_uv, b.lightmap_uv, t),
-        has_lightmap: a.has_lightmap && b.has_lightmap,
+        lightmap_page: a
+            .lightmap_page
+            .filter(|page| b.lightmap_page == Some(*page)),
         lightmap_bump_step: a.lightmap_bump_step,
         blend_alpha: a.blend_alpha + (b.blend_alpha - a.blend_alpha) * t,
         opacity: a.opacity + (b.opacity - a.opacity) * t,

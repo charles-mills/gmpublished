@@ -450,6 +450,78 @@ impl<'a> ZipReader<'a> {
         }
     }
 
+    /// Reads only the selected uncompressed bytes, retaining bounded decoder state.
+    /// Cancellation is checked between decoder chunks; an interrupted read returns Decode.
+    pub fn entry_range_with_decoder_limit(
+        &self,
+        entry: &ZipEntry,
+        range: std::ops::Range<u64>,
+        decoder_limit: u64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<u8>, ZipError> {
+        if range.start > range.end || range.end > entry.uncompressed_size {
+            return Err(ZipError::Corrupt);
+        }
+        let required = self.decoder_working_bytes(entry)?;
+        if required > decoder_limit {
+            return Err(ZipError::DecoderTooLarge {
+                required,
+                max: decoder_limit,
+            });
+        }
+        if cancelled() {
+            return Err(ZipError::Decode);
+        }
+        let start = usize::try_from(range.start).map_err(|_| ZipError::Decode)?;
+        let end = usize::try_from(range.end).map_err(|_| ZipError::Decode)?;
+        let data = self.entry_data(entry)?;
+        match entry.method {
+            METHOD_STORE => {
+                if entry.uncompressed_size != data.len() as u64 {
+                    return Err(ZipError::Corrupt);
+                }
+                Ok(data[start..end].to_vec())
+            }
+            METHOD_DEFLATE => {
+                inflate::range(data, start..end, cancelled).map_err(|_| ZipError::Decode)
+            }
+            #[cfg(feature = "lzma")]
+            METHOD_LZMA => {
+                use std::io::Read as _;
+                let (props, dict_size, stream) = zip_lzma_properties(data)?;
+                let mut reader = lzma_rust2::LzmaReader::new_with_props(
+                    stream,
+                    entry.uncompressed_size,
+                    props,
+                    dict_size,
+                    None,
+                )
+                .map_err(|_| ZipError::Decode)?;
+                let mut skipped = 0usize;
+                let mut discard = [0; 8192];
+                while skipped < start {
+                    if cancelled() {
+                        return Err(ZipError::Decode);
+                    }
+                    let count = (start - skipped).min(discard.len());
+                    reader
+                        .read_exact(&mut discard[..count])
+                        .map_err(|_| ZipError::Decode)?;
+                    skipped += count;
+                }
+                let mut output = vec![0; end - start];
+                for chunk in output.chunks_mut(8192) {
+                    if cancelled() {
+                        return Err(ZipError::Decode);
+                    }
+                    reader.read_exact(chunk).map_err(|_| ZipError::Decode)?;
+                }
+                Ok(output)
+            }
+            method => Err(ZipError::UnsupportedCompression { method }),
+        }
+    }
+
     /// Extracts one complete entry within the uncompressed byte limit.
     pub fn entry_bytes(
         &self,

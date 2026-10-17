@@ -152,8 +152,10 @@ pub(in crate::features::file_preview::viewer3d) struct Cache {
 impl Default for Cache {
     fn default() -> Self {
         #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        let enabled =
-            !matches!(std::env::var("GMPUBLISHED_SEMANTIC_WORLD_CACHE").as_deref(), Ok("0"));
+        let enabled = !matches!(
+            std::env::var("GMPUBLISHED_SEMANTIC_WORLD_CACHE").as_deref(),
+            Ok("0")
+        );
         #[cfg(not(any(feature = "gui-benchmark", feature = "map-capture")))]
         let enabled = true;
         Self::new(enabled)

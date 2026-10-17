@@ -10,10 +10,17 @@ pub(super) struct TexturePreparationIssue {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("scene preparation rejected {} texture and {} buffer resources", .issues.len(), .buffer_issues.len())]
+#[error("scene preparation rejected {} texture, {} buffer and {} lightmap resources", .issues.len(), .buffer_issues.len(), .lightmap_issues.len())]
 pub(super) struct SceneUploadError {
     pub issues: Vec<TexturePreparationIssue>,
     pub buffer_issues: Vec<BufferPreparationIssue>,
+    lightmap_issues: Vec<LightmapPreparationIssue>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct LightmapPreparationIssue {
+    resource: BufferResource,
+    reason: super::lightmap_ranges::RangeError,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -68,6 +75,9 @@ impl SceneUploadError {
         for issue in &self.buffer_issues {
             log::error!("scene buffer preparation: {issue:?}");
         }
+        for issue in &self.lightmap_issues {
+            log::error!("scene lightmap preparation: {issue:?}");
+        }
     }
 
     #[cfg(feature = "map-capture")]
@@ -75,6 +85,7 @@ impl SceneUploadError {
         serde_json::json!({
             "textures": self.issues.iter().map(|issue| serde_json::json!({"material":issue.material,"role":issue.role,"outcome":format!("{:?}", issue.outcome)})).collect::<Vec<_>>(),
             "buffers": self.buffer_issues,
+            "lightmaps": self.lightmap_issues,
         })
     }
 }
@@ -82,6 +93,7 @@ impl SceneUploadError {
 struct Validator {
     issues: Vec<TexturePreparationIssue>,
     buffer_issues: Vec<BufferPreparationIssue>,
+    lightmap_issues: Vec<LightmapPreparationIssue>,
 }
 
 impl Validator {
@@ -174,6 +186,12 @@ impl Validator {
         if mesh.indices.is_empty() {
             return;
         }
+        if let Err(error) = super::lightmap_ranges::Ranges::new(&mesh.vertices, &mesh.indices) {
+            self.lightmap_issues.push(LightmapPreparationIssue {
+                resource,
+                reason: error,
+            });
+        }
         self.buffer(
             limits,
             resource,
@@ -225,6 +243,14 @@ impl Validator {
             }
             for (skybox, overlays) in [(false, &map.overlays), (true, &map.map_skybox_overlays)] {
                 for (index, overlay) in overlays.iter().enumerate() {
+                    if let Err(reason) =
+                        super::lightmap_ranges::Ranges::new(&overlay.vertices, &overlay.indices)
+                    {
+                        self.lightmap_issues.push(LightmapPreparationIssue {
+                            resource: BufferResource::SurfaceMark { skybox, index },
+                            reason,
+                        });
+                    }
                     self.buffer(
                         limits,
                         BufferResource::SurfaceMark { skybox, index },
@@ -329,7 +355,7 @@ impl Validator {
             self.check(
                 material,
                 role,
-                frames.resident().is_some(),
+                frames.resident().is_some() || frames.on_demand().is_some(),
                 frames.load_outcome(),
             );
         }
@@ -343,9 +369,13 @@ pub(super) fn validate(
     let mut validator = Validator {
         issues: Vec::new(),
         buffer_issues: Vec::new(),
+        lightmap_issues: Vec::new(),
     };
     validator.geometry(scene, limits);
     for slot in &scene.render_scene().materials {
+        if !slot.render_mode.draws() {
+            continue;
+        }
         let name = &slot.name;
         for (role, texture) in [
             ("base", slot.texture.as_deref()),
@@ -355,7 +385,7 @@ pub(super) fn validate(
                 validator.check(
                     name,
                     role,
-                    texture.resident().is_some(),
+                    texture.resident().is_some() || texture.on_demand().is_some(),
                     texture.load_outcome(),
                 );
             }
@@ -394,7 +424,7 @@ pub(super) fn validate(
                     validator.check(
                         name,
                         "environment",
-                        cube.resident().is_some(),
+                        cube.resident().is_some() || cube.on_demand().is_some(),
                         cube.load_outcome(),
                     );
                 }
@@ -432,12 +462,18 @@ pub(super) fn validate(
     }
     if let Some(sky) = scene.map().and_then(|map| map.skybox.as_ref()) {
         for (index, texture) in sky.faces.iter().enumerate() {
+            if sky.materials[index]
+                .as_ref()
+                .is_some_and(|material| material.no_draw)
+            {
+                continue;
+            }
             let name = format!("sky_face_{index}");
             if let Some(texture) = texture {
                 validator.check(
                     &name,
                     "sky",
-                    texture.resident().is_some(),
+                    texture.resident().is_some() || texture.on_demand().is_some(),
                     texture.load_outcome(),
                 );
             }
@@ -451,12 +487,16 @@ pub(super) fn validate(
             );
         }
     }
-    if validator.issues.is_empty() && validator.buffer_issues.is_empty() {
+    if validator.issues.is_empty()
+        && validator.buffer_issues.is_empty()
+        && validator.lightmap_issues.is_empty()
+    {
         Ok(())
     } else {
         Err(SceneUploadError {
             issues: validator.issues,
             buffer_issues: validator.buffer_issues,
+            lightmap_issues: validator.lightmap_issues,
         })
     }
 }
@@ -519,10 +559,34 @@ mod tests {
             .unwrap();
         assert!(validate(&scene(material), &wgpu::Limits::default()).is_ok());
     }
+
+    #[test]
+    fn no_draw_does_not_admit_retained_surface_pages_for_gpu_residency() {
+        let resolver = MaterialResolver::prop_lighting_fixture(
+            vec![
+                (
+                    "materials/test/hidden.vmt",
+                    br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
+                ),
+                (
+                    "materials/test/image.vtf",
+                    fixture_vtf_bytes(1, 1, vformats::vtf::VtfFormat::Rgba8888, &[&[1, 2, 3, 255]]),
+                ),
+            ],
+            Vec::new(),
+        );
+        let (planned, _) = resolver
+            .plan_texture_requests(|resolver| resolver.resolve_with_base2(&[], "test/hidden"));
+        let mut material = planned.into_material().unwrap();
+        assert!(validate(&scene(material.clone()), &wgpu::Limits::default()).is_err());
+        material.render_mode = crate::bridge::materials::RenderMode::NoDraw;
+        assert!(validate(&scene(material), &wgpu::Limits::default()).is_ok());
+    }
     fn validator() -> Validator {
         Validator {
             issues: Vec::new(),
             buffer_issues: Vec::new(),
+            lightmap_issues: Vec::new(),
         }
     }
 

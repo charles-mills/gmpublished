@@ -211,6 +211,7 @@ mod tests {
             uv: [0.0; 2],
             lightmap_uv: [0.0; 2],
             lightmap_bump_step: 0.0,
+            lightmap_page: 0,
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
             opacity: 1.0,

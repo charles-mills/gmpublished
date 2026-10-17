@@ -364,7 +364,7 @@ fn prepare_partition_draw_plan(
             materials: DrawPlanMaterials {
                 render_modes: upload.assets.material_render_modes.as_slice(),
                 planar_materials: upload.assets.material_planar_materials.as_slice(),
-                material_count: upload.assets.material_bind_groups.len(),
+                material_count: upload.assets.material_count(),
             },
             selection: DrawPlanSelection {
                 skin_remap,
@@ -722,10 +722,17 @@ fn receiver_encounters(
         )
     });
     let mut door_eyes = vec![None; map.doors.len()];
+    let receiver_draws = |receiver: &super::pipeline::UploadedReceiver| {
+        upload
+            .assets
+            .material_render_modes
+            .get(map.surface_receivers[receiver.source_index].material_index)
+            .is_none_or(|mode| mode.draws())
+    };
     let mut accepts_receiver = |receiver: &super::pipeline::UploadedReceiver| {
         let source = &map.surface_receivers[receiver.source_index];
         let mesh = &upload.meshes[receiver.mesh_index];
-        if !partition.accepts(mesh.map_skybox) {
+        if !receiver_draws(receiver) || !partition.accepts(mesh.map_skybox) {
             return false;
         }
         if visibility.is_some_and(|plan| {
@@ -760,7 +767,8 @@ fn receiver_encounters(
     if let Some(leaves) = &leaves {
         for face in leaves.iter().flat_map(|group| &group.faces) {
             for receiver in index.get(face).into_iter().flatten() {
-                if partition.accepts(upload.meshes[receiver.mesh_index].map_skybox)
+                if receiver_draws(receiver)
+                    && partition.accepts(upload.meshes[receiver.mesh_index].map_skybox)
                     && map.surface_receivers[receiver.source_index].owner.id()
                         == gmpublished_domain::scene::map::MapSurfaceOwnerId::World
                 {
@@ -894,6 +902,9 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             .get(material_slot)
             .copied()
             .unwrap_or(RenderMode::Opaque);
+        if !render_mode.draws() {
+            continue;
+        }
         let item = DrawItem {
             mesh_index: mesh.mesh_index,
             material_slot,
@@ -908,6 +919,7 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             planar.push((item, mesh.centroid.distance_squared(Vec3::from(camera))));
         } else {
             match render_mode {
+                RenderMode::NoDraw => unreachable!("hidden material was excluded"),
                 RenderMode::Opaque | RenderMode::Cutout => plan.opaque.push(item),
                 RenderMode::Translucent | RenderMode::Modulate => {
                     translucent.push((item, mesh.centroid.distance_squared(Vec3::from(camera))));
@@ -919,7 +931,17 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
     let overlays = overlays
         .into_iter()
         .filter(|overlay| {
-            context.partition.accepts(overlay.map_skybox)
+            context
+                .materials
+                .render_modes
+                .get(overlay.material_index)
+                .is_none_or(|mode| mode.draws())
+                && context
+                    .materials
+                    .render_modes
+                    .get(overlay.receiver_material_index)
+                    .is_none_or(|mode| mode.draws())
+                && context.partition.accepts(overlay.map_skybox)
                 && if overlay.owner == gmpublished_domain::scene::map::MapSurfaceOwnerId::World
                     && let Some(mesh) = overlay.receiver_mesh_index
                     && let Some(world) = context.world_visibility
@@ -971,6 +993,9 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             .get(material_slot)
             .copied()
             .unwrap_or(RenderMode::Opaque);
+        if !render_mode.draws() {
+            continue;
+        }
         let item = OverlayDrawItem {
             blend: render_mode,
             receiver_mesh_index: overlay.receiver_mesh_index,
@@ -1352,6 +1377,128 @@ mod tests {
             material_index: 0,
             map_skybox,
         }
+    }
+
+    #[test]
+    fn no_draw_excludes_meshes_planars_and_marks_in_world_and_sky_views() {
+        let meshes = (0..6)
+            .map(|index| MeshPlanSource {
+                material_index: index % 3,
+                door_index: (index == 1).then_some(0),
+                ..mesh_plan_source(index, index >= 3, Vec3::new(index as f32, 0.0, 0.0))
+            })
+            .collect::<Vec<_>>();
+        let overlays = (0..6)
+            .map(|index| OverlayPlanSource {
+                material_index: usize::from(index % 3 == 1),
+                receiver_material_index: usize::from(index % 3 == 2),
+                ..overlay_plan_source(index, index >= 3, Vec3::ZERO)
+            })
+            .collect::<Vec<_>>();
+        let modes = [
+            RenderMode::Opaque,
+            RenderMode::NoDraw,
+            RenderMode::Translucent,
+        ];
+        for camera in [
+            [0.0; 4],
+            [10.0, -20.0, 30.0, 1.0],
+            [-100.0, 20.0, -30.0, 1.0],
+        ] {
+            let plans = prepare_draw_plans_from_sources(
+                DrawPlanSourceSlices {
+                    meshes: &meshes,
+                    overlays: &overlays,
+                    materials: DrawPlanMaterials {
+                        render_modes: &modes,
+                        planar_materials: &[false, true, false],
+                        material_count: 3,
+                    },
+                },
+                DrawPlanRequest {
+                    world_view: None,
+                    skybox_view: None,
+                    content_id: 1,
+                    selection: DrawPlanSelection {
+                        skin_remap: &[],
+                        bodygroup_choices: &[],
+                    },
+                    camera_position: camera,
+                    map_skybox_visible: true,
+                    map_skybox_content_present: true,
+                    map_skybox_camera_position: Some(camera),
+                    visibility_plan: None,
+                },
+            );
+            for (plan, offset) in [
+                (&*plans.world, 0),
+                (plans.map_skybox.as_deref().unwrap(), 3),
+            ] {
+                assert_eq!(
+                    plan.opaque
+                        .iter()
+                        .map(|item| item.mesh_index)
+                        .collect::<Vec<_>>(),
+                    [offset]
+                );
+                assert_eq!(
+                    plan.translucent
+                        .iter()
+                        .map(|item| item.mesh_index)
+                        .collect::<Vec<_>>(),
+                    [offset + 2]
+                );
+                assert!(plan.planar.is_empty());
+                assert_eq!(
+                    plan.surface_marks
+                        .iter()
+                        .map(|mark| mark.overlay_index)
+                        .collect::<Vec<_>>(),
+                    [offset]
+                );
+                assert!(plan.receiver_marks.is_empty());
+            }
+        }
+        assert_eq!((meshes.len(), overlays.len()), (6, 6));
+    }
+
+    #[test]
+    fn skin_remap_selects_no_draw_after_material_lookup() {
+        let meshes = [
+            mesh_plan_source(0, false, Vec3::ZERO),
+            MeshPlanSource {
+                material_index: 1,
+                ..mesh_plan_source(1, false, Vec3::ZERO)
+            },
+        ];
+        let plan = prepare_partition_draw_plan_from_sources(
+            meshes,
+            [],
+            PartitionPlanContext {
+                materials: DrawPlanMaterials {
+                    render_modes: &[RenderMode::Opaque, RenderMode::NoDraw],
+                    planar_materials: &[],
+                    material_count: 2,
+                },
+                selection: DrawPlanSelection {
+                    skin_remap: &[1, 0],
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0; 4],
+                partition: PartitionFilter::World,
+                visibility_plan: None,
+                receiver_encounters: &[],
+                world_visibility: None,
+            },
+        );
+        assert_eq!(
+            plan.opaque,
+            [DrawItem {
+                mesh_index: 1,
+                material_slot: 0
+            }]
+        );
+        assert_eq!(meshes.len(), 2);
     }
 
     #[test]

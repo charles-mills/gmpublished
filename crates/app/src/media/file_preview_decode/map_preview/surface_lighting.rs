@@ -50,6 +50,7 @@ impl ReceiverContract {
             };
             vertex.illumination = illumination;
             vertex.lightmap_bump_step = 0.0;
+            vertex.lightmap_page = 0;
             if self.missing_samples
                 && !self.white_page
                 && self.requirement == SourceLightmapRequirement::Bumped
@@ -247,6 +248,7 @@ mod tests {
         vertex.illumination = Vec3::splat(0.3);
         vertex.lightmap_uv = [0.25, 0.75];
         vertex.lightmap_bump_step = step;
+        vertex.lightmap_page = u32::from(sampled);
         vertex
     }
 
@@ -417,6 +419,7 @@ mod tests {
                 };
                 assert_eq!(vertex.lighting_mode, expected_mode);
                 assert_eq!(vertex.lightmap_bump_step, expected_step);
+                assert_eq!(vertex.lightmap_page, 1);
                 assert_eq!(vertex.illumination, Vec3::splat(0.3));
                 assert_eq!(vertex.lightmap_uv, [0.25, 0.75]);
             }
@@ -424,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn white_pages_override_atlas_samples_and_effective_material_requirement() {
+    fn white_pages_override_baked_samples_and_effective_material_requirement() {
         for requirement in [
             SourceLightmapRequirement::None,
             SourceLightmapRequirement::Lightmapped,
@@ -440,6 +443,7 @@ mod tests {
                 .bind(&mut vertex, mark);
                 assert_eq!(vertex.illumination, Vec3::splat(1.0));
                 assert_eq!(vertex.lightmap_bump_step, 0.0);
+                assert_eq!(vertex.lightmap_page, 0);
                 assert_eq!(
                     vertex.lighting_mode,
                     if mark {
@@ -453,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn constant_bindings_distinguish_atlas_fallback_and_unlightmapped_receivers() {
+    fn constant_bindings_distinguish_missing_samples_and_unlightmapped_receivers() {
         for requirement in [
             SourceLightmapRequirement::Lightmapped,
             SourceLightmapRequirement::Bumped,
@@ -517,6 +521,7 @@ mod tests {
                         vertex_lighting::DIRECTIONAL_LIGHTMAP_BLACK
                     };
                 assert_eq!(vertex.lighting_mode, expected);
+                assert_eq!(vertex.lightmap_page, 0);
                 assert_eq!(vertex.illumination, Vec3::splat(1.0));
                 assert_eq!(vertex.lightmap_bump_step, 0.0);
             }
@@ -590,7 +595,7 @@ mod tests {
             tex_t: 0.0,
             texture_size: [64; 2],
             lightmap_uv: [0.25, 0.75],
-            has_lightmap: true,
+            lightmap_page: Some(gmpublished_domain::scene::map::LightmapPageId(0)),
             lightmap_bump_step: 0.125,
             blend_alpha: 0.0,
             opacity: 1.0,

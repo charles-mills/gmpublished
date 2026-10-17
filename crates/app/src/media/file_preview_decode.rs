@@ -583,19 +583,21 @@ fn resolve_particle_material(resolver: &MaterialResolver, name: String) -> Parti
     let resolved = resolver.resolve_primary(&[], &name);
     let resolution = resolved.outcome();
     let material = resolved.material();
-    let (sheet, sheet_error) = material.map_or((None, None), |_| {
-        match resolver.resolve_particle_sprite_sheet(&name) {
-            Ok(sheet) => (sheet, None),
-            Err(error) => {
-                log::debug!("particle sheet {name}: {error}");
-                (None, Some(error))
+    let (sheet, sheet_error) = material
+        .filter(|material| material.render_mode.draws())
+        .map_or((None, None), |_| {
+            match resolver.resolve_particle_sprite_sheet(&name) {
+                Ok(sheet) => (sheet, None),
+                Err(error) => {
+                    log::debug!("particle sheet {name}: {error}");
+                    (None, Some(error))
+                }
             }
-        }
-    });
+        });
     ParticleMaterialSlot {
         name,
         resolution,
-        texture: material.map(|material| Arc::clone(&material.texture)),
+        texture: material.and_then(|material| material.texture.as_ref().map(Arc::clone)),
         additive: material.is_some_and(|material| material.render_mode == RenderMode::Additive),
         sheet,
         sheet_error,
@@ -643,7 +645,7 @@ fn model_preview_data(
             let resolved = resolver.resolve_primary(&model.material_dirs, name);
             let texture = resolved
                 .material()
-                .map(|material| Arc::clone(&material.texture));
+                .and_then(|material| material.texture.as_ref().map(Arc::clone));
             Ok(MaterialSlot {
                 resolution: resolved.outcome(),
                 canonical_name: resolved.canonical_name().map(str::to_owned),

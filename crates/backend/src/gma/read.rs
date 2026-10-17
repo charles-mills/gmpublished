@@ -32,6 +32,9 @@ enum GmaSource {
 struct FileSource {
     file: File,
     len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    change: (u64, u64, i64, i64),
     #[cfg(not(any(unix, windows)))]
     cursor: parking_lot::Mutex<()>,
 }
@@ -39,10 +42,21 @@ struct FileSource {
 impl FileSource {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
-        let len = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        let len = metadata.len();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
         Ok(Self {
             file,
             len,
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            change: (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ),
             #[cfg(not(any(unix, windows)))]
             cursor: parking_lot::Mutex::new(()),
         })
@@ -372,6 +386,29 @@ impl GmaView {
             .find(|entry| entry.path == entry_path)
             .ok_or(GmaError::EntryNotFound)?;
         self.read_payload_bytes(entry.data_offset, entry.size)
+    }
+
+    pub fn source_unchanged(&self) -> std::io::Result<bool> {
+        let source = match &self.source {
+            GmaSource::Mem(_) => return Ok(true),
+            GmaSource::File(source) | GmaSource::TempBacked { source, .. } => source,
+        };
+        let metadata = source.file.metadata()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if source.change
+                != (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            {
+                return Ok(false);
+            }
+        }
+        Ok(metadata.len() == source.len && metadata.modified().ok() == source.modified)
     }
 
     pub fn read_payload_bytes(&self, offset: u64, len: u64) -> Result<Vec<u8>, GmaError> {

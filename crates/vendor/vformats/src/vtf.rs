@@ -84,19 +84,162 @@ pub fn inspect_header(
     declared_len: u64,
     limits: &Limits,
 ) -> Result<VtfHeader, VtfError> {
+    inspect_layout(prefix, declared_len, limits).map(|layout| layout.header())
+}
+
+/// Validated image addressing independent of the encoded payload's lifetime.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VtfLayout {
+    header: VtfHeader,
+    highres_offset: usize,
+    image_data_min_offset: usize,
+    declared_len: u64,
+    sprite_sheet_offset: Option<usize>,
+}
+
+/// Inspect bounded header bytes and validate the complete declared image extent.
+/// Input limits apply to the supplied prefix; the declared extent only bounds addresses.
+pub fn inspect_layout(
+    prefix: &[u8],
+    declared_len: u64,
+    limits: &Limits,
+) -> Result<VtfLayout, VtfError> {
     let vtf = parse_with_length(prefix, declared_len, limits)?;
-    if vtf.highres_offset < vtf.image_data_min_offset {
+    let layout = VtfLayout {
+        header: vtf.header(),
+        highres_offset: vtf.highres_offset,
+        image_data_min_offset: vtf.image_data_min_offset,
+        declared_len,
+        sprite_sheet_offset: vtf.sprite_sheet_offset,
+    };
+    layout.stored_image(vtf.frames - 1, vtf.faces - 1, 0)?;
+    Ok(layout)
+}
+
+impl VtfLayout {
+    /// Authored metadata, unaffected by resident frame or mip selection.
+    pub fn header(&self) -> VtfHeader {
+        self.header.clone()
+    }
+
+    /// Address one complete authored frame/face/mip in its source container.
+    pub fn stored_image(&self, frame: u32, face: u32, mip: u8) -> Result<StoredImage, VtfError> {
+        if self.highres_offset < self.image_data_min_offset {
+            return Err(VtfError::BadHeader);
+        }
+        let (start, len) = self.slice_range(frame, face, mip)?;
+        let end = start.checked_add(len).ok_or(VtfError::BadHeader)?;
+        if end as u64 > self.declared_len {
+            return Err(VtfError::Truncated {
+                needed: end as u64,
+                available: self.declared_len,
+            });
+        }
+        Ok(StoredImage {
+            frame,
+            face,
+            source_mip: mip,
+            dimensions: self.header.dimensions.map(|side| mip_dimension(side, mip)),
+            byte_range: start..end,
+        })
+    }
+
+    /// Bounded location of the optional resource length word.
+    pub fn sprite_sheet_length_range(&self) -> Result<Option<Range<u64>>, SpriteSheetError> {
+        let Some(offset) = self.sprite_sheet_offset else {
+            return Ok(None);
+        };
+        let end = offset
+            .checked_add(4)
+            .ok_or(SpriteSheetError::InvalidResource)?;
+        if offset < self.image_data_min_offset || end as u64 > self.declared_len {
+            return Err(SpriteSheetError::InvalidResource);
+        }
+        Ok(Some(offset as u64..end as u64))
+    }
+    /// Validate a resource length before allocating or reading its payload.
+    pub fn sprite_sheet_payload_range(
+        &self,
+        size: u32,
+    ) -> Result<Option<Range<u64>>, SpriteSheetError> {
+        let Some(length) = self.sprite_sheet_length_range()? else {
+            return Ok(None);
+        };
+        let end = length
+            .end
+            .checked_add(u64::from(size))
+            .ok_or(SpriteSheetError::InvalidResource)?;
+        if end > self.declared_len {
+            return Err(SpriteSheetError::InvalidResource);
+        }
+        Ok(Some(length.end..end))
+    }
+
+    fn slice_range(&self, frame: u32, face: u32, mip: u8) -> Result<(usize, usize), VtfError> {
+        let header = &self.header;
+        if frame >= header.frames || face >= header.faces || mip >= header.mip_count {
+            return Err(VtfError::OutOfRange);
+        }
+        let images = u64::from(header.frames)
+            .checked_mul(u64::from(header.faces))
+            .ok_or(VtfError::BadHeader)?;
+        let mut offset = 0u64;
+        for level in (mip + 1)..header.mip_count {
+            let [w, h] = header.dimensions.map(|side| mip_dimension(side, level));
+            offset = header
+                .format
+                .slice_bytes(w, h)
+                .checked_mul(images)
+                .and_then(|bytes| offset.checked_add(bytes))
+                .ok_or(VtfError::BadHeader)?;
+        }
+        let [w, h] = header.dimensions.map(|side| mip_dimension(side, mip));
+        let slice = header.format.slice_bytes(w, h);
+        let image = u64::from(frame)
+            .checked_mul(u64::from(header.faces))
+            .and_then(|index| index.checked_add(u64::from(face)))
+            .ok_or(VtfError::BadHeader)?;
+        offset = slice
+            .checked_mul(image)
+            .and_then(|bytes| offset.checked_add(bytes))
+            .ok_or(VtfError::BadHeader)?;
+        let start = (self.highres_offset as u64)
+            .checked_add(offset)
+            .ok_or(VtfError::BadHeader)?;
+        Ok((
+            usize::try_from(start).map_err(|_| VtfError::BadHeader)?,
+            usize::try_from(slice).map_err(|_| VtfError::BadHeader)?,
+        ))
+    }
+}
+
+/// Decode one complete independently loaded image using the ordinary VTF converter.
+pub fn decode_image_rgba(
+    format: VtfFormat,
+    dimensions: [u32; 2],
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<RgbaImage, VtfError> {
+    let [width, height] = dimensions;
+    if width == 0 || height == 0 {
         return Err(VtfError::BadHeader);
     }
-    let (start, len) = vtf.slice_range(vtf.frames - 1, vtf.faces - 1, 0)?;
-    let end = start.checked_add(len).ok_or(VtfError::BadHeader)? as u64;
-    if end > declared_len {
-        return Err(VtfError::Truncated {
-            needed: end,
-            available: declared_len,
+    let expected = format.slice_bytes(width, height);
+    let actual = bytes.len() as u64;
+    if actual > limits.max_input_bytes {
+        return Err(VtfError::InputTooLarge {
+            len: actual,
+            max: limits.max_input_bytes,
         });
     }
-    Ok(vtf.header())
+    if actual != expected {
+        return Err(VtfError::ImageLengthMismatch { expected, actual });
+    }
+    Ok(RgbaImage {
+        width,
+        height,
+        rgba: decode_slice(format, bytes, width, height, limits)?,
+    })
 }
 
 /// One frame/face/mip decoded to tightly-packed RGBA8.
@@ -570,9 +713,10 @@ fn parse_with_length<'a>(
     declared_len: u64,
     limits: &Limits,
 ) -> Result<Vtf<'a>, VtfError> {
-    if declared_len > limits.max_input_bytes {
+    let input_len = bytes.len() as u64;
+    if input_len > limits.max_input_bytes {
         return Err(VtfError::InputTooLarge {
-            len: declared_len,
+            len: input_len,
             max: limits.max_input_bytes,
         });
     }
@@ -766,41 +910,14 @@ impl<'a> Vtf<'a> {
         self.version_minor
     }
 
-    fn slice_range(&self, frame: u32, face: u32, mip: u8) -> Result<(usize, usize), VtfError> {
-        if frame >= self.frames || face >= self.faces || mip >= self.mip_count {
-            return Err(VtfError::OutOfRange);
+    fn layout(&self) -> VtfLayout {
+        VtfLayout {
+            header: self.header(),
+            highres_offset: self.highres_offset,
+            image_data_min_offset: self.image_data_min_offset,
+            declared_len: self.bytes.len() as u64,
+            sprite_sheet_offset: self.sprite_sheet_offset,
         }
-        let images = u64::from(self.frames)
-            .checked_mul(u64::from(self.faces))
-            .ok_or(VtfError::BadHeader)?;
-        let mut offset = 0u64;
-        for level in (mip + 1)..self.mip_count {
-            let w = mip_dimension(self.width, level);
-            let h = mip_dimension(self.height, level);
-            offset = self
-                .format
-                .slice_bytes(w, h)
-                .checked_mul(images)
-                .and_then(|bytes| offset.checked_add(bytes))
-                .ok_or(VtfError::BadHeader)?;
-        }
-        let w = mip_dimension(self.width, mip);
-        let h = mip_dimension(self.height, mip);
-        let slice = self.format.slice_bytes(w, h);
-        let image = u64::from(frame)
-            .checked_mul(u64::from(self.faces))
-            .and_then(|index| index.checked_add(u64::from(face)))
-            .ok_or(VtfError::BadHeader)?;
-        offset = slice
-            .checked_mul(image)
-            .and_then(|bytes| offset.checked_add(bytes))
-            .ok_or(VtfError::BadHeader)?;
-        let start = (self.highres_offset as u64)
-            .checked_add(offset)
-            .ok_or(VtfError::BadHeader)?;
-        let start = usize::try_from(start).map_err(|_| VtfError::BadHeader)?;
-        let len = usize::try_from(slice).map_err(|_| VtfError::BadHeader)?;
-        Ok((start, len))
     }
 
     fn slice_bytes(&self, frame: u32, face: u32, mip: u8) -> Result<&'a [u8], VtfError> {
@@ -810,27 +927,7 @@ impl<'a> Vtf<'a> {
 
     /// Bounds-check one complete image without converting its authored format.
     pub fn stored_image(&self, frame: u32, face: u32, mip: u8) -> Result<StoredImage, VtfError> {
-        if self.highres_offset < self.image_data_min_offset {
-            return Err(VtfError::BadHeader);
-        }
-        let (start, len) = self.slice_range(frame, face, mip)?;
-        let end = start.checked_add(len).ok_or(VtfError::BadHeader)?;
-        if end > self.bytes.len() {
-            return Err(VtfError::Truncated {
-                needed: end as u64,
-                available: self.bytes.len() as u64,
-            });
-        }
-        Ok(StoredImage {
-            frame,
-            face,
-            source_mip: mip,
-            dimensions: [
-                mip_dimension(self.width, mip),
-                mip_dimension(self.height, mip),
-            ],
-            byte_range: start..end,
-        })
+        self.layout().stored_image(frame, face, mip)
     }
 
     /// Largest-first selected authored levels; any incomplete level fails the chain.

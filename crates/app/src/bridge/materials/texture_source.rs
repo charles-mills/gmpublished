@@ -111,28 +111,34 @@ impl MaterialResolver {
     }
 }
 
-pub(super) struct SourceEntryDescriptor<'a> {
+#[derive(Debug)]
+pub(super) struct SourceEntryDescriptor {
     pub origin: super::texture_asset::TextureOrigin,
     pub size: u64,
-    reader: EntryReader<'a>,
+    reader: EntryReader,
 }
 
-enum EntryReader<'a> {
+#[derive(Debug)]
+enum EntryReader {
     Pak {
-        source: &'a super::PakSource,
+        source: Arc<super::PakSource>,
         index: usize,
     },
     Addon {
-        source: &'a super::PreviewArchiveSource,
+        source: Arc<super::PreviewArchiveSource>,
         path: ContentPath,
     },
-    File(File),
+    File {
+        file: File,
+        path: std::path::PathBuf,
+    },
     Sibling {
-        source: &'a super::SiblingGmaIndex,
+        source: Arc<super::SiblingGmaIndex>,
         path: ContentPath,
     },
     Vpk {
-        source: &'a super::VpkArchive,
+        source: Arc<super::VpkArchive>,
+        catalog: Arc<super::IndexedVpks>,
         path: ContentPath,
     },
 }
@@ -144,11 +150,11 @@ fn file_error(path: &ContentPath, error: &std::io::Error) -> SourceError {
     }
 }
 
-impl<'a> SourceRef<'a> {
+impl SourceRef<'_> {
     pub(super) fn descriptor(
         self,
         path: &ContentPath,
-    ) -> Result<Option<SourceEntryDescriptor<'a>>, SourceError> {
+    ) -> Result<Option<SourceEntryDescriptor>, SourceError> {
         if let Some(error) = self.index_error(Some(path)) {
             return Err(SourceError::IndexLimit(error));
         }
@@ -163,7 +169,13 @@ impl<'a> SourceRef<'a> {
                 let Some(&(index, size)) = source.entries.get(path.as_str()) else {
                     return Ok(None);
                 };
-                (size, EntryReader::Pak { source, index })
+                (
+                    size,
+                    EntryReader::Pak {
+                        source: Arc::clone(source),
+                        index,
+                    },
+                )
             }
             Self::Addon(source) => {
                 let entry = match source.entry(path.as_str()) {
@@ -184,13 +196,19 @@ impl<'a> SourceRef<'a> {
                         file.metadata()
                             .map_err(|error| file_error(path, &error))?
                             .len(),
-                        EntryReader::File(file),
+                        EntryReader::File {
+                            file,
+                            path: source
+                                .folder_entry_path(path.as_str())
+                                .expect("folder entry path")
+                                .to_owned(),
+                        },
                     )
                 } else {
                     (
                         entry.size,
                         EntryReader::Addon {
-                            source,
+                            source: Arc::clone(source),
                             path: path.clone(),
                         },
                     )
@@ -206,7 +224,10 @@ impl<'a> SourceRef<'a> {
                     file.metadata()
                         .map_err(|error| file_error(path, &error))?
                         .len(),
-                    EntryReader::File(file),
+                    EntryReader::File {
+                        file,
+                        path: source.root.join(path.as_str()),
+                    },
                 )
             }
             Self::SiblingGma(source) => {
@@ -216,19 +237,20 @@ impl<'a> SourceRef<'a> {
                 (
                     size,
                     EntryReader::Sibling {
-                        source,
+                        source: Arc::clone(source),
                         path: path.clone(),
                     },
                 )
             }
-            Self::GameVpk(source) => {
+            Self::GameVpk(catalog, source) => {
                 let Some(size) = source.entry_size(path.as_str()) else {
                     return Ok(None);
                 };
                 (
                     size,
                     EntryReader::Vpk {
-                        source,
+                        source: Arc::clone(source),
+                        catalog: Arc::clone(catalog),
                         path: path.clone(),
                     },
                 )
@@ -242,7 +264,7 @@ impl<'a> SourceRef<'a> {
     }
 }
 
-impl SourceEntryDescriptor<'_> {
+impl SourceEntryDescriptor {
     pub(super) fn cost(&self) -> Result<TextureSourceReadCost, SourceError> {
         let decoder_bytes = match &self.reader {
             EntryReader::Pak { source, index } => usize::try_from(
@@ -309,7 +331,7 @@ impl SourceEntryDescriptor<'_> {
                 )
             }
             .map_err(SourceError::Addon)?,
-            EntryReader::File(file) => {
+            EntryReader::File { file, .. } => {
                 file.seek(SeekFrom::Start(0))
                     .map_err(|error| file_error(&self.origin.path, &error))?;
                 let length = usize::try_from(count).map_err(|error| SourceError::Loose {
@@ -339,7 +361,7 @@ impl SourceEntryDescriptor<'_> {
                 count,
                 usize::try_from(decoder_limit).unwrap_or(usize::MAX),
             )?,
-            EntryReader::Vpk { source, path } => if full {
+            EntryReader::Vpk { source, path, .. } => if full {
                 source.texture_entry_bytes(path.as_str(), count)
             } else {
                 source.entry_prefix(
@@ -356,6 +378,187 @@ impl SourceEntryDescriptor<'_> {
             });
         }
         Ok(bytes)
+    }
+}
+
+#[derive(Debug)]
+struct VpkSelectedReader {
+    _catalog: Arc<super::IndexedVpks>,
+    reader: Arc<dyn super::reloadable::TextureSourceReader>,
+}
+impl super::reloadable::TextureSourceReader for VpkSelectedReader {
+    fn len(&self) -> u64 {
+        self.reader.len()
+    }
+    fn read_range(
+        &self,
+        range: std::ops::Range<u64>,
+        cancel: &crate::preparation::PreparationCancellation,
+    ) -> Result<Vec<u8>, TextureAssetError> {
+        self.reader.read_range(range, cancel)
+    }
+}
+
+#[derive(Debug)]
+struct PakEntryReader {
+    source: Arc<super::PakSource>,
+    index: usize,
+    size: u64,
+    decoder: usize,
+}
+impl super::reloadable::TextureSourceReader for PakEntryReader {
+    fn len(&self) -> u64 {
+        self.size
+    }
+    fn decoder_working_bytes(&self) -> usize {
+        self.decoder
+    }
+    fn read_range(
+        &self,
+        range: std::ops::Range<u64>,
+        cancel: &crate::preparation::PreparationCancellation,
+    ) -> Result<Vec<u8>, TextureAssetError> {
+        cancel.check()?;
+        let result = self.source.pakfile.entry_range_by_index_with_decoder_limit(
+            self.index,
+            range,
+            self.decoder as u64,
+            || cancel.is_cancelled(),
+        );
+        cancel.check()?;
+        result
+            .map_err(|error| TextureAssetError::SourceRead(error.to_string().into()))?
+            .ok_or(TextureAssetError::SourceChanged)
+    }
+}
+#[derive(Debug)]
+struct AddonEntryReader {
+    source: Arc<super::PreviewArchive>,
+    path: ContentPath,
+    size: u64,
+}
+impl super::reloadable::TextureSourceReader for AddonEntryReader {
+    fn len(&self) -> u64 {
+        self.size
+    }
+    fn read_range(
+        &self,
+        range: std::ops::Range<u64>,
+        cancel: &crate::preparation::PreparationCancellation,
+    ) -> Result<Vec<u8>, TextureAssetError> {
+        cancel.check()?;
+        if !self
+            .source
+            .texture_source_unchanged()
+            .map_err(|e| TextureAssetError::SourceRead(e.to_string().into()))?
+        {
+            return Err(TextureAssetError::SourceChanged);
+        }
+        let count = usize::try_from(
+            range
+                .end
+                .checked_sub(range.start)
+                .ok_or(TextureAssetError::Selection)?,
+        )
+        .map_err(|_| TextureAssetError::WorkingCostOverflow)?;
+        if range.end > self.size {
+            return Err(TextureAssetError::Selection);
+        }
+        let mut bytes = Vec::with_capacity(count);
+        let mut start = range.start;
+        while start < range.end {
+            cancel.check()?;
+            let end = start.saturating_add(64 * 1024).min(range.end);
+            bytes.extend(
+                self.source
+                    .entry_range(self.path.as_str(), start..end)
+                    .map_err(|e| TextureAssetError::SourceRead(e.to_string().into()))?,
+            );
+            start = end;
+        }
+        if !self
+            .source
+            .texture_source_unchanged()
+            .map_err(|e| TextureAssetError::SourceRead(e.to_string().into()))?
+        {
+            return Err(TextureAssetError::SourceChanged);
+        }
+        cancel.check()?;
+        Ok(bytes)
+    }
+}
+impl SourceEntryDescriptor {
+    pub(super) fn into_reader(
+        self,
+    ) -> Result<
+        (
+            super::texture_asset::TextureOrigin,
+            Arc<dyn super::reloadable::TextureSourceReader>,
+        ),
+        TextureAssetError,
+    > {
+        use super::reloadable::{FrozenPathSource, SubrangeSource, TextureSourceReader};
+        let reader: Arc<dyn TextureSourceReader> = match self.reader {
+            EntryReader::File { file, path } => Arc::new(FrozenPathSource::new(path, &file)?),
+            EntryReader::Pak { source, index } => {
+                let decoder = source
+                    .pakfile
+                    .entry_decoder_working_bytes(index)
+                    .map_err(|e| TextureAssetError::SourceRead(e.to_string().into()))?
+                    .ok_or(TextureAssetError::SourceChanged)?;
+                Arc::new(PakEntryReader {
+                    source,
+                    index,
+                    size: self.size,
+                    decoder: usize::try_from(decoder)
+                        .map_err(|_| TextureAssetError::WorkingCostOverflow)?,
+                })
+            }
+            EntryReader::Addon { source, path } => {
+                let super::PreviewArchiveSource::Gma(archive) = &*source else {
+                    return Err(TextureAssetError::SourceChanged);
+                };
+                Arc::new(AddonEntryReader {
+                    source: Arc::clone(archive),
+                    path,
+                    size: self.size,
+                })
+            }
+            EntryReader::Vpk {
+                source,
+                catalog,
+                path,
+            } => {
+                let gmpublished_backend::vpk::VpkEntryStorage {
+                    archive_path: disk,
+                    data_range: range,
+                    preload: prefix,
+                } = source
+                    .entry_storage(path.as_str())
+                    .map_err(|e| TextureAssetError::SourceRead(e.to_string().into()))?;
+                let reader: Arc<dyn TextureSourceReader> = if range.is_empty() {
+                    Arc::new(super::reloadable::PreloadSource(prefix))
+                } else {
+                    let file = File::open(&disk)
+                        .map_err(|e| TextureAssetError::SourceRead(e.to_string().into()))?;
+                    let reader = Arc::new(FrozenPathSource::new(disk, &file)?);
+                    Arc::new(SubrangeSource {
+                        reader,
+                        range,
+                        prefix,
+                    })
+                };
+                Arc::new(VpkSelectedReader {
+                    _catalog: catalog,
+                    reader,
+                })
+            }
+            EntryReader::Sibling { source, path } => source.reloadable_reader(&path)?,
+        };
+        if reader.len() != self.size {
+            return Err(TextureAssetError::SourceChanged);
+        }
+        Ok((self.origin, reader))
     }
 }
 
@@ -401,7 +604,7 @@ mod tests {
             None,
             pak,
         );
-        let cost = SourceRef::Pakfile(resolver.config.pakfile.as_deref().unwrap())
+        let cost = SourceRef::Pakfile(resolver.config.pakfile.as_ref().unwrap())
             .descriptor(&path)
             .unwrap()
             .unwrap()
@@ -538,10 +741,13 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            rejected.texture.load_outcome(),
+            rejected.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert_eq!(rejected.texture.mapping_dimensions(), Some((128, 128)));
+        assert_eq!(
+            rejected.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((128, 128))
+        );
         assert_eq!(encoded.encoded_bytes(), 0);
         assert_eq!(small.current_bytes(), 0);
         assert_eq!(small.peak_bytes(), vformats::vtf::MAX_HEADER_BYTES);
@@ -553,6 +759,8 @@ mod tests {
                 .into_material()
                 .unwrap()
                 .texture
+                .as_ref()
+                .unwrap()
                 .load_outcome(),
             TextureLoadOutcome::Loaded
         );
@@ -563,10 +771,13 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            warm.texture.load_outcome(),
+            warm.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert_eq!(warm.texture.mapping_dimensions(), Some((128, 128)));
+        assert_eq!(
+            warm.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((128, 128))
+        );
         assert_eq!(encoded.encoded_bytes(), 0);
     }
 
@@ -591,6 +802,8 @@ mod tests {
                     .into_material()
                     .unwrap()
                     .texture
+                    .as_ref()
+                    .unwrap()
                     .load_outcome(),
                 TextureLoadOutcome::InvalidSource
             );
@@ -697,18 +910,31 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            rejected.texture.load_outcome(),
+            rejected.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert_eq!(rejected.texture.mapping_dimensions(), None);
+        assert_eq!(
+            rejected.texture.as_ref().unwrap().mapping_dimensions(),
+            None
+        );
         assert_eq!(resolver.resident_texture_asset_count(), 0);
         let accepted = resolver
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap();
-        assert_eq!(accepted.texture.mapping_dimensions(), Some((1, 1)));
         assert_eq!(
-            accepted.texture.resident().unwrap().layers()[0].mips[0]
+            accepted.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((1, 1))
+        );
+        assert_eq!(
+            accepted
+                .texture
+                .as_ref()
+                .unwrap()
+                .resident()
+                .unwrap()
+                .layers()[0]
+                .mips[0]
                 .bytes
                 .as_slice(),
             &[41, 42, 43, 255]
@@ -719,10 +945,13 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            warm.texture.load_outcome(),
+            warm.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert_eq!(warm.texture.mapping_dimensions(), Some((1, 1)));
+        assert_eq!(
+            warm.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((1, 1))
+        );
     }
 
     #[test]
@@ -735,12 +964,24 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            material.texture.load_outcome(),
+            material.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert_eq!(material.texture.mapping_dimensions(), Some((2, 2)));
-        assert_eq!(material.texture.flags(), Some(texture_flags::EIGHTBITALPHA));
-        assert!(material.texture.has_effective_base_texture());
+        assert_eq!(
+            material.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((2, 2))
+        );
+        assert_eq!(
+            material.texture.as_ref().unwrap().flags(),
+            Some(texture_flags::EIGHTBITALPHA)
+        );
+        assert!(
+            material
+                .texture
+                .as_ref()
+                .unwrap()
+                .has_effective_base_texture()
+        );
         let normal = material.shader.surface().unwrap().normal.as_ref().unwrap();
         assert_eq!(
             normal.load_outcome(),
@@ -759,15 +1000,21 @@ mod tests {
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap();
-        assert_eq!(accepted.texture.load_outcome(), TextureLoadOutcome::Loaded);
+        assert_eq!(
+            accepted.texture.as_ref().unwrap().load_outcome(),
+            TextureLoadOutcome::Loaded
+        );
         assert_eq!(large.encoded_bytes(), 84);
-        assert_eq!(accepted.texture.rgba_bytes().unwrap(), &[19; 16]);
+        assert_eq!(
+            accepted.texture.as_ref().unwrap().rgba_bytes().unwrap(),
+            &[19; 16]
+        );
         let again = limited
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap();
         assert_eq!(
-            again.texture.load_outcome(),
+            again.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
         assert_eq!(small.encoded_bytes(), 0);
@@ -788,8 +1035,8 @@ mod tests {
                 .into_material()
                 .unwrap();
             assert!(Arc::ptr_eq(
-                material.texture.resident().unwrap(),
-                original.texture.resident().unwrap()
+                material.texture.as_ref().unwrap().resident().unwrap(),
+                original.texture.as_ref().unwrap().resident().unwrap()
             ));
         }
         assert_eq!(budget.encoded_bytes(), 84);
@@ -824,15 +1071,21 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            rejected.texture.load_outcome(),
+            rejected.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert_eq!(rejected.texture.mapping_dimensions(), Some((4, 1)));
+        assert_eq!(
+            rejected.texture.as_ref().unwrap().mapping_dimensions(),
+            Some((4, 1))
+        );
         let loaded = resolver
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap();
-        assert_eq!(loaded.texture.rgba_bytes().unwrap(), &[77; 16]);
+        assert_eq!(
+            loaded.texture.as_ref().unwrap().rgba_bytes().unwrap(),
+            &[77; 16]
+        );
     }
 
     #[test]
@@ -915,13 +1168,28 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            material.texture.load_outcome(),
+            material.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
-        assert!(material.texture.source_metadata().is_none());
-        assert!(material.texture.has_effective_base_texture());
+        assert!(
+            material
+                .texture
+                .as_ref()
+                .unwrap()
+                .source_metadata()
+                .is_none()
+        );
+        assert!(
+            material
+                .texture
+                .as_ref()
+                .unwrap()
+                .has_effective_base_texture()
+        );
         assert_eq!(
-            material.shader.mapping_dimensions(Some(&material.texture)),
+            material
+                .shader
+                .mapping_dimensions(material.texture.as_deref()),
             None
         );
     }
@@ -941,7 +1209,7 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            rejected.texture.load_outcome(),
+            rejected.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::Unplanned
         );
         assert_eq!(budget.encoded_bytes(), 0);

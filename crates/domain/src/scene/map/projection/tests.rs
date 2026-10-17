@@ -12,7 +12,7 @@ fn vertex(x: f32, y: f32) -> MapVertex {
         tex_t: y * 4.0,
         texture_size: [64, 32],
         lightmap_uv: [0.2 + x * 0.01, 0.4 + y * 0.02],
-        has_lightmap: true,
+        lightmap_page: Some(crate::scene::map::LightmapPageId(0)),
         lightmap_bump_step: 0.125,
         blend_alpha: 0.0,
         opacity: 1.0,
@@ -69,7 +69,7 @@ fn clipping_preserves_receiver_surface_and_atlas_coordinates() {
         assert!((projected.surface.lightmap_uv[0] - (0.2 + p[0] * 0.01)).abs() < 1e-6);
         assert!((projected.surface.lightmap_uv[1] - (0.4 + p[1] * 0.02)).abs() < 1e-6);
         assert_eq!(projected.surface.lightmap_bump_step, 0.125);
-        assert!(projected.surface.has_lightmap);
+        assert!(projected.surface.lightmap_page.is_some());
         assert!((projected.uv[0] - (0.5 + p[0] * 0.25)).abs() < 1e-6);
         assert!((projected.uv[1] - (1.0 + p[1])).abs() < 1e-6);
     }

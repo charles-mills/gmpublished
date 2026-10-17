@@ -109,6 +109,7 @@ impl PaintedSkyMaterial {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkyMaterial {
     pub shader: String,
+    pub no_draw: bool,
     pub texture: Option<Arc<ResolvedTexture>>,
     pub color: Vec3,
     pub transform: [[f32; 4]; 2],
@@ -137,9 +138,14 @@ impl MaterialResolver {
             .any(|proxy| proxy.name.eq_ignore_ascii_case("skypaint"));
         Some(SkyMaterial {
             shader: material.shader.clone(),
-            texture: material
-                .parameter("$basetexture")
-                .and_then(|name| self.with_single_texture_mip().resolve_texture(name)),
+            no_draw: material.no_draw(),
+            texture: (!material.no_draw())
+                .then(|| {
+                    material
+                        .parameter("$basetexture")
+                        .and_then(|name| self.with_single_texture_mip().resolve_texture(name))
+                })
+                .flatten(),
             color: material
                 .parameter("$color")
                 .and_then(parse_material_color)
@@ -148,9 +154,9 @@ impl MaterialResolver {
                 material.parameter("$basetexturetransform"),
             ),
             paint_proxy,
-            painted: material.shader.eq_ignore_ascii_case("g_sky").then(|| {
-                PaintedSkyMaterial::resolve(material, controller.filter(|_| paint_proxy), self)
-            }),
+            painted: (!material.no_draw() && material.shader.eq_ignore_ascii_case("g_sky")).then(
+                || PaintedSkyMaterial::resolve(material, controller.filter(|_| paint_proxy), self),
+            ),
         })
     }
 }

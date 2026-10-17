@@ -59,15 +59,15 @@ fn staged_preparation_uses_the_supplied_pool_without_redecoding() {
 }
 
 #[test]
-fn asset_lighting_channel_survives_failure_to_allocate_any_atlas_block() {
+fn asset_lighting_channel_and_oversized_payload_survive_page_preparation() {
     let bytes =
         crate::scene::map::tests::lightmap_stats_fixture(0, [4094, 0], [0, 255, 255, 255], 4095);
     let asset = decode_map(&bytes).unwrap();
     assert_eq!(asset.lighting_source(), Some(LightmapSource::Ldr));
     let requirements = vec![SourceLightmapRequirement::Lightmapped; asset.material_names().len()];
     let prepared = asset.prepare(&requirements).unwrap();
-    assert!(prepared.lightmap.is_none());
-    assert_eq!(prepared.stats.lightmap.atlas_dropped_blocks, 1);
+    assert!(prepared.lightmap.is_some());
+    assert_eq!(prepared.stats.lightmap.atlas_dropped_blocks, 0);
     assert_eq!(prepared.lighting_source, Some(LightmapSource::Ldr));
 }
 
@@ -123,7 +123,7 @@ fn effective_material_changes_gpu_basis_without_rewriting_compiled_sample_flags(
             .meshes
             .iter()
             .flat_map(|mesh| &mesh.vertices)
-            .filter(|vertex| vertex.has_lightmap)
+            .filter(|vertex| vertex.lightmap_page.is_some())
             .collect::<Vec<_>>();
         assert!(!vertices.is_empty());
         assert!(

@@ -836,6 +836,9 @@ fn prop_draw_materials(
     indices
         .iter()
         .map(|(&raw_slot, &index)| {
+            if !table.slots()[index].render_mode.draws() {
+                return (raw_slot, index);
+            }
             let key = format!("prop_draw_alpha\0{index}\0{}", opacity < 1.0);
             if let Some(existing) = table.index_of(&key) {
                 return (raw_slot, existing);
@@ -1419,6 +1422,7 @@ fn bake_prop_door_meshes(
                 uv: vertex.uv,
                 lightmap_uv: [0.0; 2],
                 lightmap_bump_step: 0.0,
+                lightmap_page: 0,
                 color: fallback.color,
                 blend_alpha: 0.0,
                 opacity: prop_opacity(placement),
@@ -1680,7 +1684,7 @@ pub(in super::super) fn prop_material_index(
     };
     let texture = resolved
         .material()
-        .map(|material| Arc::clone(&material.texture));
+        .and_then(|material| material.texture.as_ref().map(Arc::clone));
     context.table.push(
         &key,
         MaterialSlot {
@@ -1798,6 +1802,7 @@ pub(super) fn bake_world_vertex(
         uv: vertex.uv,
         lightmap_uv: [0.0; 2],
         lightmap_bump_step: 0.0,
+        lightmap_page: 0,
         color: compiled_illumination.map_or(fallback.color, |_| prop_diffuse_tint(placement)),
         blend_alpha: 0.0,
         opacity: prop_opacity(placement),
@@ -2231,6 +2236,36 @@ mod compiled_bake_tests {
             prop_draw_materials(&BTreeMap::from([(7, original)]), 0.5, &mut table),
             BTreeMap::from([(7, translucent)])
         );
+    }
+
+    #[test]
+    fn instance_alpha_does_not_restore_hidden_model_materials() {
+        use crate::bridge::materials::{MaterialShader, SurfaceMaterial};
+        let mut table = MaterialTable::default();
+        let hidden = table.push(
+            "hidden",
+            MaterialSlot {
+                resolution: Default::default(),
+                canonical_name: None,
+                name: "hidden".into(),
+                shader: MaterialShader::Surface(Arc::new(SurfaceMaterial {
+                    no_draw: true,
+                    ..Default::default()
+                })),
+                texture: None,
+                texture2: None,
+                render_mode: RenderMode::NoDraw,
+                alpha_policy: RenderMode::NoDraw.texture_alpha_policy(),
+            },
+        );
+        for alpha in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                prop_draw_materials(&BTreeMap::from([(7, hidden)]), alpha, &mut table),
+                BTreeMap::from([(7, hidden)])
+            );
+        }
+        assert_eq!(table.slots().len(), 1);
+        assert_eq!(table.slots()[hidden].render_mode, RenderMode::NoDraw);
     }
 
     #[test]

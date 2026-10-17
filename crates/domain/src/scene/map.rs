@@ -81,16 +81,17 @@ use entities::{
     parse_entity_i32, parse_entity_vec3, worldspawn_detail_material_name, worldspawn_skyname,
 };
 pub use lighting::{
-    AmbientCube, AmbientLightSource, LightmapAtlas, LightmapSource, LightmapUpdate,
-    MapAmbientLighting, MapAmbientSample, MapEnvironmentLighting, MapSunLighting,
+    AmbientCube, AmbientLightSource, LIGHTMAP_PAGE_SIZE, LightmapPage, LightmapPageError,
+    LightmapPageId, LightmapSet, LightmapSource, MapAmbientLighting, MapAmbientSample,
+    MapEnvironmentLighting, MapSunLighting,
 };
 #[cfg(test)]
 use lighting::{
     AmbientSampleRange, brush_lightmap_uv_from_transforms, decode_ambient_sample_linear,
-    decode_light_sample, decode_light_sample_linear, pack_lightmap_blocks,
+    decode_light_sample, decode_light_sample_linear,
 };
 use lighting::{
-    PendingLightmapBlock, bake_lightmap_atlas, brush_lightmap_uv, displacement_lightmap_uv,
+    PendingLightmapBlock, bake_lightmap_set, brush_lightmap_uv, displacement_lightmap_uv,
     extract_face_lightmap, map_ambient_lighting, map_environment_lighting,
     selected_lightmap_samples,
 };
@@ -377,16 +378,15 @@ fn prepare_map(
     let environment_lighting = map_environment_lighting(&bsp.entities);
     let skyname = worldspawn_skyname(&bsp.entities);
     let fog = map_fog(&bsp.entities);
-    let lightmap = bake_lightmap_atlas(
+    let lightmap = bake_lightmap_set(
         meshes.iter_mut().chain(
             door_builds
                 .iter_mut()
                 .flat_map(|door| door.meshes.iter_mut()),
         ),
-        &lightmap_blocks,
+        lightmap_blocks,
         lightmap_source,
         &bsp.entities,
-        &mut stats.lightmap,
     );
     let doors = door_builds
         .into_iter()

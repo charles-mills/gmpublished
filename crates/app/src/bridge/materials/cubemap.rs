@@ -68,6 +68,14 @@ pub struct ResolvedCubemap {
 }
 
 impl ResolvedCubemap {
+    pub(crate) fn on_demand(
+        &self,
+    ) -> Option<(
+        &Arc<super::ReloadableTextureSource>,
+        &super::TextureFrameRequest,
+    )> {
+        self.resident.on_demand()
+    }
     pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
         self.resident.resident()
     }
@@ -341,7 +349,7 @@ impl MaterialResolver {
             return Err(CubemapFailure::UnsupportedHdr);
         }
         let path = texture_path(&normalized).ok_or(CubemapFailure::Path)?;
-        let selected = match self.selected_texture_asset(&path) {
+        let selected = match self.selected_texture_source(&path) {
             Ok(selected) => selected,
             Err(super::TextureSourceError::SourceUnavailable(error)) => {
                 let mut cube =
@@ -387,7 +395,7 @@ impl MaterialResolver {
                 });
             }
         };
-        let source_metadata = selected.asset.metadata_arc();
+        let source_metadata = selected.metadata_arc();
         validate_cubemap(&source_metadata, frame).map_err(|error| match error {
             CubemapDecodeError::NotCubemap => CubemapFailure::NotCubemap,
             CubemapDecodeError::UnsupportedHdr => CubemapFailure::UnsupportedHdr,
@@ -396,42 +404,46 @@ impl MaterialResolver {
                 count: source_metadata.frame_count,
             },
         })?;
-        let (resident, load_outcome, frame, failure) =
-            match self.resident_texture(&selected, 0..6, !self.bc_textures_enabled()) {
-                Ok(resident) => {
-                    let outcome = resident.load_outcome();
-                    (resident, outcome, frame, None)
+        let (resident, load_outcome, frame, failure) = match self.selected_source_residency(
+            &selected,
+            frame,
+            0..6,
+            !self.bc_textures_enabled(),
+        ) {
+            Ok(resident) => {
+                let outcome = resident.load_outcome();
+                (resident, outcome, frame, None)
+            }
+            Err(error) => {
+                if let TextureAssetError::Vtf(vtf) = &error
+                    && super::native_invalid_texture(vtf)
+                {
+                    return Err(CubemapFailure::InvalidVtf(vtf.clone()));
                 }
-                Err(error) => {
-                    if let TextureAssetError::Vtf(vtf) = &error
-                        && super::native_invalid_texture(vtf)
-                    {
-                        return Err(CubemapFailure::InvalidVtf(vtf.clone()));
+                let outcome = match &error {
+                    TextureAssetError::DimensionLimit(_)
+                    | TextureAssetError::Budget
+                    | TextureAssetError::ResidentImageBudget { .. }
+                    | TextureAssetError::WorkingLimit { .. }
+                    | TextureAssetError::ImageCount(_)
+                    | TextureAssetError::Vtf(VtfError::DecodedTooLarge { .. }) => {
+                        TextureLoadOutcome::QualityRejected
                     }
-                    let outcome = match &error {
-                        TextureAssetError::DimensionLimit(_)
-                        | TextureAssetError::Budget
-                        | TextureAssetError::ResidentImageBudget { .. }
-                        | TextureAssetError::WorkingLimit { .. }
-                        | TextureAssetError::ImageCount(_)
-                        | TextureAssetError::Vtf(VtfError::DecodedTooLarge { .. }) => {
-                            TextureLoadOutcome::QualityRejected
-                        }
-                        TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
-                            TextureLoadOutcome::Unplanned
-                        }
-                        _ => TextureLoadOutcome::Unsupported,
-                    };
-                    let fallback =
-                        ResolvedCubemap::unavailable(Some(Arc::clone(&source_metadata)), outcome);
-                    (
-                        fallback.resident,
-                        outcome,
-                        0,
-                        Some(CubemapFailure::Texture(error)),
-                    )
-                }
-            };
+                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
+                        TextureLoadOutcome::Unplanned
+                    }
+                    _ => TextureLoadOutcome::Unsupported,
+                };
+                let fallback =
+                    ResolvedCubemap::unavailable(Some(Arc::clone(&source_metadata)), outcome);
+                (
+                    fallback.resident,
+                    outcome,
+                    0,
+                    Some(CubemapFailure::Texture(error)),
+                )
+            }
+        };
         Ok(ResolvedCubemap {
             resident,
             source_metadata: Some(source_metadata),

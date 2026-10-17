@@ -15,7 +15,7 @@ fn plane(normal: Vec3, distance: f32) -> MapMesh {
             tex_t: y,
             texture_size: [64; 2],
             lightmap_uv: [0.5 + x / 128.0, 0.5 + y / 128.0],
-            has_lightmap: true,
+            lightmap_page: Some(crate::scene::map::LightmapPageId(0)),
             lightmap_bump_step: 0.0,
             blend_alpha: 0.0,
             opacity: 1.0,

@@ -673,7 +673,7 @@ fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
             tex_t: 128.0,
             texture_size: [128, 64],
             lightmap_uv: [0.0; 2],
-            has_lightmap: false,
+            lightmap_page: None,
             lightmap_bump_step: 0.0,
             blend_alpha: 0.0,
             opacity: 1.0,
@@ -696,7 +696,10 @@ fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
         .into_material()
         .unwrap();
     assert_eq!(
-        [resolved.texture.width(), resolved.texture.height()],
+        [
+            resolved.texture.as_ref().unwrap().width(),
+            resolved.texture.as_ref().unwrap().height()
+        ],
         [1, 1]
     );
     let material = MaterialSlot {
@@ -704,7 +707,7 @@ fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
         canonical_name: None,
         name: "water".into(),
         shader: resolved.shader,
-        texture: Some(resolved.texture),
+        texture: resolved.texture,
         texture2: None,
         render_mode: RenderMode::Opaque,
         alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
@@ -740,7 +743,7 @@ fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
             canonical_name: None,
             name: name.into(),
             shader: resolved.shader,
-            texture: Some(resolved.texture),
+            texture: resolved.texture,
             texture2: None,
             render_mode: RenderMode::Opaque,
             alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
@@ -2179,6 +2182,7 @@ fn model_vertex(position: Vec3) -> ModelVertex {
         uv: [0.25, 0.75],
         lightmap_uv: [0.5, 0.5],
         lightmap_bump_step: 0.0,
+        lightmap_page: 0,
         color: Vec3::splat(1.0),
         blend_alpha: 1.0,
         opacity: 1.0,
@@ -2433,7 +2437,7 @@ fn explicit_lightmap_source_survives_zero_uv_coordinates() {
             tex_t: 0.0,
             texture_size: [1, 1],
             lightmap_uv: [0.0; 2],
-            has_lightmap: true,
+            lightmap_page: Some(gmpublished_domain::scene::map::LightmapPageId(0)),
             lightmap_bump_step: 0.0,
             blend_alpha: 0.0,
             opacity: 1.0,
@@ -2459,7 +2463,7 @@ fn explicit_lightmap_source_survives_zero_uv_coordinates() {
 fn compiled_surfaces_without_samples_use_constant_light() {
     let mut receiver = surface_mark_receiver();
     for vertex in &mut receiver.vertices {
-        vertex.has_lightmap = false;
+        vertex.lightmap_page = None;
     }
     for entity in [false, true] {
         receiver.entity = entity;
@@ -2489,7 +2493,7 @@ fn surface_mark_receiver() -> gmpublished_domain::scene::map::MapMesh {
                 tex_t: y,
                 texture_size: [128; 2],
                 lightmap_uv: [0.25 + x / 512.0, 0.25 + y / 512.0],
-                has_lightmap: true,
+                lightmap_page: Some(gmpublished_domain::scene::map::LightmapPageId(0)),
                 lightmap_bump_step: 0.125,
                 blend_alpha: 0.0,
                 opacity: 1.0,

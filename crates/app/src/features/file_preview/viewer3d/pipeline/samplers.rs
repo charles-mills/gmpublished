@@ -230,9 +230,6 @@ pub(in crate::features::file_preview::viewer3d) struct SamplerDiagnostic {
 }
 
 impl SamplerDiagnostic {
-    pub(super) fn has_limitations(&self) -> bool {
-        !self.policy.limitations.is_empty()
-    }
     #[cfg(feature = "map-capture")]
     pub(in crate::features::file_preview::viewer3d) fn capture_json(&self) -> serde_json::Value {
         serde_json::json!({

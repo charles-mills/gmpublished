@@ -1,9 +1,7 @@
-//! One lighting snapshot shared by a viewer's main and optical scene views.
-use super::{MapPreview, lightmaps, model_lighting, wgpu};
+use super::{MapPreview, model_lighting, wgpu};
 
 #[derive(Debug)]
 pub struct Frame {
-    pub lightmap: lightmaps::Frame,
     pub model_lights: wgpu::Buffer,
     model: model_lighting::State,
     #[cfg(feature = "map-capture")]
@@ -11,17 +9,12 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub(super) fn new(
-        device: &wgpu::Device,
-        uploader: &super::texture_upload::SharedUploader,
-        map: Option<&MapPreview>,
-    ) -> Self {
+    pub(super) fn new(device: &wgpu::Device, map: Option<&MapPreview>) -> Self {
         let model = model_lighting::State::new(
             map.map_or(&[], |map| map.model_lighting.as_slice()),
             &styles(map, 0.0),
         );
         Self {
-            lightmap: lightmaps::Frame::new(uploader, map.and_then(|map| map.lightmap.as_ref())),
             model_lights: model_lighting::upload(device, model.data()),
             model,
             #[cfg(feature = "map-capture")]
@@ -82,13 +75,6 @@ impl Frame {
             &super::super::capture::CaptureDiagnostics,
         >,
     ) {
-        #[cfg(feature = "map-capture")]
-        let lightmap_span = observer
-            .and_then(|observer| observer.span(super::super::capture::Phase::LightmapUpdate));
-        self.lightmap
-            .update(map.and_then(|map| map.lightmap.as_ref()), time as f32);
-        #[cfg(feature = "map-capture")]
-        drop(lightmap_span);
         #[cfg(feature = "map-capture")]
         let _model_span = observer
             .and_then(|observer| observer.span(super::super::capture::Phase::ModelLightingUpdate));

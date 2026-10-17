@@ -42,7 +42,7 @@ pub fn draw_sky_background<'a>(
     upload: &'a ViewerScene,
     uniforms: &'a wgpu::BindGroup,
 ) {
-    let Some(skybox) = upload.assets.skybox.as_ref() else {
+    let Some(skybox) = upload.bindings.background.skybox.as_ref() else {
         return;
     };
     pass.set_pipeline(&resources.sky_pipeline);
@@ -182,11 +182,8 @@ pub fn draw_operations<'a>(
                     continue;
                 };
                 pass.set_pipeline(&resources.detail_pipeline);
-                pass.set_bind_group(
-                    1,
-                    &upload.assets.material_bind_groups[sprites.material_index],
-                    &[],
-                );
+                pass.set_bind_group(2, upload.lightmaps.binding(None), &[]);
+                pass.set_bind_group(1, &upload.bindings.materials[sprites.material_index], &[]);
                 pass.set_vertex_buffer(0, sprites.vertices.slice(..));
                 pass.draw(range.clone(), 0..1);
             }
@@ -202,6 +199,7 @@ pub fn draw_surface_mark<'a>(
 ) {
     let blend = SurfaceBlend::from(item.blend);
     let fallback = match item.blend {
+        super::RenderMode::NoDraw => return,
         super::RenderMode::Opaque | super::RenderMode::Cutout => &resources.overlay_opaque_pipeline,
         super::RenderMode::Additive => &resources.overlay_additive_pipeline,
         super::RenderMode::Modulate => &resources.overlay_modulate_pipeline,
@@ -245,17 +243,20 @@ pub fn draw_model_item<'a>(
     let Some(mesh) = upload.meshes.get(item.mesh_index) else {
         return;
     };
-    let Some(bind_group) = upload.assets.material_bind_groups.get(item.material_slot) else {
+    let Some(bind_group) = upload.bindings.materials.get(item.material_slot) else {
         return;
     };
-    draw_uploaded_mesh(
-        pass,
-        mesh.vertices(),
-        &mesh.indices,
-        mesh.index_count,
-        bind_group,
-        visibility.mesh_indices.get(&item.mesh_index),
-    );
+    pass.set_bind_group(1, bind_group, &[]);
+    pass.set_vertex_buffer(0, mesh.vertices().slice(..));
+    if let Some(visible) = visibility.mesh_indices.get(&item.mesh_index) {
+        if let Some(buffer) = &visible.buffer {
+            pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
+            draw_lightmap_ranges(pass, &upload.lightmaps, &visible.lightmaps);
+        }
+    } else {
+        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+        draw_lightmap_ranges(pass, &upload.lightmaps, &mesh.lightmaps.indexed);
+    }
 }
 
 fn draw_model_range<'a>(
@@ -265,14 +266,24 @@ fn draw_model_range<'a>(
     range: std::ops::Range<u32>,
 ) {
     let mesh = &upload.meshes[item.mesh_index];
-    pass.set_bind_group(
-        1,
-        &upload.assets.material_bind_groups[item.material_slot],
-        &[],
-    );
+    pass.set_bind_group(1, &upload.bindings.materials[item.material_slot], &[]);
     pass.set_vertex_buffer(0, mesh.vertices().slice(..));
     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-    pass.draw_indexed(range, 0, 0..1);
+    for part in mesh.lightmaps.intersect(range) {
+        pass.set_bind_group(2, upload.lightmaps.binding(part.page), &[]);
+        pass.draw_indexed(part.indices, 0, 0..1);
+    }
+}
+
+pub(super) fn draw_lightmap_ranges<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    lightmaps: &'a super::lightmaps::Snapshot,
+    ranges: &[super::lightmap_ranges::PageRange],
+) {
+    for range in ranges {
+        pass.set_bind_group(2, lightmaps.binding(range.page), &[]);
+        pass.draw_indexed(range.indices.clone(), 0, 0..1);
+    }
 }
 
 pub fn draw_phy_debug_meshes<'a>(
@@ -284,8 +295,9 @@ pub fn draw_phy_debug_meshes<'a>(
         return;
     };
     pass.set_pipeline(&resources.phy_debug_pipeline);
+    pass.set_bind_group(2, upload.lightmaps.binding(None), &[]);
     for mesh in meshes {
-        let Some(bind_group) = upload.assets.material_bind_groups.get(mesh.material_index) else {
+        let Some(bind_group) = upload.bindings.materials.get(mesh.material_index) else {
             continue;
         };
         draw_uploaded_mesh(
@@ -334,10 +346,13 @@ pub fn draw_overlay_item<'a>(
     let Some(overlay) = upload.overlays.get(item.overlay_index) else {
         return;
     };
-    let Some(bind_group) = upload.assets.material_bind_groups.get(item.material_slot) else {
+    let Some(bind_group) = upload.bindings.materials.get(item.material_slot) else {
         return;
     };
     pass.set_bind_group(1, bind_group, &[]);
     pass.set_vertex_buffer(0, overlay.vertices().slice(..));
-    pass.draw(0..overlay.vertex_count, 0..1);
+    for range in &overlay.lightmaps {
+        pass.set_bind_group(2, upload.lightmaps.binding(range.page), &[]);
+        pass.draw(range.indices.clone(), 0..1);
+    }
 }

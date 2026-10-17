@@ -35,6 +35,13 @@ pub struct TextureMetadata {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum AssetKind {
     Vtf,
+    Source {
+        token: super::TextureSourceId,
+        metadata: TextureMetadata,
+    },
+    Page {
+        metadata: TextureMetadata,
+    },
     Generated {
         namespace: String,
         metadata: TextureMetadata,
@@ -50,8 +57,16 @@ pub struct TextureAssetId {
 
 impl fmt::Debug for TextureAssetId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TextureAssetId")
-            .field("sha256", &format_args!("{:02x?}", self.digest))
+        let mut debug = f.debug_struct("TextureAssetId");
+        match &self.kind {
+            AssetKind::Source { token, .. } => {
+                debug.field("source_token", token);
+            }
+            _ => {
+                debug.field("sha256", &format_args!("{:02x?}", self.digest));
+            }
+        }
+        debug
             .field("kind", &self.kind)
             .field("byte_len", &self.encoded_len)
             .finish()
@@ -82,6 +97,11 @@ pub struct TextureResidentId {
 pub enum TextureResidency {
     Resident(Arc<ResidentTexture>),
     Deferred(TextureResidentId),
+    OnDemand {
+        source: Arc<super::ReloadableTextureSource>,
+        recipe: super::TextureFrameRequest,
+        id: TextureResidentId,
+    },
 }
 
 impl TextureResidency {
@@ -92,15 +112,47 @@ impl TextureResidency {
             None
         }
     }
+    pub(crate) fn on_demand(
+        &self,
+    ) -> Option<(
+        &Arc<super::ReloadableTextureSource>,
+        &super::TextureFrameRequest,
+    )> {
+        match self {
+            Self::OnDemand { source, recipe, .. } => Some((source, recipe)),
+            _ => None,
+        }
+    }
+    pub(super) fn on_demand_source(
+        source: Arc<super::ReloadableTextureSource>,
+        recipe: super::TextureFrameRequest,
+    ) -> Self {
+        let id = TextureResidentId {
+            asset: TextureAssetId {
+                digest: [0; 32],
+                kind: AssetKind::Source {
+                    token: source.source_id(),
+                    metadata: source.metadata().clone(),
+                },
+                encoded_len: 0,
+            },
+            frames: recipe.frame..recipe.frame + 1,
+            faces: recipe.faces.clone(),
+            first_source_mip: recipe.first_source_mip,
+            mip_count: recipe.mip_count,
+            storage: recipe.storage,
+        };
+        Self::OnDemand { source, recipe, id }
+    }
     pub(crate) fn id(&self) -> &TextureResidentId {
         match self {
             Self::Resident(resident) => resident.id(),
-            Self::Deferred(id) => id,
+            Self::Deferred(id) | Self::OnDemand { id, .. } => id,
         }
     }
     pub(super) fn load_outcome(&self) -> super::TextureLoadOutcome {
         match self {
-            Self::Resident(_) => super::TextureLoadOutcome::Loaded,
+            Self::Resident(_) | Self::OnDemand { .. } => super::TextureLoadOutcome::Loaded,
             Self::Deferred(_) => super::TextureLoadOutcome::Deferred,
         }
     }
@@ -119,7 +171,7 @@ impl TextureResidency {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct TextureBytes {
     backing: Arc<[u8]>,
     range: Range<usize>,
@@ -135,6 +187,13 @@ impl fmt::Debug for TextureBytes {
 }
 
 impl TextureBytes {
+    pub(super) fn legacy_alias(&self) -> Self {
+        Self {
+            backing: Arc::clone(&self.backing),
+            range: self.range.clone(),
+        }
+    }
+
     pub(super) fn backing_id(&self) -> usize {
         self.backing.as_ptr() as usize
     }
@@ -154,21 +213,21 @@ impl TextureBytes {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResidentTextureMip {
     pub source_mip: u8,
     pub dimensions: [u32; 2],
     pub bytes: TextureBytes,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResidentTextureLayer {
     pub frame: u32,
     pub face: u32,
     pub mips: Vec<ResidentTextureMip>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResidentTexture {
     id: TextureResidentId,
     metadata: Arc<TextureMetadata>,
@@ -176,6 +235,48 @@ pub struct ResidentTexture {
 }
 
 impl ResidentTexture {
+    pub(super) fn from_page(
+        metadata: Arc<TextureMetadata>,
+        frames: Range<u32>,
+        faces: Range<u32>,
+        mips: Range<u8>,
+        storage: TextureStorage,
+        layers: Vec<ResidentTextureLayer>,
+    ) -> Result<Arc<Self>, TextureAssetError> {
+        if frames.is_empty() || faces.is_empty() || mips.is_empty() {
+            return Err(TextureAssetError::Selection);
+        }
+        let mut hash = Sha256::new();
+        let mut byte_len = 0usize;
+        for mip in layers.iter().flat_map(|layer| &layer.mips) {
+            hash.update(mip.bytes.as_slice());
+            byte_len = byte_len
+                .checked_add(mip.bytes.as_slice().len())
+                .ok_or(TextureAssetError::WorkingCostOverflow)?;
+        }
+        let asset = TextureAssetId {
+            digest: hash.finalize().into(),
+            kind: AssetKind::Page {
+                metadata: (*metadata).clone(),
+            },
+            encoded_len: byte_len,
+        };
+        let resident = Self {
+            id: TextureResidentId {
+                asset,
+                frames,
+                faces,
+                first_source_mip: mips.start,
+                mip_count: mips.end - mips.start,
+                storage,
+            },
+            metadata,
+            layers,
+        };
+        resident.validate()?;
+        Ok(Arc::new(resident))
+    }
+
     pub fn id(&self) -> &TextureResidentId {
         &self.id
     }
@@ -336,6 +437,10 @@ pub enum TextureAssetError {
     ArchiveIndex(vformats::ArchiveIndexLimit),
     #[error(transparent)]
     Vtf(#[from] VtfError),
+    #[error("selected texture source changed after selection")]
+    SourceChanged,
+    #[error("selected texture source read failed: {0}")]
+    SourceRead(Arc<str>),
     #[error("texture storage does not match its source format")]
     Storage,
     #[error("no stored mip satisfies dimension limit {0}")]
@@ -369,7 +474,7 @@ struct TextureRecipe {
     payload_working_bytes: usize,
 }
 
-fn metadata_from_header(header: &vformats::vtf::VtfHeader) -> TextureMetadata {
+pub(super) fn metadata_from_header(header: &vformats::vtf::VtfHeader) -> TextureMetadata {
     TextureMetadata {
         flags: Some(header.flags),
         original_dimensions: header.dimensions,
@@ -682,7 +787,7 @@ pub(super) enum TextureSourceError {
     #[error("texture source {origin:?}: {error}")]
     Invalid {
         origin: TextureOrigin,
-        bytes: TextureBytes,
+        bytes: Arc<TextureBytes>,
         error: TextureAssetError,
     },
 }
@@ -760,7 +865,7 @@ impl MaterialResolver {
 
     fn source_header(
         &self,
-        descriptor: &mut super::texture_source::SourceEntryDescriptor<'_>,
+        descriptor: &mut super::texture_source::SourceEntryDescriptor,
         cost: super::texture_source::TextureSourceReadCost,
     ) -> (Option<Arc<TextureMetadata>>, Option<Arc<str>>) {
         let header = cost
@@ -967,10 +1072,10 @@ impl MaterialResolver {
                             TextureAsset::from_bytes(Arc::clone(&bytes), &Limits::default())
                                 .map_err(|error| TextureSourceError::Invalid {
                                     origin: origin.clone(),
-                                    bytes: TextureBytes {
+                                    bytes: Arc::new(TextureBytes {
                                         range: 0..bytes.len(),
                                         backing: bytes,
-                                    },
+                                    }),
                                     error,
                                 })?;
                         Ok(Arc::new(SelectedTextureAsset { origin, asset }))
@@ -995,7 +1100,7 @@ impl MaterialResolver {
                 .texture_access
                 .source(selected.asset.source_bytes()),
             Err(TextureSourceError::Invalid { bytes, .. }) => {
-                self.config.texture_access.source(bytes.clone());
+                self.config.texture_access.source(bytes.legacy_alias());
             }
             _ => {}
         }
@@ -1462,7 +1567,7 @@ mod tests {
             .unwrap();
         let normal = material.shader.surface().unwrap().normal.as_ref().unwrap();
         assert!(Arc::ptr_eq(
-            material.texture.resident().unwrap(),
+            material.texture.as_ref().unwrap().resident().unwrap(),
             normal.resident().unwrap()
         ));
         assert_eq!(normal.frame_count(), 2);
@@ -1569,7 +1674,8 @@ mod tests {
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(texture.load_outcome(), TextureLoadOutcome::InvalidSource);
         assert!(texture.has_effective_base_texture());
         assert!(Arc::ptr_eq(
@@ -1598,7 +1704,8 @@ mod tests {
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(texture.load_outcome(), TextureLoadOutcome::InvalidPayload);
         assert_eq!(
             texture
@@ -1637,7 +1744,8 @@ mod tests {
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(texture.load_outcome(), TextureLoadOutcome::MissingSource);
         assert_eq!(texture.mapping_dimensions(), Some((32, 32)));
         assert!(texture.has_effective_base_texture());
@@ -1664,7 +1772,7 @@ mod tests {
             super::super::SurfaceFamily::Unlit
         );
         assert!(Arc::ptr_eq(
-            fallback.texture.resident().unwrap(),
+            fallback.texture.as_ref().unwrap().resident().unwrap(),
             &missing_material_resident()
         ));
         assert_eq!(
@@ -1685,7 +1793,8 @@ mod tests {
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(loaded.source_metadata().unwrap().mip_count, 2);
         assert_eq!(loaded.resident().unwrap().id().mip_count, 1);
         let retained = resolver
@@ -1693,7 +1802,8 @@ mod tests {
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap()
-            .texture;
+            .texture
+            .unwrap();
         assert_eq!(retained.load_outcome(), TextureLoadOutcome::Loaded);
         assert_eq!(retained.resident().unwrap().id().first_source_mip, 0);
         assert_eq!(retained.mapping_dimensions(), Some((2, 2)));
@@ -1723,7 +1833,8 @@ mod tests {
                 .resolve_primary(&[], "test/image")
                 .into_material()
                 .unwrap()
-                .texture;
+                .texture
+                .unwrap();
             assert_eq!(native.resident().unwrap().id().first_source_mip, 0);
             assert_eq!(native.resident().unwrap().id().mip_count, 2);
             let reduced = resolver
@@ -1731,7 +1842,8 @@ mod tests {
                 .resolve_primary(&[], "test/image")
                 .into_material()
                 .unwrap()
-                .texture;
+                .texture
+                .unwrap();
             assert_eq!(reduced.load_outcome(), TextureLoadOutcome::Loaded);
             assert_eq!(reduced.resident().unwrap().id().first_source_mip, first);
             assert_eq!(reduced.resident().unwrap().id().mip_count, count);
@@ -1753,7 +1865,7 @@ mod tests {
             .into_material()
             .unwrap();
         assert_eq!(
-            rejected.texture.load_outcome(),
+            rejected.texture.as_ref().unwrap().load_outcome(),
             TextureLoadOutcome::QualityRejected
         );
         assert_eq!(
@@ -1776,11 +1888,11 @@ mod tests {
             .into_material()
             .unwrap();
         assert!(Arc::ptr_eq(
-            original.texture.resident().unwrap(),
-            accepted.texture.resident().unwrap()
+            original.texture.as_ref().unwrap().resident().unwrap(),
+            accepted.texture.as_ref().unwrap().resident().unwrap()
         ));
         assert!(Arc::ptr_eq(
-            accepted.texture.resident().unwrap(),
+            accepted.texture.as_ref().unwrap().resident().unwrap(),
             accepted
                 .shader
                 .surface()
@@ -1808,7 +1920,7 @@ mod tests {
                 .into_material()
                 .unwrap();
             assert_eq!(
-                material.texture.load_outcome(),
+                material.texture.as_ref().unwrap().load_outcome(),
                 TextureLoadOutcome::Unsupported
             );
             assert_eq!(budget.decoded_bytes(), 0);
