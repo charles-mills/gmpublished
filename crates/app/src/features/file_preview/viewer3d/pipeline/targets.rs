@@ -45,8 +45,7 @@ impl RenderTargets {
     }
 
     pub fn size_for_device(device: &wgpu::Device, size: (u32, u32)) -> (u32, u32) {
-        let limit = device.limits().max_texture_dimension_2d;
-        (size.0.clamp(1, limit), size.1.clamp(1, limit))
+        proportional_size(size, device.limits().max_texture_dimension_2d)
     }
 
     #[cfg(feature = "map-capture")]
@@ -164,8 +163,8 @@ struct WaterBindingKey {
     refraction: wgpu::TextureView,
     depth: wgpu::TextureView,
     reflection: wgpu::TextureView,
-    lightmap: wgpu::TextureView,
-    raw_lightmap: wgpu::TextureView,
+    lightmap: super::texture_upload::UploadedView,
+    raw_lightmap: super::texture_upload::UploadedView,
 }
 
 #[derive(Debug)]
@@ -267,4 +266,45 @@ pub fn bytes_per_pixel_for_samples(format: wgpu::TextureFormat, sample_count: u3
     let count = u64::from(sample_count);
     u64::from(format.block_copy_size(None).unwrap_or(4)) * (count + u64::from(count > 1))
         + 4 * count
+}
+
+fn proportional_size(size: (u32, u32), limit: u32) -> (u32, u32) {
+    let (width, height) = (size.0.max(1), size.1.max(1));
+    let longest = width.max(height);
+    let limit = limit.max(1);
+    if longest <= limit {
+        return (width, height);
+    }
+    let scale = |side| (u64::from(side) * u64::from(limit) / u64::from(longest)).max(1) as u32;
+    (scale(width), scale(height))
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::proportional_size;
+
+    #[test]
+    fn target_cap_preserves_aspect_and_dimensions_within_limit() {
+        for (size, limit, expected) in [
+            ((1920, 1080), 4096, (1920, 1080)),
+            ((32768, 16384), 8192, (8192, 4096)),
+            ((16384, 32768), 8192, (4096, 8192)),
+            ((u32::MAX, u32::MAX / 2), 16384, (16384, 8191)),
+            ((0, 0), 8192, (1, 1)),
+            ((u32::MAX, 1), 1, (1, 1)),
+        ] {
+            assert_eq!(proportional_size(size, limit), expected);
+        }
+    }
+
+    #[test]
+    fn integer_rounding_changes_only_the_subpixel_short_dimension() {
+        for (width, height) in [(32000, 17003), (31, 32768), (u32::MAX, 333333)] {
+            let (x, y) = proportional_size((width, height), 8192);
+            assert!(x <= 8192 && y <= 8192 && x > 0 && y > 0);
+            let factor = 8192.0 / f64::from(width.max(height));
+            assert!((f64::from(x) - f64::from(width) * factor).abs() < 1.0);
+            assert!((f64::from(y) - f64::from(height) * factor).abs() < 1.0);
+        }
+    }
 }

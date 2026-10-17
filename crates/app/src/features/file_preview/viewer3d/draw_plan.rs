@@ -5,25 +5,33 @@ use gmpublished_domain::scene::map::{MapSurfaceMarkSource, SourceLightmapPage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod placements;
 mod planar;
+pub(super) use placements::OpaquePlacementIndex;
+use placements::OpaqueRanges;
+mod receivers;
+pub(super) use receivers::ReceiverIndex;
+use receivers::ReceiverVisibility;
 mod world;
 pub(super) use planar::PlanarSurfaceRange;
-pub(super) use world::{WorldBatch, WorldPreparationIssue, validate_rendering};
+pub(super) use world::{
+    Cache as WorldCache, WorldOpaquePlan, WorldPreparationIssue, validate_rendering,
+};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlans {
     pub(super) content_id: u64,
     pub(super) world: Arc<DrawPlan>,
-    pub(super) map_skybox: Option<DrawPlan>,
+    pub(super) map_skybox: Option<Arc<DrawPlan>>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlan {
     pub(super) transparency_leaves:
         Option<Vec<gmpublished_domain::scene::map::MapWorldSurfaceGroup>>,
-    pub(super) world_batches: Vec<WorldBatch>,
-    pub(super) world_preparation_issues: Vec<WorldPreparationIssue>,
+    pub(super) world_opaque: Arc<WorldOpaquePlan>,
     pub(super) opaque: Vec<DrawItem>,
+    pub(super) opaque_ranges: HashMap<usize, OpaqueRanges>,
     pub(super) brushes: Vec<BrushBatch>,
     pub(super) planar: Vec<DrawItem>,
     pub(super) planar_world_ranges: HashMap<usize, Vec<PlanarSurfaceRange>>,
@@ -66,13 +74,26 @@ struct BrushSurfaceState {
     marked: bool,
 }
 
+impl DrawPlan {
+    pub(super) fn opaque_draw_count(&self) -> usize {
+        self.opaque
+            .iter()
+            .map(|item| {
+                self.opaque_ranges
+                    .get(&item.mesh_index)
+                    .map_or(1, |ranges| ranges.indices.len())
+            })
+            .sum()
+    }
+}
+
 #[cfg(feature = "map-capture")]
 impl DrawPlan {
     pub(super) fn opaque_mesh_indices(&self) -> HashSet<usize> {
         self.opaque
             .iter()
             .map(|item| item.mesh_index)
-            .chain(self.world_batches.iter().flat_map(|batch| {
+            .chain(self.world_opaque.batches.iter().flat_map(|batch| {
                 batch
                     .surfaces
                     .meshes
@@ -90,7 +111,8 @@ impl DrawPlan {
     pub(super) fn surface_mark_count(&self) -> usize {
         self.surface_marks.len()
             + self
-                .world_batches
+                .world_opaque
+                .batches
                 .iter()
                 .map(|batch| batch.surfaces.surface_marks.len())
                 .sum::<usize>()
@@ -112,14 +134,13 @@ impl DrawPlan {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DrawItem {
     pub(super) mesh_index: usize,
     pub(super) material_slot: usize,
-    pub(super) distance_squared: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OverlayDrawItem {
     pub(super) blend: RenderMode,
     pub(super) receiver_mesh_index: Option<usize>,
@@ -192,8 +213,9 @@ pub(super) struct PartitionPlanContext<'a> {
 
 #[derive(Clone, Copy, Debug)]
 struct WorldSurfaceVisibility<'a> {
-    meshes: &'a HashMap<usize, bool>,
-    faces: &'a HashSet<(usize, u32)>,
+    meshes: &'a [Option<bool>],
+    faces: &'a ReceiverVisibility,
+    index: &'a ReceiverIndex,
 }
 
 #[cfg(test)]
@@ -232,31 +254,45 @@ impl PartitionFilter {
     }
 }
 
-pub(super) fn prepare_draw_plans(upload: &ViewerScene, request: DrawPlanRequest<'_>) -> DrawPlans {
+pub(super) fn prepare_draw_plans(
+    upload: &ViewerScene,
+    request: DrawPlanRequest<'_>,
+    cache: &mut WorldCache,
+    world_only: bool,
+) -> DrawPlans {
     let world = prepare_partition_draw_plan(
         upload,
-        request.selection.skin_remap,
-        request.selection.bodygroup_choices,
-        request.camera_position,
-        PartitionFilter::World,
-        request.visibility_plan,
-        request.world_view,
+        PartitionDrawRequest {
+            selection: request.selection,
+            camera_position: request.camera_position,
+            partition: PartitionFilter::World,
+            visibility_plan: request.visibility_plan,
+            view: request.world_view,
+            world_only,
+        },
+        cache,
     );
     let map_skybox = if request.map_skybox_visible && request.map_skybox_content_present {
         request.map_skybox_camera_position.map(|camera_position| {
-            prepare_partition_draw_plan(
+            Arc::new(prepare_partition_draw_plan(
                 upload,
-                request.selection.skin_remap,
-                request.selection.bodygroup_choices,
-                camera_position,
-                PartitionFilter::MapSkybox,
-                None,
-                request.skybox_view,
-            )
+                PartitionDrawRequest {
+                    selection: request.selection,
+                    camera_position,
+                    partition: PartitionFilter::MapSkybox,
+                    visibility_plan: None,
+                    view: request.skybox_view,
+                    world_only,
+                },
+                cache,
+            ))
         })
     } else {
         None
     };
+    if map_skybox.is_none() {
+        cache.retire(PartitionFilter::MapSkybox);
+    }
     DrawPlans {
         content_id: request.content_id,
         world: Arc::new(world),
@@ -264,15 +300,33 @@ pub(super) fn prepare_draw_plans(upload: &ViewerScene, request: DrawPlanRequest<
     }
 }
 
-pub(super) fn prepare_partition_draw_plan(
-    upload: &ViewerScene,
-    skin_remap: &[u16],
-    bodygroup_choices: &[usize],
+#[derive(Clone, Copy)]
+struct PartitionDrawRequest<'a> {
+    selection: DrawPlanSelection<'a>,
     camera_position: [f32; 4],
     partition: PartitionFilter,
-    visibility_plan: Option<&WorldVisibilityPlan>,
-    view: Option<&super::Uniforms>,
+    visibility_plan: Option<&'a WorldVisibilityPlan>,
+    view: Option<&'a super::Uniforms>,
+    world_only: bool,
+}
+
+fn prepare_partition_draw_plan(
+    upload: &ViewerScene,
+    request: PartitionDrawRequest<'_>,
+    cache: &mut WorldCache,
 ) -> DrawPlan {
+    let PartitionDrawRequest {
+        selection,
+        camera_position,
+        partition,
+        visibility_plan,
+        view,
+        world_only,
+    } = request;
+    let DrawPlanSelection {
+        skin_remap,
+        bodygroup_choices,
+    } = selection;
     let receivers = receiver_encounters(upload, camera_position, partition, visibility_plan, view);
     let mut plan = prepare_partition_draw_plan_from_sources(
         upload
@@ -296,8 +350,13 @@ pub(super) fn prepare_partition_draw_plan(
             .enumerate()
             .filter(|(_, mark)| {
                 receivers.visible.as_ref().is_none_or(|receivers| {
-                    mark.receiver_mesh_index
-                        .is_some_and(|mesh| receivers.contains(&(mesh, mark.receiver_range.face)))
+                    mark.receiver_mesh_index.is_some_and(|mesh| {
+                        receivers.contains(
+                            &upload.assets.receiver_faces,
+                            mesh,
+                            mark.receiver_range.face,
+                        )
+                    })
                 })
             })
             .map(|(overlay_index, _)| overlay_source(upload, overlay_index)),
@@ -315,7 +374,7 @@ pub(super) fn prepare_partition_draw_plan(
             partition,
             visibility_plan,
             receiver_encounters: &receivers.encounters,
-            world_visibility: receivers.world_visibility(),
+            world_visibility: receivers.world_visibility(&upload.assets.receiver_faces),
         },
     );
     attach_brushes(
@@ -330,8 +389,10 @@ pub(super) fn prepare_partition_draw_plan(
         upload,
         receivers.visible.as_ref(),
         partition,
-        &receivers.encounters,
+        cache,
+        world_only,
     );
+    placements::attach(&mut plan, upload, partition, visibility_plan, view);
     planar::attach(&mut plan, upload, receivers.visible.as_ref());
     plan.transparency_leaves = receivers.leaves;
     plan
@@ -367,6 +428,9 @@ pub(super) fn order_batched_marks(
     receivers: &[ReceiverPlanSource],
     order: ReceiverQueueOrder,
 ) -> Vec<OverlayDrawItem> {
+    if marks.is_empty() {
+        return Vec::new();
+    }
     let sources = marks
         .iter()
         .map(|mark| overlay_source(upload, mark.overlay_index))
@@ -390,7 +454,7 @@ pub(super) enum ReceiverQueueOrder {
 fn attach_brushes(
     plan: &mut DrawPlan,
     upload: &ViewerScene,
-    visible: Option<&HashSet<(usize, u32)>>,
+    visible: Option<&ReceiverVisibility>,
     partition: PartitionFilter,
     camera: [f32; 4],
 ) {
@@ -444,7 +508,9 @@ fn attach_brushes(
                 continue;
             };
             grouped_meshes.insert(mesh_index);
-            if visible.is_some_and(|visible| !visible.contains(&(mesh_index, source.range.face))) {
+            if visible.is_some_and(|visible| {
+                !visible.contains(&upload.assets.receiver_faces, mesh_index, source.range.face)
+            }) {
                 continue;
             }
             let end = source.range.start + source.range.count;
@@ -599,16 +665,19 @@ impl SurfaceBatch {
 #[derive(Default)]
 struct ReceiverEncounters {
     encounters: Vec<ReceiverPlanSource>,
-    visible: Option<HashSet<(usize, u32)>>,
+    visible: Option<ReceiverVisibility>,
     leaves: Option<Vec<gmpublished_domain::scene::map::MapWorldSurfaceGroup>>,
-    world_meshes: HashMap<usize, bool>,
 }
 
 impl ReceiverEncounters {
-    fn world_visibility(&self) -> Option<WorldSurfaceVisibility<'_>> {
+    fn world_visibility<'a>(
+        &'a self,
+        index: &'a ReceiverIndex,
+    ) -> Option<WorldSurfaceVisibility<'a>> {
         self.visible.as_ref().map(|faces| WorldSurfaceVisibility {
-            meshes: &self.world_meshes,
+            meshes: &faces.meshes,
             faces,
+            index,
         })
     }
 }
@@ -627,61 +696,20 @@ fn receiver_encounters(
     else {
         return ReceiverEncounters::default();
     };
-    let mut visible = HashSet::new();
+    let index = &upload.assets.receiver_faces;
     let eye = Vec3::new(camera[0], camera[1], camera[2]);
-    let mut door_eyes = HashMap::new();
-    for (&face, receivers) in &upload.assets.receiver_faces {
-        for receiver in receivers {
-            let source = &map.surface_receivers[receiver.source_index];
-            let mesh = &upload.meshes[receiver.mesh_index];
-            if !partition.accepts(mesh.map_skybox) {
-                continue;
-            }
-            if source.owner != gmpublished_domain::scene::map::MapSurfaceOwner::World {
-                let receiver_eye = mesh.door_index.map_or(eye, |door| {
-                    *door_eyes
-                        .entry(door)
-                        .or_insert_with(|| upload.receiver_eye(receiver.mesh_index, eye))
-                });
-                if source.plane.signed_distance(receiver_eye) < -0.01 {
-                    continue;
-                }
-            }
-            if (map.visibility.is_none()
-                || source.owner != gmpublished_domain::scene::map::MapSurfaceOwner::World)
-                && visibility.is_some_and(|plan| {
-                    !crate::media::preview_model::prop_visible(
-                        &source.visibility,
-                        &plan.visible_clusters,
-                    )
-                })
-            {
-                continue;
-            }
-            if source.owner != gmpublished_domain::scene::map::MapSurfaceOwner::World
-                && mesh.door_index.is_none()
-                && view.is_some_and(|view| !view.intersects_bounds(source.bounds))
-            {
-                continue;
-            }
-            visible.insert((receiver.mesh_index, face));
-        }
-    }
+    let bounds_query = view.map(super::Uniforms::bounds_query);
+    let mut visible = ReceiverVisibility::new(index, partition, map.visibility.is_some());
     let leaves = map.visibility.as_ref().map(|ordering| {
-        ordering.world_surface_groups_in_view(
+        ordering.world_surface_groups_with_culling(
             eye,
-            |face| {
-                upload
-                    .assets
-                    .receiver_faces
-                    .get(&face)
-                    .is_some_and(|receivers| {
-                        receivers
-                            .iter()
-                            .any(|receiver| visible.contains(&(receiver.mesh_index, face)))
-                    })
+            |face| index.world_face(face, partition),
+            |bounds, mask| {
+                bounds_query.as_ref().map_or(
+                    gmpublished_domain::scene::map::MapBoundsCulling::Visible(mask),
+                    |query| query.classify(bounds, mask),
+                )
             },
-            |bounds| view.is_none_or(|view| view.intersects_bounds(bounds)),
             |cluster| {
                 visibility.is_none_or(|plan| {
                     usize::try_from(cluster)
@@ -693,89 +721,68 @@ fn receiver_encounters(
             },
         )
     });
-    let faces = leaves.as_ref().map_or_else(
-        || {
-            let mut faces = upload
-                .assets
-                .receiver_faces
-                .keys()
-                .copied()
-                .collect::<Vec<_>>();
-            faces.sort_unstable();
-            faces
-        },
-        |groups| {
-            groups
-                .iter()
-                .flat_map(|group| group.faces.iter().copied())
-                .collect()
-        },
-    );
+    let mut door_eyes = vec![None; map.doors.len()];
+    let mut accepts_receiver = |receiver: &super::pipeline::UploadedReceiver| {
+        let source = &map.surface_receivers[receiver.source_index];
+        let mesh = &upload.meshes[receiver.mesh_index];
+        if !partition.accepts(mesh.map_skybox) {
+            return false;
+        }
+        if visibility.is_some_and(|plan| {
+            !crate::media::preview_model::prop_visible(&source.visibility, &plan.visible_clusters)
+        }) {
+            return false;
+        }
+        if source.owner.id() == gmpublished_domain::scene::map::MapSurfaceOwnerId::World {
+            return true;
+        }
+        let receiver_eye = mesh.door_index.map_or(eye, |door| {
+            *door_eyes[door].get_or_insert_with(|| upload.receiver_eye(receiver.mesh_index, eye))
+        });
+        if source.plane.signed_distance(receiver_eye) < -0.01 {
+            return false;
+        }
+        mesh.door_index.is_some()
+            || bounds_query
+                .as_ref()
+                .is_none_or(|query| query.intersects(source.bounds))
+    };
     let mut encounters = Vec::new();
-    let ordered_faces = faces.iter().copied().collect::<HashSet<_>>();
-    visible.retain(|&(mesh, face)| {
-        ordered_faces.contains(&face)
-            || upload
-                .assets
-                .receiver_faces
-                .get(&face)
-                .into_iter()
-                .flatten()
-                .any(|receiver| {
-                    receiver.mesh_index == mesh
-                        && map.surface_receivers[receiver.source_index].owner
-                            != gmpublished_domain::scene::map::MapSurfaceOwner::World
-                })
-    });
-    for face in faces {
-        for receiver in upload
-            .assets
-            .receiver_faces
-            .get(&face)
-            .into_iter()
-            .flatten()
-        {
-            if visible.contains(&(receiver.mesh_index, face)) {
-                encounters.push(ReceiverPlanSource {
-                    receiver_mesh_index: Some(receiver.mesh_index),
-                    face,
-                    material_group: receiver.material_group,
-                    lightmap_page: receiver.lightmap_page,
-                });
+    let mut admit = |receiver: &super::pipeline::UploadedReceiver| {
+        visible.admit(receiver);
+        encounters.push(ReceiverPlanSource {
+            receiver_mesh_index: Some(receiver.mesh_index),
+            face: map.surface_receivers[receiver.source_index].range.face,
+            material_group: receiver.material_group,
+            lightmap_page: receiver.lightmap_page,
+        });
+    };
+    if let Some(leaves) = &leaves {
+        for face in leaves.iter().flat_map(|group| &group.faces) {
+            for receiver in index.get(face).into_iter().flatten() {
+                if partition.accepts(upload.meshes[receiver.mesh_index].map_skybox)
+                    && map.surface_receivers[receiver.source_index].owner.id()
+                        == gmpublished_domain::scene::map::MapSurfaceOwnerId::World
+                {
+                    admit(receiver);
+                }
+            }
+        }
+    } else {
+        for (_, receivers) in index {
+            for receiver in receivers {
+                if accepts_receiver(receiver) {
+                    admit(receiver);
+                }
             }
         }
     }
     for group in &upload.assets.brush_receiver_groups {
-        for &(mesh_index, source_index) in &group.receivers {
-            let receiver = &map.surface_receivers[source_index];
-            if visible.contains(&(mesh_index, receiver.range.face)) {
-                let allocation = map
-                    .surface_lightmaps
-                    .as_ref()
-                    .and_then(|layout| layout.surfaces.get(receiver.range.face as usize));
-                encounters.push(ReceiverPlanSource {
-                    receiver_mesh_index: Some(mesh_index),
-                    face: receiver.range.face,
-                    material_group: allocation.map_or(receiver.material_index, |allocation| {
-                        allocation.material_group
-                    }),
-                    lightmap_page: allocation
-                        .map_or(SourceLightmapPage::White, |allocation| allocation.page),
-                });
-            }
-        }
-    }
-    let mut world_meshes = HashMap::new();
-    if map.visibility.is_some() {
-        for (&face, receivers) in &upload.assets.receiver_faces {
-            for receiver in receivers {
-                if map.surface_receivers[receiver.source_index].owner
-                    == gmpublished_domain::scene::map::MapSurfaceOwner::World
-                    && partition.accepts(upload.meshes[receiver.mesh_index].map_skybox)
-                {
-                    *world_meshes.entry(receiver.mesh_index).or_insert(false) |=
-                        visible.contains(&(receiver.mesh_index, face));
-                }
+        for &(_, source_index) in &group.receivers {
+            if let Some(receiver) = index.for_source(source_index)
+                && accepts_receiver(receiver)
+            {
+                admit(receiver);
             }
         }
     }
@@ -783,7 +790,6 @@ fn receiver_encounters(
         encounters,
         visible: Some(visible),
         leaves,
-        world_meshes,
     }
 }
 
@@ -807,7 +813,7 @@ pub(super) fn prepare_draw_plans_from_sources(
     );
     let map_skybox = if request.map_skybox_visible && request.map_skybox_content_present {
         request.map_skybox_camera_position.map(|camera_position| {
-            prepare_partition_draw_plan_from_sources(
+            Arc::new(prepare_partition_draw_plan_from_sources(
                 sources.meshes.iter().copied(),
                 sources.overlays.iter().copied(),
                 PartitionPlanContext {
@@ -819,7 +825,7 @@ pub(super) fn prepare_draw_plans_from_sources(
                     receiver_encounters: &[],
                     world_visibility: None,
                 },
-            )
+            ))
         })
     } else {
         None
@@ -837,6 +843,8 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
     context: PartitionPlanContext<'_>,
 ) -> DrawPlan {
     let mut plan = DrawPlan::default();
+    let mut translucent = Vec::new();
+    let mut planar = Vec::new();
     let camera = [
         context.camera_position[0],
         context.camera_position[1],
@@ -846,9 +854,9 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         if !context.partition.accepts(mesh.map_skybox) {
             continue;
         }
-        if let Some(&visible) = context
+        if let Some(visible) = context
             .world_visibility
-            .and_then(|world| world.meshes.get(&mesh.mesh_index))
+            .and_then(|world| world.meshes.get(mesh.mesh_index).copied().flatten())
         {
             if !visible {
                 continue;
@@ -889,7 +897,6 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         let item = DrawItem {
             mesh_index: mesh.mesh_index,
             material_slot,
-            distance_squared: mesh.centroid.distance_squared(Vec3::from(camera)),
         };
         if context
             .materials
@@ -898,11 +905,13 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
             .copied()
             .unwrap_or(false)
         {
-            plan.planar.push(item);
+            planar.push((item, mesh.centroid.distance_squared(Vec3::from(camera))));
         } else {
             match render_mode {
                 RenderMode::Opaque | RenderMode::Cutout => plan.opaque.push(item),
-                RenderMode::Translucent | RenderMode::Modulate => plan.translucent.push(item),
+                RenderMode::Translucent | RenderMode::Modulate => {
+                    translucent.push((item, mesh.centroid.distance_squared(Vec3::from(camera))));
+                }
                 RenderMode::Additive => plan.additive.push(item),
             }
         }
@@ -914,9 +923,11 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
                 && if overlay.owner == gmpublished_domain::scene::map::MapSurfaceOwnerId::World
                     && let Some(mesh) = overlay.receiver_mesh_index
                     && let Some(world) = context.world_visibility
-                    && world.meshes.contains_key(&mesh)
+                    && world.meshes.get(mesh).is_some_and(Option::is_some)
                 {
-                    world.faces.contains(&(mesh, overlay.receiver_range.face))
+                    world
+                        .faces
+                        .contains(world.index, mesh, overlay.receiver_range.face)
                 } else {
                     context.partition != PartitionFilter::World
                         || context
@@ -925,11 +936,32 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
                 }
         })
         .collect::<Vec<_>>();
+    let (world_marks, overlays): (Vec<_>, Vec<_>) = overlays.into_iter().partition(|overlay| {
+        overlay.owner == gmpublished_domain::scene::map::MapSurfaceOwnerId::World
+            && matches!(overlay.source, MapSurfaceMarkSource::Overlay { .. })
+            && overlay.receiver_mesh_index.is_some_and(|mesh| {
+                plan.opaque.iter().any(|item| item.mesh_index == mesh)
+                    && context
+                        .world_visibility
+                        .and_then(|world| world.meshes.get(mesh))
+                        .is_some_and(Option::is_some)
+            })
+            && matches!(
+                context
+                    .materials
+                    .render_modes
+                    .get(overlay.receiver_material_index),
+                Some(RenderMode::Opaque | RenderMode::Cutout) | None
+            )
+    });
     for overlay in ordered_view_marks(
         &overlays,
         context.receiver_encounters,
         context.materials.render_modes,
-    ) {
+    )
+    .into_iter()
+    .chain(&world_marks)
+    {
         let material_slot = overlay
             .material_index
             .min(context.materials.material_count.saturating_sub(1));
@@ -959,18 +991,16 @@ pub(super) fn prepare_partition_draw_plan_from_sources(
         }
     }
 
-    plan.translucent.sort_by(|left, right| {
-        right
-            .distance_squared
-            .total_cmp(&left.distance_squared)
-            .then_with(|| left.mesh_index.cmp(&right.mesh_index))
-    });
-    plan.planar.sort_by(|left, right| {
-        right
-            .distance_squared
-            .total_cmp(&left.distance_squared)
-            .then_with(|| left.mesh_index.cmp(&right.mesh_index))
-    });
+    let sort = |items: &mut Vec<(DrawItem, f32)>| {
+        items.sort_by(|(left, a), (right, b)| {
+            b.total_cmp(a)
+                .then_with(|| left.mesh_index.cmp(&right.mesh_index))
+        });
+    };
+    sort(&mut translucent);
+    sort(&mut planar);
+    plan.translucent = translucent.into_iter().map(|(item, _)| item).collect();
+    plan.planar = planar.into_iter().map(|(item, _)| item).collect();
     plan
 }
 
@@ -1039,6 +1069,15 @@ fn ordered_surface_marks_with_order<'a>(
     order: ReceiverQueueOrder,
 ) -> Vec<&'a OverlayPlanSource> {
     let marks = marks.into_iter().collect::<Vec<_>>();
+    if marks.is_empty() {
+        return Vec::new();
+    }
+    if marks
+        .iter()
+        .all(|mark| matches!(mark.source, MapSurfaceMarkSource::Decal { .. }))
+    {
+        return ordered_static_decals(&marks, receiver_encounters);
+    }
     let mut receiver_chains = Vec::new();
     let mut receiver_chain_indices = HashMap::new();
     let mut encountered_faces = HashSet::new();
@@ -1130,6 +1169,9 @@ fn ordered_static_decals<'a>(
     decals: &[&'a OverlayPlanSource],
     receiver_encounters: &[ReceiverPlanSource],
 ) -> Vec<&'a OverlayPlanSource> {
+    if decals.is_empty() {
+        return Vec::new();
+    }
     let mut faces = HashMap::<_, Vec<&OverlayPlanSource>>::new();
     for &mark in decals {
         faces
@@ -1149,7 +1191,6 @@ fn ordered_static_decals<'a>(
             MapSurfaceMarkSource::Overlay { .. } => unreachable!(),
         });
     }
-    let mut encountered = HashSet::new();
     let mut buckets = std::collections::BTreeMap::<_, Vec<&OverlayPlanSource>>::new();
     for face in receiver_encounters
         .iter()
@@ -1160,10 +1201,7 @@ fn ordered_static_decals<'a>(
                 .map(|mark| (mark.receiver_mesh_index, mark.receiver_range.face)),
         )
     {
-        if !encountered.insert(face) {
-            continue;
-        }
-        for &mark in faces.get(&face).into_iter().flatten() {
+        for mark in faces.remove(&face).into_iter().flatten() {
             let sort = mark
                 .decal_sort
                 .expect("static decal registration precedes view preparation");
@@ -1325,8 +1363,22 @@ mod tests {
             visible_clusters: vec![false, true],
             visible_cluster_count: 1,
         };
-        let world_meshes = HashMap::from([(0, true), (1, false)]);
-        let selected_faces = HashSet::from([(0, 3)]);
+        let world_meshes = [Some(true), Some(false), None];
+        let receiver_index = ReceiverIndex::from_faces(
+            HashMap::from([(
+                3,
+                vec![super::super::pipeline::UploadedReceiver {
+                    source_index: 0,
+                    mesh_index: 0,
+                    material_group: 0,
+                    lightmap_page: SourceLightmapPage::White,
+                }],
+            )]),
+            1,
+        );
+        let mut selected_faces =
+            ReceiverVisibility::new(&receiver_index, PartitionFilter::World, false);
+        selected_faces.admit(receiver_index.for_source(0).unwrap());
         let base = OverlayPlanSource {
             receiver_mesh_index: Some(0),
             receiver_displacement: true,
@@ -1373,6 +1425,7 @@ mod tests {
                 world_visibility: Some(WorldSurfaceVisibility {
                     meshes: &world_meshes,
                     faces: &selected_faces,
+                    index: &receiver_index,
                 }),
             },
         );
@@ -1479,6 +1532,67 @@ mod tests {
             .collect()
     }
 
+    fn world_mark_plan(
+        skin_remap: &[u16],
+        overlays: impl IntoIterator<Item = OverlayPlanSource>,
+    ) -> DrawPlan {
+        let index = ReceiverIndex::from_faces(
+            HashMap::from([(
+                0,
+                vec![super::super::pipeline::UploadedReceiver {
+                    source_index: 0,
+                    mesh_index: 0,
+                    material_group: 0,
+                    lightmap_page: SourceLightmapPage::Physical(0),
+                }],
+            )]),
+            1,
+        );
+        let mut faces = ReceiverVisibility::new(&index, PartitionFilter::World, false);
+        faces.admit(index.for_source(0).unwrap());
+        prepare_partition_draw_plan_from_sources(
+            [mesh_plan_source(0, false, Vec3::ZERO)],
+            overlays,
+            PartitionPlanContext {
+                materials: DrawPlanMaterials {
+                    render_modes: &[RenderMode::Opaque, RenderMode::Translucent],
+                    planar_materials: &[],
+                    material_count: 2,
+                },
+                selection: DrawPlanSelection {
+                    skin_remap,
+                    bodygroup_choices: &[],
+                },
+                camera_position: [0.0; 4],
+                partition: PartitionFilter::World,
+                visibility_plan: None,
+                receiver_encounters: &[],
+                world_visibility: Some(WorldSurfaceVisibility {
+                    meshes: &[Some(true)],
+                    faces: &faces,
+                    index: &index,
+                }),
+            },
+        )
+    }
+
+    #[test]
+    fn translucent_skin_keeps_marks_ordered_when_opaque_world_batches_cannot_own_them() {
+        let overlays = [1, 0].map(|overlay_index| OverlayPlanSource {
+            receiver_mesh_index: Some(0),
+            ..overlay_plan_source(overlay_index, false, Vec3::ZERO)
+        });
+        let plan = world_mark_plan(&[1], overlays);
+        assert_eq!(plan.translucent.len(), 1);
+        assert_eq!(
+            plan.surface_marks
+                .iter()
+                .map(|mark| mark.overlay_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+    }
+
     fn decal_sort(
         format_group: usize,
         bucket: usize,
@@ -1498,6 +1612,56 @@ mod tests {
         };
         mark.decal_sort = Some(decal_sort(0, bucket));
         mark
+    }
+
+    #[test]
+    fn world_static_decal_fragments_retain_stable_creation_ties_before_batching() {
+        let mut marks = [static_mark(0, 0, 0, 0), static_mark(1, 0, 0, 0)];
+        for mark in &mut marks {
+            mark.receiver_mesh_index = Some(0);
+            mark.source = MapSurfaceMarkSource::Decal {
+                entity_index: 5,
+                permanence: Default::default(),
+            };
+        }
+        let plan = world_mark_plan(&[], marks);
+        assert_eq!(
+            plan.surface_marks
+                .iter()
+                .map(|mark| mark.overlay_index)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+    }
+
+    #[test]
+    fn static_decals_ignore_duplicate_unmarked_encounters_without_merging_owners() {
+        let mut marks = [
+            static_mark(0, 0, 7, 0),
+            static_mark(1, 0, 7, 0),
+            static_mark(2, 0, 8, 0),
+        ];
+        marks[1].receiver_mesh_index = Some(2);
+        let receiver = |mesh, face| ReceiverPlanSource {
+            receiver_mesh_index: mesh,
+            face,
+            material_group: 0,
+            lightmap_page: SourceLightmapPage::Physical(0),
+        };
+        assert_eq!(
+            ordered_indices(
+                &marks,
+                &[
+                    receiver(None, 99),
+                    receiver(None, 7),
+                    receiver(None, 7),
+                    receiver(Some(2), 7),
+                    receiver(None, 8),
+                    receiver(Some(2), 7),
+                ]
+            ),
+            [2, 1, 0]
+        );
     }
 
     #[test]

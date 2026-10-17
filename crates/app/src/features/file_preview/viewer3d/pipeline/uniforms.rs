@@ -338,11 +338,8 @@ impl Uniforms {
         self
     }
 
-    pub fn intersects_bounds(&self, bounds: gmpublished_domain::scene::map::MapBounds) -> bool {
-        if !super::reflections::bounds_intersect_view(bounds.min, bounds.max, self.view_proj) {
-            return false;
-        }
-        self.raster_clip.intersects_bounds(bounds)
+    pub fn bounds_query(&self) -> super::bounds_query::BoundsQuery {
+        super::bounds_query::BoundsQuery::new(self)
     }
 
     /// Source's half-pixel shift uses physical render-target coordinates.
@@ -630,6 +627,9 @@ pub fn scene_sky_tint(skybox: Option<&Skybox>) -> Vec3 {
 }
 
 fn texture_smallest_mip_average(texture: &ResolvedTexture) -> Option<Vec3> {
+    if texture.load_outcome().is_unavailable() {
+        return None;
+    }
     if let Some((format, mips)) = texture.bc_payload() {
         let mip = mips.last()?;
         return average_bc_rgba(

@@ -2316,6 +2316,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
     )
     .expect("fixture archive should load");
     preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "lua/autorun/init.lua".to_owned(),
@@ -2323,6 +2324,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
         size_bytes: 12,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 

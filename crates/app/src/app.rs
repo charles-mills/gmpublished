@@ -49,6 +49,8 @@ const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
 mod display;
 mod drag;
+#[cfg(feature = "gui-benchmark")]
+pub mod gui_benchmark;
 mod hidden_addons;
 mod routes;
 pub mod runners;
@@ -99,6 +101,8 @@ use view_support::{addon_drag_ghost, resolve_tokens, system_scheme_from_mode};
 
 #[derive(Debug)]
 pub struct App {
+    #[cfg(feature = "gui-benchmark")]
+    gui_benchmark: Option<gui_benchmark::Harness>,
     environment: AppEnvironment,
     state: State,
     window_id: Option<window::Id>,
@@ -513,6 +517,8 @@ impl
 
 #[derive(Clone, Debug)]
 pub enum RootMessage {
+    #[cfg(feature = "gui-benchmark")]
+    GuiBenchmark(gui_benchmark::Message),
     Shell(shell::Message),
     MyWorkshop(my_workshop::Message),
     InstalledAddons(installed_addons::Message),
@@ -691,6 +697,8 @@ impl App {
             state.i18n.locale_id(),
         ));
         let app = Self {
+            #[cfg(feature = "gui-benchmark")]
+            gui_benchmark: None,
             environment: AppEnvironment {
                 ctx,
                 thumbnails,
@@ -813,6 +821,8 @@ impl App {
     fn update_at(&mut self, message: RootMessage, update: UpdateContext) -> Task<RootMessage> {
         self.update_context = update;
         match message {
+            #[cfg(feature = "gui-benchmark")]
+            RootMessage::GuiBenchmark(message) => self.update_gui_benchmark(message),
             RootMessage::Shell(message) => self.apply_shell_message(message, update),
             RootMessage::MyWorkshop(message) => self.apply_my_workshop_message(message),
             RootMessage::InstalledAddons(message) => self.apply_installed_addons_message(message),
@@ -955,6 +965,10 @@ impl App {
             }
             RootMessage::WindowEvent(id, event) => self.window_event_task(id, &event),
             RootMessage::WindowScaleFactorObserved(id, scale_factor) => {
+                #[cfg(feature = "gui-benchmark")]
+                if let Some(harness) = &mut self.gui_benchmark {
+                    harness.scale_factor = Some(scale_factor);
+                }
                 self.apply_window_scale_factor(id, scale_factor)
             }
             RootMessage::AddonDrag(message) => self.addon_drag_event_task(&message),
@@ -1586,6 +1600,10 @@ impl App {
     }
 
     pub(crate) fn view(&self) -> Element<'_, RootMessage> {
+        #[cfg(feature = "gui-benchmark")]
+        if let Some(view) = self.gui_benchmark_pair_view() {
+            return view;
+        }
         let tokens = self.state.tokens;
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
         let now = Instant::now();
@@ -2057,6 +2075,10 @@ impl App {
             );
         }
         streams.push(window::events().map(|(id, event)| RootMessage::WindowEvent(id, event)));
+        #[cfg(feature = "gui-benchmark")]
+        if self.gui_benchmark.is_some() {
+            streams.push(gui_benchmark::subscription());
+        }
         if !self.startup_phase.started() {
             // `window::events` filters redraws. Listen for one frame to avoid an idle frame loop.
             streams.push(event::listen_raw(first_frame_presented_event));

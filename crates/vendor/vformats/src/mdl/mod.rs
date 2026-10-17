@@ -22,9 +22,7 @@ pub use assembly::{
 };
 
 mod vertex_compression;
-pub use vertex_compression::{
-    VertexCompression, source_ubyte4_tangent, source_ubyte4_vector,
-};
+pub use vertex_compression::{VertexCompression, source_ubyte4_tangent, source_ubyte4_vector};
 
 mod vhv;
 pub use vhv::{Vhv, VhvError, VhvMesh, parse_vhv};

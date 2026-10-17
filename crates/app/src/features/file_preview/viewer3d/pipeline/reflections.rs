@@ -1,4 +1,4 @@
-use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection, prepare_draw_plans};
+use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 use super::DrawPlans;
 use super::geometry::ViewerScene;
 use super::targets::RenderTargets;
@@ -168,6 +168,8 @@ pub struct SceneView {
     pub visibility: UploadedVisibility,
     pub skybox_visibility: UploadedVisibility,
     pub plans: Option<DrawPlans>,
+    pub(super) plan_cache: super::view_preparation::PlanCache,
+    pub(super) queue_cache: super::view_preparation::QueueCache,
     pub targets: Option<RenderTargets>,
     pub(super) planar_indices: super::planar::Selections,
     pub transparency: Vec<super::transparency::Draw>,
@@ -191,6 +193,8 @@ impl SceneView {
             visibility: UploadedVisibility::default(),
             skybox_visibility: UploadedVisibility::default(),
             plans: None,
+            plan_cache: super::view_preparation::PlanCache::default(),
+            queue_cache: super::view_preparation::QueueCache::default(),
             targets: None,
             planar_indices: super::planar::Selections::default(),
             transparency: Vec::new(),
@@ -454,7 +458,7 @@ impl PlanarView {
                 eye,
             );
         }
-        let mut plans = prepare_draw_plans(
+        let plans = view.plan_cache.prepare(
             upload,
             DrawPlanRequest {
                 world_view: Some(&main),
@@ -465,39 +469,19 @@ impl PlanarView {
                     bodygroup_choices: &primitive.bodygroup_choices,
                 },
                 camera_position: main.camera_position,
-                map_skybox_visible: primitive.map_skybox_visible,
+                map_skybox_visible: primitive.map_skybox_visible
+                    && water.is_none_or(|water| water.reflect_3d_skybox),
                 map_skybox_content_present: upload.assets.has_map_skybox_content(),
                 map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
                 visibility_plan: view.visibility.plan.as_ref(),
             },
+            view.visibility.revision,
+            if water.is_some_and(|water| !water.reflect_entities) {
+                super::view_preparation::Entities::WorldOnly
+            } else {
+                super::view_preparation::Entities::All
+            },
         );
-        if let Some(water) = primitive
-            .preview
-            .render_scene()
-            .materials
-            .get(surface.material_slot)
-            .and_then(|slot| slot.shader.water())
-        {
-            if !water.reflect_entities {
-                let world = std::sync::Arc::make_mut(&mut plans.world);
-                world.brushes.clear();
-                world.receiver_marks.retain(|mark| {
-                    upload.overlays[mark.overlay_index].owner
-                        == gmpublished_domain::scene::map::MapSurfaceOwner::World
-                });
-                for items in [
-                    &mut world.opaque,
-                    &mut world.translucent,
-                    &mut world.additive,
-                    &mut world.planar,
-                ] {
-                    items.retain(|item| !upload.meshes[item.mesh_index].entity);
-                }
-            }
-            if !water.reflect_3d_skybox {
-                plans.map_skybox = None;
-            }
-        }
         let sun_skybox = skybox.filter(|_| plans.map_skybox.is_some());
         view.plans = Some(plans);
         super::transparency::prepare(

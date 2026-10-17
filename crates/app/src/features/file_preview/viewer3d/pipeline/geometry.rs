@@ -11,6 +11,7 @@ pub struct ViewerScene {
     pub assets: Arc<UploadedModel>,
     pub meshes: Vec<ViewerMesh>,
     pub overlays: Vec<ViewerOverlay>,
+    geometry_revision: u64,
 }
 
 #[derive(Debug)]
@@ -43,9 +44,9 @@ impl DoorDeformation {
         door: &super::DoorInstance,
         local: &[ModelVertex],
         pose: DoorRenderPose,
-    ) {
+    ) -> bool {
         if self.pose == pose {
-            return;
+            return false;
         }
         transform_door_vertices_into(door, local, pose, &mut self.scratch);
         let bytes = bytemuck::cast_slice(&self.scratch);
@@ -60,6 +61,7 @@ impl DoorDeformation {
         queue.write_buffer(vertices, 0, bytes);
         self.centroid = mesh_centroid(&self.scratch);
         self.pose = pose;
+        true
     }
 }
 
@@ -107,6 +109,23 @@ impl ViewerOverlay {
 }
 
 impl ViewerScene {
+    pub fn geometry_revision(&self) -> u64 {
+        self.geometry_revision
+    }
+
+    pub(super) fn refresh_assets(&mut self, assets: Arc<UploadedModel>) {
+        assert_eq!(self.assets.source.key(), assets.source.key());
+        assert_eq!(self.meshes.len(), assets.meshes.len());
+        assert_eq!(self.overlays.len(), assets.overlays.len());
+        for (mesh, source) in self.meshes.iter_mut().zip(&assets.meshes) {
+            mesh.source = Arc::clone(source);
+        }
+        for (overlay, source) in self.overlays.iter_mut().zip(&assets.overlays) {
+            overlay.source = Arc::clone(source);
+        }
+        self.assets = assets;
+    }
+
     pub fn brush_origin(
         &self,
         mesh_index: usize,
@@ -260,6 +279,7 @@ impl ViewerScene {
             assets,
             meshes,
             overlays,
+            geometry_revision: 0,
         }
     }
 
@@ -284,13 +304,14 @@ impl ViewerScene {
                 progress: door.initial_progress.clamp(0.0, 1.0),
                 swing: initial_door_swing(door.motion),
             });
-            deformation.update(
+            let changed = deformation.update(
                 device,
                 queue,
                 door,
                 mesh.source.local_vertices.as_deref().unwrap(),
                 pose,
             );
+            self.geometry_revision = self.geometry_revision.wrapping_add(u64::from(changed));
         }
         for mark in &mut self.overlays {
             let gmpublished_domain::scene::map::MapSurfaceOwner::Door { door_index, .. } =
@@ -306,13 +327,14 @@ impl ViewerScene {
                 .get(door_index)
                 .copied()
                 .unwrap_or_else(|| initial_pose(door));
-            deformation.update(
+            let changed = deformation.update(
                 device,
                 queue,
                 door,
                 mark.source.local_vertices.as_deref().unwrap(),
                 pose,
             );
+            self.geometry_revision = self.geometry_revision.wrapping_add(u64::from(changed));
         }
     }
 }

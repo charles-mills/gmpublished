@@ -141,6 +141,7 @@ impl RasterClip {
         }
     }
 
+    #[cfg(test)]
     pub fn intersects_bounds(self, bounds: gmpublished_domain::scene::map::MapBounds) -> bool {
         let absolute_corner = [
             f64::from(bounds.min[0].abs().max(bounds.max[0].abs())),

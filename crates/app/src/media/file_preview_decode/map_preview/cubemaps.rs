@@ -319,6 +319,10 @@ mod tests {
         use crate::test_support::fixture_vtf_bytes;
         use vformats::vtf::{VtfFormat, texture_flags};
         let mut bytes = fixture_vtf_bytes(1, 1, VtfFormat::Rgba8888, &[&[127; 96]]);
+        bytes.splice(64..64, [0; 16]);
+        bytes[8..12].copy_from_slice(&5_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&80_u32.to_le_bytes());
+        bytes[63..65].copy_from_slice(&1_u16.to_le_bytes());
         bytes[20..24].copy_from_slice(&texture_flags::ENVMAP.to_le_bytes());
         bytes[24..26].copy_from_slice(&4_u16.to_le_bytes());
         bytes[26..28].copy_from_slice(&u16::MAX.to_le_bytes());

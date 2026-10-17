@@ -22,6 +22,11 @@ mod prop_lighting;
 mod radiosity;
 mod shader;
 mod sibling_gma;
+mod source_discovery;
+mod source_index;
+pub use source_discovery::{SourceDiscoveryFailure, SourceDiscoveryLimits, SourceDiscoveryStats};
+pub use source_index::ArchiveIndexStats;
+use source_index::SourceIndexBudget;
 mod sky;
 pub mod sprite_sheet;
 pub use sprite_sheet::{
@@ -42,6 +47,7 @@ pub use texture_working::TextureWorkingBudget;
 mod water;
 #[cfg(test)]
 pub use cubemap::ResolvedCubemap;
+pub use cubemap::{CubemapFailure, CubemapResolution};
 pub use cubemap::{EnvironmentMapMask, EnvironmentMapMaterial, EnvironmentMapSource};
 pub use decal_format::SourceDecalFormat;
 pub use lightmap_layout::ResolvedLightmapLayoutMaterial;
@@ -67,16 +73,15 @@ pub use texture_asset::{
 use texture_asset::{TextureAssetCache, TextureSourceError};
 pub use texture_plan::{TextureAdmissions, TextureRequestCost, TextureRequestPlan};
 
+use sibling_gma::{SiblingGmaIndex, SiblingGmaPath};
 #[cfg(test)]
-use sibling_gma::SiblingGmaPathKind;
-use sibling_gma::{SiblingGmaIndex, SiblingGmaPath, build_sibling_gma_index};
+use sibling_gma::{SiblingGmaPathKind, build_sibling_gma_index};
 
 #[cfg(test)]
+use discovery::discover_sibling_gma_paths;
+#[cfg(test)]
 use discovery::normalize_source_path;
-use discovery::{
-    discover_loose_source_dirs, discover_mounted_game_dirs, discover_sibling_gma_paths,
-    material_paths, normalize_texture_name, strip_prefix_ascii_case, texture_path,
-};
+use discovery::{material_paths, normalize_texture_name, strip_prefix_ascii_case, texture_path};
 
 use parking_lot::Mutex;
 
@@ -89,11 +94,8 @@ use vformats::vtf::BcFormat;
 use vformats::{Limits, soundscript};
 
 const PATCH_INCLUDE_LIMIT: usize = 4;
-const MAX_SIBLING_GMA_ARCHIVES: usize = 2048;
-const MAX_LEGACY_BIN_ENTRY_TABLE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
-const GMA_MAGIC: &[u8; 4] = b"GMAD";
 const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
 const NATIVE_ERROR_TEXTURE_FLAGS: u32 = 0x0008_0000;
 
@@ -106,12 +108,25 @@ pub enum TextureLoadOutcome {
     InvalidPayload,
     QualityRejected,
     SourceBudgetRejected,
+    SourceUnavailable,
     Unsupported,
     Deferred,
     Unplanned,
 }
 
 impl TextureLoadOutcome {
+    pub(crate) const fn is_unavailable(self) -> bool {
+        matches!(
+            self,
+            Self::QualityRejected
+                | Self::SourceBudgetRejected
+                | Self::SourceUnavailable
+                | Self::Unsupported
+                | Self::Deferred
+                | Self::Unplanned
+        )
+    }
+
     const fn uses_native_error_texture(self) -> bool {
         matches!(
             self,
@@ -236,12 +251,15 @@ impl ResolvedTexture {
     pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
         self.load_outcome
     }
+    #[cfg(any(test, feature = "map-capture"))]
     pub(crate) fn width(&self) -> u32 {
         self.dimensions()[0]
     }
+    #[cfg(any(test, feature = "map-capture"))]
     pub(crate) fn height(&self) -> u32 {
         self.dimensions()[1]
     }
+    #[cfg(any(test, feature = "map-capture"))]
     fn dimensions(&self) -> [u32; 2] {
         match &self.resident {
             TextureResidency::Resident(resident) => resident.layers()[0].mips[0].dimensions,
@@ -374,6 +392,8 @@ pub enum MaterialResolutionOutcome {
     Loaded,
     Missing,
     Malformed,
+    IndexUnavailable,
+    SourceUnavailable,
     #[default]
     Unresolved,
 }
@@ -383,6 +403,8 @@ pub enum MaterialResolution<T> {
     Loaded { canonical_name: String, material: T },
     Missing { fallback: T },
     Malformed { path: ContentPath },
+    IndexUnavailable { error: vformats::ArchiveIndexLimit },
+    SourceUnavailable { error: SourceDiscoveryFailure },
     Unresolved { canonical_name: String },
 }
 
@@ -391,15 +413,22 @@ impl<T> MaterialResolution<T> {
         match self {
             Self::Loaded { material, .. } => Some(material),
             Self::Missing { fallback } => Some(fallback),
-            Self::Malformed { .. } | Self::Unresolved { .. } => None,
+            Self::Malformed { .. }
+            | Self::SourceUnavailable { .. }
+            | Self::IndexUnavailable { .. }
+            | Self::Unresolved { .. } => None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn into_material(self) -> Option<T> {
         match self {
             Self::Loaded { material, .. } => Some(material),
             Self::Missing { fallback } => Some(fallback),
-            Self::Malformed { .. } | Self::Unresolved { .. } => None,
+            Self::Malformed { .. }
+            | Self::SourceUnavailable { .. }
+            | Self::IndexUnavailable { .. }
+            | Self::Unresolved { .. } => None,
         }
     }
 
@@ -408,6 +437,8 @@ impl<T> MaterialResolution<T> {
             Self::Loaded { .. } => MaterialResolutionOutcome::Loaded,
             Self::Missing { .. } => MaterialResolutionOutcome::Missing,
             Self::Malformed { .. } => MaterialResolutionOutcome::Malformed,
+            Self::IndexUnavailable { .. } => MaterialResolutionOutcome::IndexUnavailable,
+            Self::SourceUnavailable { .. } => MaterialResolutionOutcome::SourceUnavailable,
             Self::Unresolved { .. } => MaterialResolutionOutcome::Unresolved,
         }
     }
@@ -418,7 +449,9 @@ impl<T> MaterialResolution<T> {
                 Some(canonical_name)
             }
             Self::Missing { .. } => Some("___error"),
-            Self::Malformed { .. } => None,
+            Self::Malformed { .. }
+            | Self::SourceUnavailable { .. }
+            | Self::IndexUnavailable { .. } => None,
         }
     }
 }
@@ -456,6 +489,7 @@ impl RenderMode {
 
 #[derive(Clone)]
 struct ResolverConfig {
+    cancellation: crate::preparation::PreparationCancellation,
     hardware_profile: profile::HardwareProfile,
     pakfile: Option<Arc<PakSource>>,
     decoded_texture_max_dimension: Option<u32>,
@@ -472,16 +506,26 @@ struct ResolverConfig {
 }
 
 #[derive(Debug)]
+struct IndexedVpks {
+    archives: Vec<VpkArchive>,
+    _reservations: Vec<source_index::IndexReservation>,
+}
+
+#[derive(Debug)]
 struct ResolverShared {
     addon: Arc<PreviewArchiveSource>,
+    addon_index_error: OnceLock<Option<vformats::ArchiveIndexLimit>>,
+    index_budget: Arc<SourceIndexBudget>,
+    discovery_stats: SourceDiscoveryStats,
+    discovery_failures: BTreeMap<ContentSourceTier, SourceDiscoveryFailure>,
     loose_source_dirs: Vec<LooseSourceDir>,
     sibling_gma_paths: Vec<SiblingGmaPath>,
     game_vpk_paths: Vec<PathBuf>,
-    sibling_gmas: OnceLock<SiblingGmaIndex>,
-    game_vpks: OnceLock<Vec<VpkArchive>>,
+    sibling_gmas: crate::preparation::FlightCell<SiblingGmaIndex>,
+    game_vpks: crate::preparation::FlightCell<IndexedVpks>,
     material_definitions: MaterialDefinitionCache,
     texture_assets: TextureAssetCache,
-    sound_scripts: OnceLock<SoundScriptLibrary>,
+    sound_scripts: crate::preparation::FlightCell<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
 }
 
@@ -570,6 +614,22 @@ struct SoundScriptLibrary {
 }
 
 impl MaterialResolver {
+    #[cfg(test)]
+    pub(crate) fn with_cancellation(
+        &self,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Self {
+        self.variant(ResolverConfig {
+            cancellation,
+            ..self.config.clone()
+        })
+    }
+    pub(crate) fn check_cancelled(&self) -> Result<(), crate::preparation::Cancelled> {
+        self.config.cancellation.check()
+    }
+    pub(crate) fn default_archive_index_working_budget() -> Arc<TextureWorkingBudget> {
+        source_index::SourceIndexBudget::default_working()
+    }
     fn variant(&self, config: ResolverConfig) -> Self {
         Self {
             config,
@@ -577,39 +637,163 @@ impl MaterialResolver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new(addon: impl IntoPreviewArchiveSource, gmod_dir: Option<PathBuf>) -> Self {
+        Self::new_with_index_limits(
+            addon,
+            gmod_dir,
+            vformats::ArchiveIndexLimits::default(),
+            SourceIndexBudget::default_working(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_index_limits(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+    ) -> Self {
+        Self::new_with_index_limits_cancellable(
+            addon,
+            gmod_dir,
+            limits,
+            working,
+            crate::preparation::PreparationCancellation::default(),
+        )
+        .expect("uncancelled source construction")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_index_limits_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        Self::new_with_source_policy_cancellable(
+            addon,
+            gmod_dir,
+            limits,
+            working,
+            SourceDiscoveryLimits::default(),
+            cancellation,
+        )
+    }
+
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "gmod_dir is threaded by value through many preview-pipeline call sites upstream of this leaf consumer"
+        reason = "Preview callers own the content-root configuration"
     )]
-    pub(crate) fn new(addon: impl IntoPreviewArchiveSource, gmod_dir: Option<PathBuf>) -> Self {
-        let mounted_game_dirs = gmod_dir
-            .as_deref()
-            .map(discover_mounted_game_dirs)
-            .unwrap_or_default();
-        let game_vpk_paths = gmod_dir
-            .as_deref()
-            .map(|dir| {
-                gmpublished_backend::vpk::discover_game_vpks_with_mounts(dir, &mounted_game_dirs)
-            })
-            .unwrap_or_default();
-        let mut loose_source_dirs = gmod_dir
-            .as_deref()
-            .map(discover_loose_source_dirs)
-            .unwrap_or_default();
-        loose_source_dirs.extend(
-            gmod_dir
-                .as_deref()
-                .map(discovery::existing_mount_cfg_dirs)
-                .unwrap_or_default()
-                .into_iter()
-                .map(LooseSourceDir::new),
-        );
-        let sibling_gma_paths = gmod_dir
-            .as_deref()
-            .map(discover_sibling_gma_paths)
-            .unwrap_or_default();
-        Self {
+    pub(crate) fn new_with_source_policy_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        discovery_limits: SourceDiscoveryLimits,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        use gmpublished_backend::source_discovery::{SourceCategory, SourceDiscoveryBudget};
+        cancellation.check()?;
+        let scratch_bytes = if gmod_dir.is_some() {
+            discovery_limits
+                .metadata_bytes
+                .min(working.capacity() as u64) as usize
+        } else {
+            0
+        };
+        let scratch = if scratch_bytes == 0 {
+            None
+        } else {
+            Some(
+                working
+                    .request(scratch_bytes)
+                    .expect("discovery reservation fits working capacity")
+                    .acquire_cancellable(&cancellation)?,
+            )
+        };
+        let mut budget = SourceDiscoveryBudget::new(discovery_limits, scratch_bytes as u64);
+        let mut failures = BTreeMap::new();
+        let mut ctx = source_discovery::Discovery {
+            budget: &mut budget,
+            cancellation: &cancellation,
+            category: SourceCategory::MountedGames,
+        };
+        let explicit = source_discovery::category_result(
+            gmod_dir.as_deref().map_or_else(
+                || Ok(Vec::new()),
+                |dir| discovery::mount_cfg_dirs_checked(dir, &mut ctx),
+            ),
+            ctx.budget,
+            &mut failures,
+            &[ContentSourceTier::Loose, ContentSourceTier::GameVpk],
+        )?;
+        let mounted = if failures.contains_key(&ContentSourceTier::GameVpk) {
+            Vec::new()
+        } else {
+            source_discovery::category_result(
+                gmod_dir.as_deref().map_or_else(
+                    || Ok(Vec::new()),
+                    |dir| discovery::discover_mounted_game_dirs_checked(dir, &explicit, &mut ctx),
+                ),
+                ctx.budget,
+                &mut failures,
+                &[ContentSourceTier::GameVpk],
+            )?
+        };
+        ctx.category = SourceCategory::Loose;
+        let loose_source_dirs = if failures.contains_key(&ContentSourceTier::Loose) {
+            Vec::new()
+        } else {
+            source_discovery::category_result(
+                gmod_dir.as_deref().map_or_else(
+                    || Ok(Vec::new()),
+                    |dir| discovery::discover_loose_source_dirs_checked(dir, &explicit, &mut ctx),
+                ),
+                ctx.budget,
+                &mut failures,
+                &[ContentSourceTier::Loose],
+            )?
+        };
+        ctx.category = SourceCategory::SiblingGma;
+        let sibling_gma_paths = source_discovery::category_result(
+            gmod_dir.as_deref().map_or_else(
+                || Ok(Vec::new()),
+                |dir| discovery::discover_sibling_gma_paths_checked(dir, &mut ctx),
+            ),
+            ctx.budget,
+            &mut failures,
+            &[ContentSourceTier::SiblingGma],
+        )?;
+        let game_vpk_paths = if failures.contains_key(&ContentSourceTier::GameVpk) {
+            Vec::new()
+        } else {
+            source_discovery::category_result(
+                gmod_dir.as_deref().map_or_else(
+                    || Ok(Vec::new()),
+                    |dir| {
+                        gmpublished_backend::vpk::discover_game_vpks_checked(
+                            dir,
+                            &mounted,
+                            ctx.budget,
+                            &|| cancellation.is_cancelled(),
+                        )
+                    },
+                ),
+                ctx.budget,
+                &mut failures,
+                &[ContentSourceTier::GameVpk],
+            )?
+        };
+        let discovery_stats = budget.stats().clone();
+        drop(scratch);
+        let index_budget = SourceIndexBudget::new(limits, working);
+        let addon = addon.into_preview_archive_source();
+        cancellation.check()?;
+        Ok(Self {
             config: ResolverConfig {
+                cancellation,
                 hardware_profile: profile::HardwareProfile::LDR,
                 pakfile: None,
                 decoded_texture_max_dimension: None,
@@ -628,28 +812,99 @@ impl MaterialResolver {
                 single_texture_mip: false,
             },
             shared: Arc::new(ResolverShared {
-                addon: addon.into_preview_archive_source(),
+                addon,
+                addon_index_error: OnceLock::new(),
+                index_budget,
+                discovery_stats,
+                discovery_failures: failures,
                 loose_source_dirs,
                 sibling_gma_paths,
                 game_vpk_paths,
-                sibling_gmas: OnceLock::new(),
-                game_vpks: OnceLock::new(),
+                sibling_gmas: Default::default(),
+                game_vpks: Default::default(),
                 material_definitions: MaterialDefinitionCache::default(),
                 texture_assets: TextureAssetCache::default(),
-                sound_scripts: OnceLock::new(),
+                sound_scripts: Default::default(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
             }),
-        }
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn with_pakfile_source(
         addon: impl IntoPreviewArchiveSource,
         gmod_dir: Option<PathBuf>,
         pakfile: MapPakFile,
     ) -> Self {
-        let mut resolver = Self::new(addon, gmod_dir);
-        resolver.config.pakfile = PakSource::new(pakfile).map(Arc::new);
-        resolver
+        Self::with_pakfile_source_and_index_limits(
+            addon,
+            gmod_dir,
+            pakfile,
+            vformats::ArchiveIndexLimits::default(),
+            SourceIndexBudget::default_working(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pakfile_source_and_index_limits(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        pakfile: MapPakFile,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+    ) -> Self {
+        Self::with_pakfile_source_cancellable(
+            addon,
+            gmod_dir,
+            pakfile,
+            limits,
+            working,
+            crate::preparation::PreparationCancellation::default(),
+        )
+        .expect("uncancelled pak source construction")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pakfile_source_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        pakfile: MapPakFile,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        Self::with_pakfile_source_policy_cancellable(
+            addon,
+            gmod_dir,
+            pakfile,
+            limits,
+            working,
+            SourceDiscoveryLimits::default(),
+            cancellation,
+        )
+    }
+
+    pub(crate) fn with_pakfile_source_policy_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        pakfile: MapPakFile,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        discovery_limits: SourceDiscoveryLimits,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        let mut resolver = Self::new_with_source_policy_cancellable(
+            addon,
+            gmod_dir,
+            limits,
+            working,
+            discovery_limits,
+            cancellation,
+        )?;
+        resolver.config.pakfile =
+            PakSource::new_with_budget(pakfile, &resolver.shared.index_budget).map(Arc::new);
+        resolver.check_cancelled()?;
+        Ok(resolver)
     }
 
     pub(crate) fn with_decoded_texture_max_dimension(&self, max_dimension: u32) -> Self {
@@ -743,6 +998,12 @@ impl MaterialResolver {
                 Some(definition::MaterialSourceFailure::Missing) => MaterialResolution::Missing {
                     fallback: missing(),
                 },
+                Some(definition::MaterialSourceFailure::SourceUnavailable(error)) => {
+                    MaterialResolution::SourceUnavailable { error }
+                }
+                Some(definition::MaterialSourceFailure::IndexUnavailable(error)) => {
+                    MaterialResolution::IndexUnavailable { error }
+                }
                 Some(definition::MaterialSourceFailure::Malformed(path)) => {
                     MaterialResolution::Malformed { path }
                 }
@@ -764,6 +1025,7 @@ impl MaterialResolver {
     }
 
     pub(crate) fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
+        self.check_cancelled().ok()?;
         self.entry_bytes_from_sources(&ContentPath::new(path)?)
     }
 
@@ -776,6 +1038,7 @@ impl MaterialResolver {
         &self,
         reference: &str,
     ) -> Option<ResolvedSoundReference> {
+        self.check_cancelled().ok()?;
         let key = Self::sound_reference_key(reference)?;
         {
             let cache = self.shared.resolved_sound_cache.lock();
@@ -785,6 +1048,7 @@ impl MaterialResolver {
         }
 
         let resolved = self.resolve_sound_reference_uncached(reference);
+        self.check_cancelled().ok()?;
         self.shared
             .resolved_sound_cache
             .lock()
@@ -794,7 +1058,8 @@ impl MaterialResolver {
 
     #[cfg(test)]
     pub(crate) fn sound_script_files(&self) -> Vec<String> {
-        self.sound_scripts().script_files.clone()
+        self.sound_scripts()
+            .map_or_else(Vec::new, |library| library.script_files.clone())
     }
 
     fn resolve_material(&self, material: &EffectiveMaterial) -> Option<ResolvedMaterialTextures> {
@@ -883,6 +1148,12 @@ impl MaterialResolver {
                         TextureLoadOutcome::MissingSource,
                     ))
                 });
+            }
+            Err(TextureSourceError::SourceUnavailable(_)) => {
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    None,
+                    TextureLoadOutcome::SourceUnavailable,
+                )));
             }
             Err(TextureSourceError::Preparation { .. }) => {
                 return Some(Arc::new(ResolvedTexture::unavailable(
@@ -999,29 +1270,109 @@ impl MaterialResolver {
         }
     }
 
-    fn game_vpks(&self) -> &[VpkArchive] {
-        self.shared
-            .game_vpks
-            .get_or_init(|| {
-                self.shared
-                    .game_vpk_paths
-                    .iter()
-                    .filter_map(|path| match VpkArchive::open(path) {
-                        Ok(archive) => Some(archive),
-                        Err(error) => {
-                            log::debug!("game VPK open failed for {}: {error}", path.display());
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .as_slice()
+    pub(crate) fn archive_index_stats(&self) -> ArchiveIndexStats {
+        self.shared.index_budget.stats()
     }
 
-    fn sibling_gmas(&self) -> &SiblingGmaIndex {
+    fn game_vpks(&self) -> Result<&[VpkArchive], crate::preparation::Cancelled> {
+        self.shared
+            .game_vpks
+            .get_or_try_init_ref(&self.config.cancellation, || {
+                let mut archives = Vec::new();
+                let mut reservations = Vec::new();
+                for path in &self.shared.game_vpk_paths {
+                    self.check_cancelled()?;
+                    let result = (|| {
+                        let source = gmpublished_backend::vpk::VpkIndexSource::open(
+                            path,
+                            self.shared.index_budget.limits(),
+                        )?;
+                        let _working = self
+                            .shared
+                            .index_budget
+                            .working_request(source.prefix_bytes())
+                            .map_err(VpkError::IndexLimit)?;
+                        Ok::<_, VpkError>((source, _working))
+                    })();
+                    let (source, request) = match result {
+                        Ok(selected) => selected,
+                        Err(error @ VpkError::IndexLimit(_)) => {
+                            if let VpkError::IndexLimit(limit) = &error {
+                                self.shared.index_budget.reject(*limit);
+                            }
+                            archives.push(VpkArchive::unavailable(error));
+                            break;
+                        }
+                        Err(error) => {
+                            log::debug!("game VPK open failed for {}: {error}", path.display());
+                            continue;
+                        }
+                    };
+                    let _working = request.acquire_cancellable(&self.config.cancellation)?;
+                    let result = (|| {
+                        let prepared = source.read()?;
+                        let mut cost = prepared.index_cost()?;
+                        cost.record_bytes = cost
+                            .record_bytes
+                            .checked_add(
+                                (size_of::<VpkArchive>()
+                                    + size_of::<source_index::IndexReservation>())
+                                    as u64,
+                            )
+                            .ok_or_else(|| {
+                                VpkError::IndexLimit(
+                                    vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                                )
+                            })?;
+                        cost.string_bytes = cost
+                            .string_bytes
+                            .checked_add(path.as_os_str().len() as u64)
+                            .ok_or_else(|| {
+                                VpkError::IndexLimit(
+                                    vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                                )
+                            })?;
+                        let reservation = self
+                            .shared
+                            .index_budget
+                            .reserve(cost)
+                            .map_err(VpkError::IndexLimit)?;
+                        let archive = VpkArchive::from_file(prepared.materialize()?);
+                        reservations.push(reservation);
+                        Ok(archive)
+                    })();
+                    match result {
+                        Ok(archive) => archives.push(archive),
+                        Err(error @ VpkError::IndexLimit(_)) => {
+                            if let VpkError::IndexLimit(limit) = &error {
+                                self.shared.index_budget.reject(*limit);
+                            }
+                            archives.push(VpkArchive::unavailable(error));
+                            break;
+                        }
+                        Err(error) => {
+                            log::debug!("game VPK open failed for {}: {error}", path.display());
+                        }
+                    }
+                }
+                Ok(IndexedVpks {
+                    archives,
+                    _reservations: reservations,
+                })
+            })
+            .map(|indexed| indexed.archives.as_slice())
+    }
+
+    fn sibling_gmas(&self) -> Result<&SiblingGmaIndex, crate::preparation::Cancelled> {
         self.shared
             .sibling_gmas
-            .get_or_init(|| build_sibling_gma_index(&self.shared.sibling_gma_paths))
+            .get_or_try_init_ref(&self.config.cancellation, || {
+                sibling_gma::build_sibling_gma_index_cancellable(
+                    &self.shared.sibling_gma_paths,
+                    &self.shared.index_budget,
+                    &self.config.cancellation,
+                )
+            })
     }
 
     fn resolve_sound_reference_uncached(&self, reference: &str) -> Option<ResolvedSoundReference> {
@@ -1036,7 +1387,7 @@ impl MaterialResolver {
         }
 
         let key = Self::sound_reference_key(reference)?;
-        let Some(script) = self.sound_scripts().scripts.get(&key) else {
+        let Some(script) = self.sound_scripts()?.scripts.get(&key) else {
             log::debug!("soundscript {reference:?} unresolved");
             return None;
         };
@@ -1066,7 +1417,9 @@ impl MaterialResolver {
             log::debug!("sound wave {wave:?} treated as silent null.wav");
             return None;
         }
-        let resolved = self.find_content_bytes(std::slice::from_ref(&ContentPath::new(&path)?))?;
+        let resolved = self
+            .find_content_bytes(std::slice::from_ref(&ContentPath::new(&path)?))
+            .ok()??;
         Some(ResolvedSoundWave {
             path: resolved.path,
             source_tier: resolved.tier,
@@ -1074,10 +1427,13 @@ impl MaterialResolver {
         })
     }
 
-    fn sound_scripts(&self) -> &SoundScriptLibrary {
+    fn sound_scripts(&self) -> Option<&SoundScriptLibrary> {
         self.shared
             .sound_scripts
-            .get_or_init(|| self.load_sound_script_library())
+            .get_or_try_init_ref(&self.config.cancellation, || {
+                Ok(self.load_sound_script_library())
+            })
+            .ok()
     }
 
     fn load_sound_script_library(&self) -> SoundScriptLibrary {
@@ -1137,19 +1493,70 @@ impl MaterialResolver {
         self.find_entry_by_source(std::slice::from_ref(path), |_, bytes| Some(bytes))
     }
 
+    fn addon_index_error(&self) -> Option<vformats::ArchiveIndexLimit> {
+        *self.shared.addon_index_error.get_or_init(|| {
+            match self
+                .shared
+                .addon
+                .index_cost_with_limits(self.shared.index_budget.limits())
+            {
+                Ok(Some(cost)) => match self.shared.index_budget.reserve(cost) {
+                    Ok(reservation) => {
+                        reservation.commit();
+                        None
+                    }
+                    Err(error) => Some(self.shared.index_budget.reject(error)),
+                },
+                Ok(None) => None,
+                Err(crate::bridge::gma::GmaError::IndexLimit(error)) => {
+                    Some(self.shared.index_budget.reject(error))
+                }
+                Err(error) => {
+                    log::debug!("primary GMA index unavailable: {error}");
+                    None
+                }
+            }
+        })
+    }
+
+    pub(crate) fn source_discovery_stats(&self) -> &SourceDiscoveryStats {
+        &self.shared.discovery_stats
+    }
+    fn discovery_barrier(&self, tier: ContentSourceTier) -> Option<SourceRef<'_>> {
+        self.shared
+            .discovery_failures
+            .get(&tier)
+            .map(|error| SourceRef::SourceUnavailable(tier, error))
+    }
+
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
             .pakfile
             .as_deref()
             .map(SourceRef::Pakfile)
             .into_iter()
-            .chain(std::iter::once(SourceRef::Addon(&self.shared.addon)))
-            .chain(self.shared.loose_source_dirs.iter().map(SourceRef::Loose))
             .chain(std::iter::once_with(|| {
-                SourceRef::SiblingGma(self.sibling_gmas())
+                self.addon_index_error()
+                    .map_or(SourceRef::Addon(&self.shared.addon), |error| {
+                        SourceRef::IndexUnavailable(ContentSourceTier::Addon, error)
+                    })
             }))
+            .chain(self.discovery_barrier(ContentSourceTier::Loose))
+            .chain(self.shared.loose_source_dirs.iter().map(SourceRef::Loose))
+            .chain(self.discovery_barrier(ContentSourceTier::SiblingGma))
             .chain(
-                std::iter::once_with(|| self.game_vpks().iter().map(SourceRef::GameVpk)).flatten(),
+                std::iter::once_with(|| self.sibling_gmas().ok().map(SourceRef::SiblingGma))
+                    .flatten(),
+            )
+            .chain(self.discovery_barrier(ContentSourceTier::GameVpk))
+            .chain(
+                std::iter::once_with(|| {
+                    self.game_vpks()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(SourceRef::GameVpk)
+                })
+                .flatten(),
             )
     }
 
@@ -1166,40 +1573,72 @@ impl MaterialResolver {
         }
     }
 
-    fn find_content_bytes(&self, paths: &[ContentPath]) -> Option<ResolvedContentBytes> {
-        self.sources().find_map(|source| {
-            paths.iter().find_map(|path| {
-                Self::tier_bytes(&source, path).map(|bytes| ResolvedContentBytes {
-                    path: path.as_str().to_owned(),
-                    tier: source.tier(),
-                    bytes,
-                })
-            })
-        })
+    fn find_content_bytes(
+        &self,
+        paths: &[ContentPath],
+    ) -> Result<Option<ResolvedContentBytes>, ContentSourceFailure> {
+        for source in self.sources() {
+            if self.check_cancelled().is_err() {
+                return Ok(None);
+            }
+            for path in paths {
+                if self.check_cancelled().is_err() {
+                    return Ok(None);
+                }
+                if let Some(error) = source.index_error(Some(path)) {
+                    return Err(ContentSourceFailure::Index(error));
+                }
+                if let Some(error) = source.discovery_error() {
+                    return Err(ContentSourceFailure::Discovery(error.clone()));
+                }
+                if let Some(bytes) = Self::tier_bytes(&source, path) {
+                    return Ok(Some(ResolvedContentBytes {
+                        path: path.as_str().to_owned(),
+                        tier: source.tier(),
+                        bytes,
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn content_bytes_from_all_sources(&self, path: &str) -> Vec<ResolvedContentBytes> {
         let Some(path) = ContentPath::new(path) else {
             return Vec::new();
         };
-        self.sources()
-            .filter_map(|source| {
-                Self::tier_bytes(&source, &path).map(|bytes| ResolvedContentBytes {
+        let mut contents = Vec::new();
+        for source in self.sources() {
+            if self.check_cancelled().is_err() {
+                break;
+            }
+            if source.index_error(Some(&path)).is_some() || source.discovery_error().is_some() {
+                break;
+            }
+            if let Some(bytes) = Self::tier_bytes(&source, &path) {
+                contents.push(ResolvedContentBytes {
                     path: path.as_str().to_owned(),
                     tier: source.tier(),
                     bytes,
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        contents
     }
 
     fn source_paths_matching(&self, matches: impl Fn(&str) -> bool) -> Vec<String> {
         let mut paths = Vec::new();
         let mut seen = BTreeSet::new();
         for source in self.sources() {
+            if self.check_cancelled().is_err() {
+                break;
+            }
             source.for_each_path(&mut |path| {
                 push_matching_path(path, &matches, &mut seen, &mut paths);
             });
+            if source.index_error(None).is_some() || source.discovery_error().is_some() {
+                break;
+            }
         }
         paths
     }
@@ -1209,16 +1648,34 @@ impl MaterialResolver {
         paths: &[ContentPath],
         mut consume: impl FnMut(&ContentPath, Vec<u8>) -> Option<T>,
     ) -> Option<T> {
-        self.sources().find_map(|source| {
-            paths.iter().find_map(|path| {
-                Self::tier_bytes(&source, path).and_then(|bytes| consume(path, bytes))
-            })
-        })
+        for source in self.sources() {
+            for path in paths {
+                if source.index_error(Some(path)).is_some() || source.discovery_error().is_some() {
+                    return None;
+                }
+                if let Some(value) =
+                    Self::tier_bytes(&source, path).and_then(|bytes| consume(path, bytes))
+                {
+                    return Some(value);
+                }
+            }
+        }
+        None
     }
+}
+
+#[derive(Debug)]
+enum ContentSourceFailure {
+    Index(vformats::ArchiveIndexLimit),
+    Discovery(SourceDiscoveryFailure),
 }
 
 #[derive(Debug, thiserror::Error)]
 enum SourceError {
+    #[error(transparent)]
+    IndexLimit(vformats::ArchiveIndexLimit),
+    #[error(transparent)]
+    Discovery(SourceDiscoveryFailure),
     #[error("BSP pakfile: {0}")]
     Pakfile(String),
     #[error(transparent)]
@@ -1232,6 +1689,8 @@ enum SourceError {
 }
 
 enum SourceRef<'a> {
+    SourceUnavailable(ContentSourceTier, &'a SourceDiscoveryFailure),
+    IndexUnavailable(ContentSourceTier, vformats::ArchiveIndexLimit),
     Pakfile(&'a PakSource),
     Addon(&'a PreviewArchiveSource),
     Loose(&'a LooseSourceDir),
@@ -1240,8 +1699,29 @@ enum SourceRef<'a> {
 }
 
 impl SourceRef<'_> {
+    fn discovery_error(&self) -> Option<&SourceDiscoveryFailure> {
+        match self {
+            Self::SourceUnavailable(_, error) => Some(error),
+            _ => None,
+        }
+    }
+
+    fn index_error(&self, path: Option<&ContentPath>) -> Option<vformats::ArchiveIndexLimit> {
+        match self {
+            Self::IndexUnavailable(_, error) => Some(*error),
+            Self::Pakfile(source) => source.index_error,
+            Self::GameVpk(source) => match source.index_error() {
+                Some(VpkError::IndexLimit(error)) => Some(*error),
+                _ => None,
+            },
+            Self::SiblingGma(source) => source.index_error(path),
+            Self::Addon(_) | Self::Loose(_) | Self::SourceUnavailable(_, _) => None,
+        }
+    }
+
     fn tier(&self) -> ContentSourceTier {
         match self {
+            Self::IndexUnavailable(tier, _) | Self::SourceUnavailable(tier, _) => *tier,
             Self::Pakfile(_) => ContentSourceTier::Pakfile,
             Self::Addon(_) => ContentSourceTier::Addon,
             Self::Loose(_) => ContentSourceTier::Loose,
@@ -1251,7 +1731,12 @@ impl SourceRef<'_> {
     }
 
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
+        if let Some(error) = self.index_error(Some(path)) {
+            return Err(SourceError::IndexLimit(error));
+        }
         match self {
+            Self::SourceUnavailable(_, error) => Err(SourceError::Discovery((*error).clone())),
+            Self::IndexUnavailable(_, error) => Err(SourceError::IndexLimit(*error)),
             Self::Pakfile(pakfile) => pakfile.entry_bytes(path),
             Self::Addon(addon) => match addon.entry_bytes(path.as_str()) {
                 Ok(bytes) => Ok(Some(bytes)),
@@ -1273,6 +1758,7 @@ impl SourceRef<'_> {
 
     fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
         match self {
+            Self::IndexUnavailable(_, _) | Self::SourceUnavailable(_, _) => {}
             Self::Pakfile(pakfile) => pakfile.for_each_path(visit),
             Self::Addon(addon) => addon.for_each_path(visit),
             Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
@@ -1470,26 +1956,62 @@ pub fn srgb_byte_to_linear(byte: u8) -> f32 {
 struct PakSource {
     pakfile: MapPakFile,
     entries: HashMap<String, (usize, u64)>,
+    index_error: Option<vformats::ArchiveIndexLimit>,
 }
 
 impl PakSource {
+    #[cfg(test)]
     fn new(pakfile: MapPakFile) -> Option<Self> {
-        if let Some(error) = pakfile.read_error() {
-            log::debug!("bsp pakfile source disabled: {error}");
-            return None;
-        }
-        let entries = match pakfile.indexed_entries() {
-            Ok(entries) => entries,
+        Self::new_with_budget(pakfile, &SourceIndexBudget::defaults())
+    }
+
+    fn new_with_budget(pakfile: MapPakFile, budget: &Arc<SourceIndexBudget>) -> Option<Self> {
+        let result = (|| {
+            let mut cost = pakfile.index_cost()?;
+            let overflow = || {
+                vformats::bsp::ZipError::IndexLimit(
+                    vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                )
+            };
+            let per_entry = size_of::<(String, (usize, u64))>()
+                + size_of::<gmpublished_domain::scene::map::MapPakFileEntry>();
+            cost.record_bytes = cost
+                .record_bytes
+                .checked_add(
+                    (cost.entries as u64)
+                        .checked_mul(per_entry as u64)
+                        .ok_or_else(overflow)?,
+                )
+                .and_then(|bytes| bytes.checked_add(size_of::<Self>() as u64))
+                .ok_or_else(overflow)?;
+            cost.string_bytes = cost.string_bytes.checked_mul(2).ok_or_else(overflow)?;
+            let reservation = budget
+                .reserve(cost)
+                .map_err(vformats::bsp::ZipError::IndexLimit)?;
+            let entries = pakfile
+                .indexed_entries_with_limits(budget.limits())?
+                .into_iter()
+                .map(|entry| (entry.path, (entry.index, entry.size)))
+                .collect();
+            reservation.commit();
+            Ok(entries)
+        })();
+        match result {
+            Ok(entries) => Some(Self {
+                pakfile,
+                entries,
+                index_error: None,
+            }),
+            Err(vformats::bsp::ZipError::IndexLimit(error)) => Some(Self {
+                pakfile,
+                entries: HashMap::new(),
+                index_error: Some(budget.reject(error)),
+            }),
             Err(error) => {
-                log::debug!("bsp pakfile source index failed: {error}");
-                return None;
+                log::debug!("BSP pakfile source disabled: {error}");
+                None
             }
-        };
-        let entries = entries
-            .into_iter()
-            .map(|entry| (entry.path, (entry.index, entry.size)))
-            .collect::<HashMap<_, _>>();
-        Some(Self { pakfile, entries })
+        }
     }
 
     fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {

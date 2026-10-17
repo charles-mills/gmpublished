@@ -1,5 +1,7 @@
 #[path = "capture_isolation.rs"]
 mod isolation;
+#[path = "capture/performance.rs"]
+mod performance;
 use super::{FlyCamera, FlyPose, FlyViewer, Message, ModelPrimitive, MovementMode, Vec3, shader};
 use crate::bridge::archive::PreviewArchiveSource;
 use crate::generation::Generation;
@@ -10,6 +12,10 @@ use crate::media::preview_model::{MaterialSlot, PreviewContent, PreviewRequest};
 use iced::advanced::renderer::Headless as _;
 use iced::{Color, Length, Rectangle, Size, mouse};
 use iced_runtime::{UserInterface, user_interface};
+pub use performance::CaptureDiagnostics;
+#[cfg(feature = "gui-benchmark")]
+pub use performance::{Pause, Profile};
+pub(super) use performance::{Phase, VisibilityMode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shader::Program as _;
@@ -23,6 +29,111 @@ use std::{
 };
 
 struct CaptureLogger;
+
+fn benchmark_render(
+    renderer: &mut iced::Renderer,
+    size: Size<u32>,
+    samples: usize,
+    observers: &[CaptureDiagnostics],
+) -> Option<Value> {
+    if samples == 0 {
+        return None;
+    }
+    let iced::Renderer::Primary(renderer) = renderer else {
+        panic!("render benchmark requires the GPU renderer");
+    };
+    let format = renderer.target_format();
+    let target = renderer
+        .device()
+        .create_texture(&super::wgpu::TextureDescriptor {
+            label: Some("map_capture.benchmark"),
+            size: super::wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: super::wgpu::TextureDimension::D2,
+            format,
+            usage: super::wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+    let view = target.create_view(&Default::default());
+    let viewport = iced::advanced::graphics::Viewport::with_physical_size(size, 1.0);
+    let mut render = || {
+        let present_started = Instant::now();
+        let submission = renderer.present(Some(Color::BLACK), format, &view, &viewport);
+        let present_ms = present_started.elapsed().as_secs_f64() * 1000.0;
+        let completion_started = Instant::now();
+        renderer
+            .device()
+            .poll(super::wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(std::time::Duration::from_secs(30)),
+            })
+            .expect("benchmark GPU completion");
+        (
+            present_ms,
+            completion_started.elapsed().as_secs_f64() * 1000.0,
+        )
+    };
+    let warmup_profiles = observers
+        .iter()
+        .map(|observer| observer.profile(1))
+        .collect::<Vec<_>>();
+    render();
+    let observer_warmup_phases = warmup_profiles
+        .into_iter()
+        .map(performance::Profile::finish)
+        .collect::<Vec<_>>();
+    let pauses = observers
+        .iter()
+        .map(CaptureDiagnostics::pause)
+        .collect::<Vec<_>>();
+    let profiles = observers
+        .iter()
+        .map(|observer| observer.profile(samples))
+        .collect::<Vec<_>>();
+    let mut present_times = Vec::with_capacity(samples);
+    let mut completion_times = Vec::with_capacity(samples);
+    let mut times = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let started = Instant::now();
+        let (present_ms, completion_ms) = render();
+        times.push(started.elapsed().as_secs_f64() * 1000.0);
+        present_times.push(present_ms);
+        completion_times.push(completion_ms);
+    }
+    let phases = profiles
+        .into_iter()
+        .map(performance::Profile::finish)
+        .collect::<Vec<_>>();
+    drop(pauses);
+    render();
+    times.sort_by(f64::total_cmp);
+    Some(json!({
+        "samples": samples,
+        "warmup_frames": 1,
+        "untimed_observer_refresh_frames": 1,
+        "capture_json_observer_in_timed_samples": false,
+        "cpu_present_submit_wall": performance::distribution(present_times),
+        "residual_submission_completion_wall": performance::distribution(completion_times),
+        "per_view_cpu_phases": phases,
+        "untimed_observer_warmup_cpu_phases": observer_warmup_phases,
+        "phase_timings_overlap": true,
+        "isolated_gpu_duration_measured": false,
+        "physical_size": [size.width, size.height],
+        "metric": "serialized production render plus GPU completion wall time",
+        "median_ms": times[samples / 2],
+        "p95_ms": times[(samples * 95).div_ceil(100).saturating_sub(1)],
+        "min_ms": times[0],
+        "max_ms": times[samples - 1],
+        "includes_cpu_preparation_and_gpu_completion": true,
+        "includes_readback": false,
+        "includes_window_presentation_or_widget_update": false,
+    }))
+}
 
 static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
 static CAPTURE_LOG_FILE: OnceLock<Mutex<fs::File>> = OnceLock::new();
@@ -82,7 +193,7 @@ struct CaptureSuite {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CaptureTextureResidency {
-    max_dimension: u32,
+    max_dimension: Option<u32>,
     resident_bytes: usize,
     #[serde(default = "CaptureTextureResidency::default_resident_images")]
     resident_images: usize,
@@ -485,7 +596,7 @@ impl CaptureCamera {
 
 struct FixedView {
     model_lighting_timeline: Option<Arc<ModelLightingTimeline>>,
-    diagnostics: Arc<Mutex<Value>>,
+    diagnostics: CaptureDiagnostics,
     viewer: FlyViewer,
     camera: FlyCamera,
     live_animation: bool,
@@ -529,7 +640,7 @@ impl shader::Program<Message> for FixedView {
         );
         primitive.reflection_target = self.target == CaptureTarget::Reflection;
         primitive.refraction_target = self.target == CaptureTarget::Refraction;
-        primitive.capture_diagnostics = Some(Arc::clone(&self.diagnostics));
+        primitive.capture_diagnostics = Some(self.diagnostics.clone());
         primitive
             .capture_lighting_timeline
             .clone_from(&self.model_lighting_timeline);
@@ -830,6 +941,7 @@ fn git_output(args: &[&str]) -> Option<String> {
 
 pub fn capture_map_reference_frames() {
     let texture_upload_policy = super::pipeline::capture_texture_upload_policy();
+    let resource_defaults = TextureResourcePolicy::default();
     let suite_path = std::env::var_os("GMPUBLISHED_MAP_CAPTURE_SUITE").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/map-capture/cameras.json"),
         PathBuf::from,
@@ -838,7 +950,11 @@ pub fn capture_map_reference_frames() {
     let suite: CaptureSuite = serde_json::from_slice(&suite_bytes).expect("parse camera suite");
     assert!((1..=4096).contains(&suite.width) && (1..=4096).contains(&suite.height));
     assert!(
-        suite.texture_residency.max_dimension > 0 && suite.texture_residency.resident_bytes > 0
+        suite
+            .texture_residency
+            .max_dimension
+            .is_none_or(|value| value > 0)
+            && suite.texture_residency.resident_bytes > 0
     );
     assert!(suite.animation_time.is_finite() && suite.animation_time >= 0.0);
     assert!(suite.benchmark_frames <= 1000);
@@ -900,7 +1016,7 @@ pub fn capture_map_reference_frames() {
     );
     let maps_directory = std::env::var_os("GMPUBLISHED_MAP_CAPTURE_MAPS")
         .map_or_else(|| game.join("garrysmod/maps"), PathBuf::from);
-    let game_vpks = gmpublished_backend::vpk::discover_game_vpks(&game);
+    let game_vpks = gmpublished_backend::vpk::discover_game_vpks(&game).expect("source discovery");
     assert!(
         game_vpks.contains(&game.join("garrysmod/garrysmod_dir.vpk")),
         "the game asset resolver must discover the primary Garry's Mod VPK"
@@ -976,8 +1092,21 @@ pub fn capture_map_reference_frames() {
         "scene_msaa_samples": super::scene_sample_count(),
         "optical_msaa_samples": 1,
         "requested_bc_upload": super::pipeline::capture_bc_upload(),
+        "sampler_quality": {
+            "profile_override": std::env::var("GMPUBLISHED_MAP_CAPTURE_SAMPLER_PROFILE").ok(),
+            "anisotropy_override": std::env::var("GMPUBLISHED_MAP_CAPTURE_ANISOTROPY").ok(),
+            "effective": super::pipeline::capture_sampler_quality(),
+        },
         "texture_upload_policy": texture_upload_policy,
         "texture_residency": {
+            "source_discovery_limits": resource_defaults.source_discovery_limits,
+            "archive_index_limits": {
+                "directory_bytes": resource_defaults.archive_index_limits.directory_bytes,
+                "entries": resource_defaults.archive_index_limits.entries,
+                "retained_bytes": resource_defaults.archive_index_limits.retained_bytes,
+            },
+            "archive_index_working_bytes": resource_defaults.archive_index_working_budget.capacity(),
+            "archive_index_working_scope": "process",
             "max_dimension": suite.texture_residency.max_dimension,
             "resident_bytes": suite.texture_residency.resident_bytes,
             "resident_images": suite.texture_residency.resident_images,
@@ -1031,6 +1160,7 @@ pub fn capture_map_reference_frames() {
         let map_path = maps_directory.join(format!("{}.bsp", map.name));
         let bytes = fs::read(&map_path).expect("read reference BSP");
         let request = PreviewRequest {
+            cancellation: Default::default(),
             request_id: Generation::INITIAL.next(),
             archive: PreviewArchiveSource::from_folder([(
                 format!("maps/{}.bsp", map.name),
@@ -1042,6 +1172,7 @@ pub fn capture_map_reference_frames() {
             size_bytes: bytes.len() as u64,
             crc32: crc32fast::hash(&bytes),
             bypass_size_limits: true,
+            map_texture_quality: Default::default(),
         };
         let load_started = Instant::now();
         let preview = load_map_for_capture_with_model_options(
@@ -1065,7 +1196,7 @@ pub fn capture_map_reference_frames() {
                             suite.texture_residency.source_working_bytes,
                         ),
                     ),
-                    ..TextureResourcePolicy::default()
+                    ..resource_defaults.clone()
                 },
             },
         )
@@ -1112,6 +1243,7 @@ pub fn capture_map_reference_frames() {
             "stats": format!("{stats:?}"),
             "prop_geometry": scene.prop_geometry,
             "texture_preparation": scene.texture_preparation,
+            "invalid_detail_leaves": stats.invalid_detail_leaves,
             "prop_geometry_totals": scene.prop_geometry.admitted_totals(),
             "lightmap_diagnostics": {
                 "valid_payloads":stats.lightmap.valid_payloads,
@@ -1233,10 +1365,10 @@ pub fn capture_map_reference_frames() {
             } else {
                 super::camera::WaterLevel::Dry
             };
-            let diagnostics = Arc::new(Mutex::new(Value::Null));
+            let diagnostics = CaptureDiagnostics::default();
             let view = FixedView {
                 model_lighting_timeline: shot.lighting_timeline(),
-                diagnostics: Arc::clone(&diagnostics),
+                diagnostics: diagnostics.clone(),
                 live_animation: shot.live_animation,
                 fullbright: shot.fullbright,
                 sky_animation_time: shot.sky_animation_time,
@@ -1247,6 +1379,8 @@ pub fn capture_map_reference_frames() {
                 frame_probe: shot.frame_probe,
                 target: shot.target(),
                 viewer: FlyViewer {
+                    #[cfg(feature = "gui-benchmark")]
+                    benchmark: None,
                     scene: Arc::clone(&scene),
                     content_id,
                     fog,
@@ -1260,6 +1394,7 @@ pub fn capture_map_reference_frames() {
                     movement_mode: Some(MovementMode::Fly),
                     requested_movement_mode: None,
                     mouse_captured: false,
+                    render_feedback: Default::default(),
                 },
                 camera,
             };
@@ -1380,6 +1515,12 @@ pub fn capture_map_reference_frames() {
                     "includes_gpu_completion_and_cpu_readback": true,
                 })
             });
+            let render_latency = benchmark_render(
+                &mut renderer,
+                physical_size,
+                suite.benchmark_frames,
+                std::slice::from_ref(&diagnostics),
+            );
             let filename = format!("{}.png", shot.name);
             assert!(
                 diagnostics
@@ -1415,6 +1556,7 @@ pub fn capture_map_reference_frames() {
             map_record["captures"].as_array_mut().unwrap().push(json!({
                 "file": filename,
                 "render_diagnostics": diagnostics.lock().unwrap().clone(),
+                "render_latency": render_latency,
                 "door_progress_override":shot.door_progress_override,"raster_offset": shot.raster_offset.unwrap_or([0.5; 2]), "authored_fullbright": shot.fullbright,
                 "fullbright": shot.fullbright || scene.shading_mode == crate::media::preview_model::ShadingMode::Fullbright,
                 "phy_debug": shot.phy_debug, "sky_animation_time": shot.sky_animation_time.unwrap_or(if shot.live_animation { 2.0 } else { animation_time }), "reflection_target": shot.reflection_target,"refraction_target":shot.refraction_target,
@@ -1482,7 +1624,7 @@ pub fn capture_map_reference_frames() {
             };
             FixedView {
                 model_lighting_timeline: shot.lighting_timeline(),
-                diagnostics: Arc::new(Mutex::new(Value::Null)),
+                diagnostics: CaptureDiagnostics::default(),
                 camera,
                 live_animation: false,
                 fullbright: shot.fullbright,
@@ -1494,6 +1636,8 @@ pub fn capture_map_reference_frames() {
                 frame_probe: shot.frame_probe,
                 target: CaptureTarget::Main,
                 viewer: FlyViewer {
+                    #[cfg(feature = "gui-benchmark")]
+                    benchmark: None,
                     scene: Arc::clone(&scene),
                     content_id,
                     fog,
@@ -1507,12 +1651,18 @@ pub fn capture_map_reference_frames() {
                     movement_mode: Some(MovementMode::Fly),
                     requested_movement_mode: None,
                     mouse_captured: false,
+                    render_feedback: Default::default(),
                 },
             }
         };
         if suite.verify_view_isolation {
-            map_record["view_isolation"] =
-                isolation::verify(&mut renderer, make_isolation_view, &map.cameras, &directory);
+            map_record["view_isolation"] = isolation::verify(
+                &mut renderer,
+                make_isolation_view,
+                &map.cameras,
+                &directory,
+                suite.benchmark_frames,
+            );
         }
         if map.verify_temporal_view_isolation {
             map_record["temporal_view_isolation"] = isolation::verify_temporal(
@@ -1559,6 +1709,23 @@ fn write_manifest(output: &std::path::Path, manifest: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_render_benchmark_needs_neither_gpu_nor_valid_target() {
+        let mut renderer = futures::executor::block_on(iced::Renderer::new(
+            iced::Font::default(),
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        assert!(benchmark_render(&mut renderer, Size::new(u32::MAX, 0), 0, &[]).is_none());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                benchmark_render(&mut renderer, Size::new(1280, 720), 1, &[])
+            }))
+            .is_err()
+        );
+    }
 
     fn camera(extra: &Value) -> CaptureCamera {
         let mut value = json!({"name":"projection","eye":[0,0,0],"angles":[0,0]});

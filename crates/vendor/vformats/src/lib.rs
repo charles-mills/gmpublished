@@ -46,6 +46,11 @@
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+mod archive_index;
+pub use archive_index::{
+    ArchiveIndexCost, ArchiveIndexLimit, ArchiveIndexLimitKind, ArchiveIndexLimits,
+};
+
 mod limits;
 pub use limits::Limits;
 

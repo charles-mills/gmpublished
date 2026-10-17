@@ -32,6 +32,7 @@ rayon.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["std"] }
 steamlocate.workspace = true
+keyvalues-parser = "=0.2.4"
 steamworks = { version = "0.13.1", features = ["serde"] }
 tempfile.workspace = true
 thiserror.workspace = true

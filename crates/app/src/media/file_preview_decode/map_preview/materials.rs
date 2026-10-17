@@ -45,10 +45,7 @@ impl MaterialTable {
     }
 
     pub(in super::super) fn resolved_count(&self) -> u32 {
-        count_of(self.slots.iter().filter(|slot| {
-            slot.resolution == crate::bridge::materials::MaterialResolutionOutcome::Loaded
-                && slot.texture.is_some()
-        }))
+        count_of(self.slots.iter().filter(|slot| slot.has_resolved_base()))
     }
 
     pub(in super::super) fn water_material_count(&self) -> u32 {

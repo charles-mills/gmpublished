@@ -26,6 +26,7 @@ impl Default for ViewId {
 }
 
 pub struct Viewer3d {
+    pub(crate) render_feedback: Arc<super::feedback::RenderFeedback>,
     pub model: Arc<ModelPreview>,
     pub content_id: u64,
     pub skin_remap: Vec<u16>,
@@ -106,12 +107,17 @@ impl shader::Program<Message> for Viewer3d {
                 camera.orbit.zoom(steps);
                 Some(Action::publish(Message::OrbitPoseChanged(camera.pose())).and_capture())
             }
+            Event::Window(iced::window::Event::RedrawRequested(now)) => self
+                .render_feedback
+                .wants_redraw(*now)
+                .then(Action::request_redraw),
             _ => None,
         }
     }
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: None,
             model_lighting_time: 0.0,
             view_id: camera.view_id,
@@ -165,6 +171,9 @@ impl shader::Program<Message> for Viewer3d {
     reason = "each flag toggles an independent map render layer, not a mode enum"
 )]
 pub struct FlyViewer {
+    #[cfg(feature = "gui-benchmark")]
+    pub(crate) benchmark: Option<crate::app::gui_benchmark::ViewControl>,
+    pub(crate) render_feedback: Arc<super::feedback::RenderFeedback>,
     pub scene: Arc<MapPreview>,
     pub content_id: u64,
     pub fog: Option<MapFog>,
@@ -678,6 +687,30 @@ impl shader::Program<Message> for FlyViewer {
             self.pose,
             self.movement_mode,
         );
+        #[cfg(feature = "gui-benchmark")]
+        let benchmark_mode_changed = self.benchmark.is_some() && {
+            let changed = camera.select_mode(&self.scene, MovementMode::Fly);
+            changed || self.movement_mode != Some(MovementMode::Fly)
+        };
+        #[cfg(feature = "gui-benchmark")]
+        let benchmark_pose_changed = self.benchmark.as_ref().is_some_and(|control| {
+            let now = match event {
+                Event::Window(iced::window::Event::RedrawRequested(now)) => *now,
+                _ if initialized => std::time::Instant::now(),
+                _ => return false,
+            };
+            let Some((eye, angles)) = control.camera(now) else {
+                return false;
+            };
+            let position = Some(Vec3::from(eye));
+            let pitch = -angles[0].to_radians();
+            let yaw = angles[1].to_radians();
+            let changed = camera.position != position || camera.pitch != pitch || camera.yaw != yaw;
+            camera.position = position;
+            camera.pitch = pitch;
+            camera.yaw = yaw;
+            changed
+        });
         if camera.input_captured && !self.mouse_captured {
             camera.release_input();
         }
@@ -690,6 +723,9 @@ impl shader::Program<Message> for FlyViewer {
             }
             changed
         });
+        #[cfg(feature = "gui-benchmark")]
+        let mode_request_changed =
+            mode_request_changed || benchmark_mode_changed || benchmark_pose_changed;
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if !self.mouse_captured {
@@ -810,13 +846,29 @@ impl shader::Program<Message> for FlyViewer {
                 let started = camera.animation_started_at.get_or_insert(*now);
                 camera.water_time = now.saturating_duration_since(*started).as_secs_f32();
                 camera.model_lighting_time = now.saturating_duration_since(*started).as_secs_f64();
+                #[cfg(feature = "gui-benchmark")]
+                if let Some(clock) = self
+                    .benchmark
+                    .as_ref()
+                    .and_then(|control| control.fixed_scene_clock)
+                {
+                    camera.water_time = clock as f32;
+                    camera.model_lighting_time = clock;
+                }
                 if !camera.needs_movement_tick() {
                     camera.last_frame = None;
                     camera.move_factor = 0.0;
                     if initialized || mode_request_seen || mode_request_changed {
                         return camera.camera_update_message().map(Action::publish);
                     }
-                    return camera.animated_scene.then(Action::request_redraw);
+                    let redraw = camera.animated_scene || self.render_feedback.wants_redraw(*now);
+                    #[cfg(feature = "gui-benchmark")]
+                    let redraw = redraw
+                        || self
+                            .benchmark
+                            .as_ref()
+                            .is_some_and(|control| control.continuous_redraw);
+                    return redraw.then(Action::request_redraw);
                 }
                 if let Some(last) = camera.last_frame {
                     let dt = now.saturating_duration_since(last).as_secs_f32().min(0.1);
@@ -848,6 +900,16 @@ impl shader::Program<Message> for FlyViewer {
         _cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> ModelPrimitive {
+        #[cfg(feature = "gui-benchmark")]
+        if let Some(control) = &self.benchmark {
+            control.record(
+                bounds,
+                camera.position.unwrap_or_default(),
+                [-camera.pitch.to_degrees(), camera.yaw.to_degrees()],
+                camera.mode() == MovementMode::Fly,
+                camera.model_lighting_time,
+            );
+        }
         let uniforms = Uniforms::for_fly(
             &self.scene,
             camera,
@@ -856,6 +918,7 @@ impl shader::Program<Message> for FlyViewer {
             camera.water_time,
         );
         ModelPrimitive {
+            render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: Some(super::pipeline::view_camera::ViewCamera::fly(
                 camera,
                 bounds,
@@ -882,7 +945,12 @@ impl shader::Program<Message> for FlyViewer {
             reflection_target: false,
             #[cfg(feature = "map-capture")]
             refraction_target: false,
-            #[cfg(feature = "map-capture")]
+            #[cfg(feature = "gui-benchmark")]
+            capture_diagnostics: self
+                .benchmark
+                .as_ref()
+                .and_then(|control| control.diagnostics.clone()),
+            #[cfg(all(feature = "map-capture", not(feature = "gui-benchmark")))]
             capture_diagnostics: None,
             #[cfg(feature = "map-capture")]
             capture_lighting_timeline: None,
@@ -948,6 +1016,8 @@ mod tests {
 
     fn input_viewer(captured: bool) -> FlyViewer {
         FlyViewer {
+            #[cfg(feature = "gui-benchmark")]
+            benchmark: None,
             scene: Arc::new(empty_preview(Vec3::ZERO, Vec3::splat(1024.0))),
             content_id: 1,
             fog: None,
@@ -961,6 +1031,7 @@ mod tests {
             movement_mode: Some(MovementMode::Fly),
             requested_movement_mode: None,
             mouse_captured: captured,
+            render_feedback: Default::default(),
         }
     }
 
@@ -1197,6 +1268,8 @@ mod tests {
                 alpha_policy: resolved.render_mode.texture_alpha_policy(),
             });
         FlyViewer {
+            #[cfg(feature = "gui-benchmark")]
+            benchmark: None,
             scene: Arc::new(scene),
             content_id: 1,
             fog: None,
@@ -1210,7 +1283,160 @@ mod tests {
             movement_mode: Some(MovementMode::Fly),
             requested_movement_mode: None,
             mouse_captured: false,
+            render_feedback: Default::default(),
         }
+    }
+
+    #[cfg(feature = "gui-benchmark")]
+    fn benchmark_viewer(velocity: [f32; 3], input: bool) -> FlyViewer {
+        use crate::app::gui_benchmark::{Case, Pose, ViewControl};
+        let pose = Pose {
+            eye: [10.0, 20.0, 30.0],
+            angles: [10.0, 20.0],
+            velocity,
+            yaw_degrees_per_second: if velocity == [0.0; 3] { 0.0 } else { 30.0 },
+        };
+        let case = Case {
+            name: "camera".into(),
+            archive: "/unused.gma".into(),
+            entry: "maps/unused.bsp".into(),
+            camera: pose.clone(),
+            second_camera: None,
+            seconds: 10.0,
+            warmup_seconds: 2.0,
+            fixed_scene_clock: Some(7.5),
+            continuous_redraw: true,
+            out_of_bounds: false,
+            allow_camera_input: input,
+        };
+        let mut viewer = input_viewer(false);
+        viewer.benchmark = Some(ViewControl::new(pose, &case));
+        viewer
+    }
+
+    #[cfg(feature = "gui-benchmark")]
+    fn benchmark_redraw(
+        viewer: &FlyViewer,
+        camera: &mut FlyCamera,
+        now: std::time::Instant,
+    ) -> Action<Message> {
+        viewer
+            .update(
+                camera,
+                &Event::Window(iced::window::Event::RedrawRequested(now)),
+                Rectangle::with_size(iced::Size::new(1280.0, 720.0)),
+                mouse::Cursor::Unavailable,
+            )
+            .expect("benchmark continuously redraws")
+    }
+
+    #[cfg(feature = "gui-benchmark")]
+    #[test]
+    fn stationary_benchmark_requests_frames_without_publishing_unchanged_camera() {
+        let viewer = benchmark_viewer([0.0; 3], false);
+        let mut camera = FlyCamera::default();
+        let now = std::time::Instant::now();
+        assert!(
+            benchmark_redraw(&viewer, &mut camera, now)
+                .into_inner()
+                .0
+                .is_some()
+        );
+        viewer
+            .benchmark
+            .as_ref()
+            .unwrap()
+            .measurement_started
+            .set(now)
+            .unwrap();
+        for elapsed in [16, 100, 1000] {
+            let (message, redraw, _) = benchmark_redraw(
+                &viewer,
+                &mut camera,
+                now + std::time::Duration::from_millis(elapsed),
+            )
+            .into_inner();
+            assert!(message.is_none());
+            assert_eq!(redraw, iced::window::RedrawRequest::NextFrame);
+            assert_eq!(camera.position, Some(Vec3::new(10.0, 20.0, 30.0)));
+            assert_eq!(camera.model_lighting_time, 7.5);
+            assert_eq!(camera.water_time, 7.5);
+            assert_eq!(camera.mode(), MovementMode::Fly);
+        }
+    }
+
+    #[cfg(feature = "gui-benchmark")]
+    #[test]
+    fn benchmark_motion_holds_through_warmup_and_publishes_only_changed_redraw_poses() {
+        let viewer = benchmark_viewer([4.0, 0.0, -1.0], false);
+        let mut camera = FlyCamera::default();
+        let now = std::time::Instant::now();
+        benchmark_redraw(&viewer, &mut camera, now);
+        assert!(
+            benchmark_redraw(
+                &viewer,
+                &mut camera,
+                now + std::time::Duration::from_secs(5)
+            )
+            .into_inner()
+            .0
+            .is_none()
+        );
+        let start = now + std::time::Duration::from_secs(6);
+        viewer
+            .benchmark
+            .as_ref()
+            .unwrap()
+            .measurement_started
+            .set(start)
+            .unwrap();
+        assert!(
+            benchmark_redraw(&viewer, &mut camera, start)
+                .into_inner()
+                .0
+                .is_none()
+        );
+        let next = start + std::time::Duration::from_secs(2);
+        let action = benchmark_redraw(&viewer, &mut camera, next);
+        assert_eq!(camera.position, Some(Vec3::new(18.0, 20.0, 28.0)));
+        assert_eq!(camera.yaw, 80.0_f32.to_radians());
+        assert_eq!(action.into_inner().0, camera.camera_update_message());
+        assert!(
+            benchmark_redraw(&viewer, &mut camera, next)
+                .into_inner()
+                .0
+                .is_none()
+        );
+        viewer.update(
+            &mut camera,
+            &Event::Mouse(mouse::Event::CursorLeft),
+            Rectangle::default(),
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(camera.position, Some(Vec3::new(18.0, 20.0, 28.0)));
+    }
+
+    #[cfg(feature = "gui-benchmark")]
+    #[test]
+    fn benchmark_input_seed_does_not_overwrite_subsequent_user_pose() {
+        let viewer = benchmark_viewer([0.0; 3], true);
+        let mut camera = FlyCamera::default();
+        let now = std::time::Instant::now();
+        benchmark_redraw(&viewer, &mut camera, now);
+        camera.position = Some(Vec3::new(100.0, 200.0, 300.0));
+        camera.yaw = 1.5;
+        assert!(
+            benchmark_redraw(
+                &viewer,
+                &mut camera,
+                now + std::time::Duration::from_secs(1)
+            )
+            .into_inner()
+            .0
+            .is_none()
+        );
+        assert_eq!(camera.position, Some(Vec3::new(100.0, 200.0, 300.0)));
+        assert_eq!(camera.yaw, 1.5);
     }
 
     #[test]

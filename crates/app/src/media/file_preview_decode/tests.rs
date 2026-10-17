@@ -28,6 +28,7 @@ fn request(path: &str, bytes: &[u8]) -> PreviewRequest {
     .expect("fixture archive should load");
 
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: path.to_owned(),
@@ -35,6 +36,7 @@ fn request(path: &str, bytes: &[u8]) -> PreviewRequest {
         size_bytes: bytes.len() as u64,
         crc32: 0,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -46,6 +48,7 @@ fn request_from_archive(
 ) -> PreviewRequest {
     let display_name = path.rsplit('/').next().unwrap_or(&path).to_owned();
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: path,
@@ -53,6 +56,7 @@ fn request_from_archive(
         size_bytes,
         crc32,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -1035,6 +1039,9 @@ fn decoded_texture_budget_counts_full_mip_chain_bytes() {
 
     assert_eq!(budget.decoded_bytes(), 0);
     assert_eq!(budget.rejected_textures(), 1);
+    let table = resolve_map_material_slots_serial(&["test/first".to_owned()], &resolver);
+    assert_eq!(table.resolved_count(), 0);
+    assert!(!table.slots()[0].has_resolved_base());
 }
 
 #[test]
@@ -1233,8 +1240,6 @@ fn prop_transform_scales_positions_before_rotation_without_scaling_normals() {
 
 #[test]
 fn prop_transform_composes_roll_before_yaw() {
-    // yaw 90 + roll 90: Rx(roll) leaves +X alone, Rz(yaw) then sends it
-    // to +Y. The reversed composition would produce +Z instead.
     let placement = prop_placement(
         "models/test/chair.mdl",
         Vec3::new(0.0, 0.0, 0.0),
@@ -1259,8 +1264,6 @@ fn prop_lighting_adds_visible_sun_in_linear_space() {
         }),
     };
 
-    // Up-facing vertices get ambient and sun; down-facing vertices get ambient
-    // only. The ambient cube already includes sky bounce.
     assert_vec3_close(
         lighting.evaluate(Vec3::new(0.0, 0.0, 1.0)),
         Vec3::new(0.6, 0.35, 0.1),
@@ -1294,7 +1297,7 @@ fn prop_lighting_keeps_shadowed_vertices_ambient_only() {
 
 #[test]
 fn prop_bake_applies_skin_table_to_material_slot() {
-    let asset = test_prop_asset(1, vec![10, 11]);
+    let asset = test_prop_asset(vec![10, 11]);
     let placement = prop_placement(
         "models/test/chair.mdl",
         Vec3::new(10.0, 20.0, 30.0),
@@ -1323,7 +1326,7 @@ fn prop_bake_applies_skin_table_to_material_slot() {
 
 #[test]
 fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
-    let asset = test_prop_asset(1, vec![0, 1]);
+    let asset = test_prop_asset(vec![0, 1]);
     let mut placement = prop_placement(
         "models/test/scaled_entity.mdl",
         Vec3::splat(0.0),
@@ -1480,7 +1483,7 @@ fn prop_bake_counts_placement_cap_overflow_as_skipped() {
             0,
         ),
     ];
-    let asset = Arc::new(test_prop_asset(1, vec![0, 1]));
+    let asset = Arc::new(test_prop_asset(vec![0, 1]));
 
     let result = bake_static_props_with_loader(
         &placements,
@@ -1530,7 +1533,9 @@ fn prop_bake_counts_triangle_cap_remaining_as_skipped() {
             0,
         ),
     ];
-    let asset = Arc::new(test_prop_asset(2, vec![0, 1]));
+    let mut asset = test_prop_asset(vec![0, 1]);
+    Arc::make_mut(&mut asset.model).meshes[0].indices = vec![0, 1, 2, 0, 1, 2];
+    let asset = Arc::new(asset);
 
     let result = bake_static_props_with_loader(
         &placements,
@@ -1586,9 +1591,7 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
             visibility,
         )
     }));
-    // Use unequal vertex and index counts to catch mixed-up visibility offsets.
-    // Include both static and entity props to test the merged ranges.
-    let mut asset = test_prop_asset(2, vec![10, 11]);
+    let mut asset = test_prop_asset(vec![10, 11]);
     {
         let model = Arc::get_mut(&mut asset.model).expect("fresh model arc");
         model.meshes[0]
@@ -1670,7 +1673,7 @@ fn sprp_only_prop_bake_is_unchanged_when_entity_prop_list_is_empty() {
     let entity_props: Vec<StaticPropPlacement> = Vec::new();
     let mut combined = sprp_props.clone();
     combined.extend(entity_props);
-    let asset = Arc::new(test_prop_asset(1, vec![0, 1]));
+    let asset = Arc::new(test_prop_asset(vec![0, 1]));
     let lighting = StaticPropLightingInputs {
         ambient: &MapAmbientLighting::neutral(),
         environment_maps: None,
@@ -2068,10 +2071,7 @@ fn prop_placement_with_visibility(
     }
 }
 
-pub(super) fn test_prop_asset(
-    default_triangle_count: usize,
-    material_indices: Vec<usize>,
-) -> PropModelAsset {
+pub(super) fn test_prop_asset(material_indices: Vec<usize>) -> PropModelAsset {
     PropModelAsset {
         model: Arc::new(ModelData {
             mdl_flags: 0,
@@ -2108,7 +2108,6 @@ pub(super) fn test_prop_asset(
             triangle_count: 1,
         }),
         material_indices: material_indices.into_iter().enumerate().collect(),
-        default_triangle_count,
     }
 }
 
@@ -2163,7 +2162,6 @@ fn test_loaded_prop_model(
             vertex_count: 3,
             triangle_count: 1,
         }),
-        default_triangle_count: 1,
         physics: LoadedPropPhysics::Missing,
         collision: None,
     }
@@ -2755,4 +2753,99 @@ fn compacted_door_indices_remap_surface_mark_geometry_and_omit_unavailable_owner
             mesh_index: 2
         }
     );
+}
+
+#[test]
+fn cancelled_preview_routes_stop_before_archive_or_content_decoding() {
+    for path in [
+        "maps/missing.bsp",
+        "models/missing.mdl",
+        "particles/missing.pcf",
+    ] {
+        let request = request(path, &[]);
+        request.cancellation.cancel();
+        let cpu = gmpublished_backend::CpuExecutor::build(2).unwrap();
+        let result = load_preview(&request, &Tokens::dark(), None, &cpu, &mut |_| {
+            panic!("cancelled load emitted a stage")
+        });
+        assert!(
+            matches!(result, Err(PreviewLoadError::Cancelled(_))),
+            "{path}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn particle_materials_keep_unknown_source_failures_and_blocked_texture_outcomes() {
+    use crate::bridge::materials::MaterialResolutionOutcome;
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    std::fs::create_dir_all(game.join("garrysmod")).unwrap();
+    std::fs::write(game.join("garrysmod/addons"), []).unwrap();
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Particle sources")
+            .entry(
+                "materials/particle/authored.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/unavailable" }"#.to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), Some(game));
+    let material = resolve_particle_material(&resolver, "particle/unknown".to_owned());
+    assert_eq!(
+        material.resolution,
+        MaterialResolutionOutcome::SourceUnavailable
+    );
+    assert!(material.texture.is_none());
+    assert!(material.is_unavailable());
+    let authored = resolve_particle_material(&resolver, "particle/authored".to_owned());
+    assert_eq!(authored.resolution, MaterialResolutionOutcome::Loaded);
+    assert_eq!(
+        authored.texture.as_ref().unwrap().load_outcome(),
+        TextureLoadOutcome::SourceUnavailable
+    );
+    assert!(authored.is_unavailable());
+    let preview = ParticlePreview {
+        file: Default::default(),
+        systems: Vec::new(),
+        materials: vec![material, authored],
+        sheet_stats: Default::default(),
+        source_discovery: resolver.source_discovery_stats().clone(),
+    };
+    assert!(!preview.source_discovery.failures.is_empty());
+    assert!(preview.has_unavailable_content());
+}
+
+#[test]
+fn particle_native_missing_and_invalid_base_images_remain_sampleable() {
+    use crate::bridge::materials::MaterialResolutionOutcome;
+    let resolver = MaterialResolver::prop_lighting_fixture(
+        vec![
+            (
+                "materials/particle/missing.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/absent" }"#.to_vec(),
+            ),
+            (
+                "materials/particle/invalid.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/bad" }"#.to_vec(),
+            ),
+            (
+                "materials/particle/bad.vtf",
+                b"invalid selected payload".to_vec(),
+            ),
+        ],
+        Vec::new(),
+    );
+    for (name, outcome) in [
+        ("missing", TextureLoadOutcome::MissingSource),
+        ("invalid", TextureLoadOutcome::InvalidSource),
+    ] {
+        let slot = resolve_particle_material(&resolver, format!("particle/{name}"));
+        assert_eq!(slot.resolution, MaterialResolutionOutcome::Loaded);
+        let texture = slot.texture.unwrap();
+        assert_eq!(texture.load_outcome(), outcome);
+        assert!(!texture.load_outcome().is_unavailable());
+        assert_eq!(texture.mip_chain().next().unwrap().width, 32);
+    }
 }

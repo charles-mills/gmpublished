@@ -660,14 +660,8 @@ fn parse_with_length<'a>(
         });
     }
 
-    // VTFLib face rule: envmaps carry a spheremap as a 7th face before
-    // 7.5 unless first_frame is 0xFFFF.
     let faces = if flags & texture_flags::ENVMAP != 0 {
-        if minor < 5 && first_frame != 0xFFFF {
-            7
-        } else {
-            6
-        }
+        if (1..=4).contains(&minor) { 7 } else { 6 }
     } else {
         1
     };
@@ -739,7 +733,7 @@ impl<'a> Vtf<'a> {
         self.frames
     }
 
-    /// Authored first-frame field, including the legacy cubemap sentinel.
+    /// Authored first-frame field.
     #[must_use]
     pub fn first_frame(&self) -> u16 {
         self.first_frame

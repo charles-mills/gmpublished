@@ -19,11 +19,14 @@ pub enum SpriteSheetSourceFailure {
     Read,
     EncodedBudget,
     WorkingBudget,
+    SourceUnavailable,
     Preparation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SpriteSheetResolveError {
+    #[error(transparent)]
+    Cancelled(#[from] crate::preparation::Cancelled),
     #[error("particle material {name} is unavailable: {outcome:?}")]
     Material {
         name: String,
@@ -146,7 +149,7 @@ struct SpriteSheetAllocationId(u64);
 pub(super) struct SpriteSheetCache {
     allocation_id: SpriteSheetAllocationId,
     cost: OnceLock<Result<Option<SpriteSheetCost>, SpriteSheetError>>,
-    parsed: OnceLock<Result<Option<Arc<SpriteSheet>>, SpriteSheetError>>,
+    parsed: crate::preparation::FlightCell<Result<Option<Arc<SpriteSheet>>, SpriteSheetError>>,
     #[cfg(test)]
     parses: std::sync::atomic::AtomicUsize,
 }
@@ -156,7 +159,7 @@ impl Default for SpriteSheetCache {
         Self {
             allocation_id: SpriteSheetAllocationId(super::texture_source::source_token()),
             cost: OnceLock::new(),
-            parsed: OnceLock::new(),
+            parsed: Default::default(),
             #[cfg(test)]
             parses: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -187,31 +190,36 @@ impl SpriteSheetCache {
         &self,
         asset: &TextureAsset,
         working: Option<super::texture_working::TextureWorkingRequest>,
-    ) -> Result<Option<Arc<SpriteSheet>>, SpriteSheetError> {
+        cancellation: &crate::preparation::PreparationCancellation,
+    ) -> Result<Option<Arc<SpriteSheet>>, SpriteSheetResolveError> {
         self.parsed
-            .get_or_init(|| {
-                let _working = working.map(super::texture_working::TextureWorkingRequest::acquire);
-                #[cfg(test)]
-                self.parses
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let bytes = asset.source_bytes();
-                let vtf = vformats::vtf::parse(bytes.as_slice(), &Limits::default())
-                    .map_err(|_| SpriteSheetError::InvalidResource)?;
-                vtf.sprite_sheet_descriptor()?
-                    .map(|descriptor| {
-                        let cost = descriptor.cost();
-                        descriptor
-                            .decode(SpriteSheetLimits {
-                                max_sequences: 1024,
-                                max_frames_per_sequence: 4096,
-                                max_frames: cost.frames,
-                                max_metadata_bytes: cost.metadata_bytes,
-                            })
-                            .map(Arc::new)
-                    })
-                    .transpose()
-            })
-            .clone()
+            .get_or_try_init(cancellation, || {
+                let _working = working
+                    .map(|request| request.acquire_cancellable(cancellation))
+                    .transpose()?;
+                Ok((|| {
+                    #[cfg(test)]
+                    self.parses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let bytes = asset.source_bytes();
+                    let vtf = vformats::vtf::parse(bytes.as_slice(), &Limits::default())
+                        .map_err(|_| SpriteSheetError::InvalidResource)?;
+                    vtf.sprite_sheet_descriptor()?
+                        .map(|descriptor| {
+                            let cost = descriptor.cost();
+                            descriptor
+                                .decode(SpriteSheetLimits {
+                                    max_sequences: 1024,
+                                    max_frames_per_sequence: 4096,
+                                    max_frames: cost.frames,
+                                    max_metadata_bytes: cost.metadata_bytes,
+                                })
+                                .map(Arc::new)
+                        })
+                        .transpose()
+                })())
+            })?
+            .map_err(SpriteSheetResolveError::Invalid)
     }
 }
 
@@ -234,6 +242,12 @@ impl MaterialResolver {
                     name: name.to_owned(),
                     outcome: match self.material_source_failure(&paths) {
                         Some(MaterialSourceFailure::Missing) => MaterialResolutionOutcome::Missing,
+                        Some(MaterialSourceFailure::SourceUnavailable(_)) => {
+                            MaterialResolutionOutcome::SourceUnavailable
+                        }
+                        Some(MaterialSourceFailure::IndexUnavailable(_)) => {
+                            MaterialResolutionOutcome::IndexUnavailable
+                        }
                         Some(MaterialSourceFailure::Malformed(_)) => {
                             MaterialResolutionOutcome::Malformed
                         }
@@ -261,6 +275,9 @@ impl MaterialResolver {
                     }
                     TextureSourceError::Preparation { .. } => SpriteSheetSourceFailure::Preparation,
                     TextureSourceError::Read { .. } => SpriteSheetSourceFailure::Read,
+                    TextureSourceError::SourceUnavailable(_) => {
+                        SpriteSheetSourceFailure::SourceUnavailable
+                    }
                 },
                 message: error.to_string().into(),
             }
@@ -278,11 +295,11 @@ impl MaterialResolver {
             .transpose()?;
         let id = cache.allocation_id;
         self.config.sprite_sheet_budget.admit(id, cost)?;
-        let result = cache.parse(asset, working);
+        let result = cache.parse(asset, working, &self.config.cancellation);
         if result.is_err() {
             self.config.sprite_sheet_budget.release(id);
         }
-        result.map_err(SpriteSheetResolveError::Invalid)
+        result
     }
 }
 

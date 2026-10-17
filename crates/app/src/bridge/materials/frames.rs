@@ -120,6 +120,12 @@ impl MaterialResolver {
         let path = texture_path(name)?;
         let selected = match self.selected_texture_asset(&path) {
             Ok(selected) => selected,
+            Err(super::TextureSourceError::SourceUnavailable(_)) => {
+                return Some(Arc::new(DecodedTextureFrames::unavailable(
+                    None,
+                    TextureLoadOutcome::SourceUnavailable,
+                )));
+            }
             Err(super::TextureSourceError::Preparation { .. }) => {
                 return Some(Arc::new(DecodedTextureFrames::unavailable(
                     None,

@@ -13,23 +13,12 @@ pub(super) enum QualitySource {
     Application,
     #[cfg(any(test, feature = "map-capture"))]
     CaptureConfigured,
-    TextureFlags,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub(super) struct QualityProfile {
     pub source: QualitySource,
     pub quality: SamplerQuality,
-}
-
-impl QualityProfile {
-    pub const SKY: Self = Self {
-        source: QualitySource::TextureFlags,
-        quality: SamplerQuality {
-            anisotropy: 1,
-            force_trilinear: false,
-        },
-    };
 }
 
 const APPLICATION_QUALITY: QualityProfile = QualityProfile {
@@ -199,11 +188,20 @@ pub(super) struct RequestedSamplerPolicy {
 pub(super) enum SamplerLimitation {
     PortableAnisotropyLimit { requested: u16, maximum: u16 },
     AnisotropyUnavailable,
-    AnisotropyRequiresLinearFilters,
+    NativeAnisotropicPointUnavailable,
+    IndependentAnisotropicMipUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub(super) struct SamplerCapabilities {
+    pub anisotropy: bool,
+    pub independent_anisotropic_mip: bool,
+    pub native_anisotropic_point: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub(super) struct AppliedSamplerPolicy {
+    pub capabilities: SamplerCapabilities,
     pub requested: RequestedSamplerPolicy,
     pub descriptor: SamplerKey,
     pub limitations: Vec<SamplerLimitation>,
@@ -240,6 +238,7 @@ impl SamplerDiagnostic {
         serde_json::json!({
             "material": self.material, "role": self.role, "texture_flags": self.texture_flags,
             "quality": self.quality, "requested": self.policy.requested.descriptor(),
+            "capabilities": self.policy.capabilities,
             "applied": self.policy.descriptor, "limitations": self.policy.limitations,
         })
     }
@@ -250,7 +249,7 @@ impl RequestedSamplerPolicy {
         self.descriptor
     }
 
-    pub fn apply(self, anisotropy_supported: bool) -> AppliedSamplerPolicy {
+    pub fn apply(self, capabilities: SamplerCapabilities) -> AppliedSamplerPolicy {
         let mut descriptor = self.descriptor();
         let mut limitations = Vec::new();
         if descriptor.anisotropy > 16 {
@@ -261,24 +260,26 @@ impl RequestedSamplerPolicy {
             descriptor.anisotropy = 16;
         }
         if descriptor.anisotropy > 1 {
-            let filters_linear = [
-                descriptor.min_filter,
-                descriptor.mag_filter,
-                descriptor.mip_filter,
-            ]
-            .iter()
-            .all(|filter| *filter == wgpu::FilterMode::Linear);
-            if !anisotropy_supported {
+            let min_mag_linear = descriptor.min_filter == wgpu::FilterMode::Linear
+                && descriptor.mag_filter == wgpu::FilterMode::Linear;
+            let min_mag_supported = min_mag_linear || capabilities.native_anisotropic_point;
+            let mip_supported = descriptor.mip_filter == wgpu::FilterMode::Linear
+                || capabilities.independent_anisotropic_mip;
+            if !capabilities.anisotropy {
                 limitations.push(SamplerLimitation::AnisotropyUnavailable);
             }
-            if !filters_linear {
-                limitations.push(SamplerLimitation::AnisotropyRequiresLinearFilters);
+            if !min_mag_supported {
+                limitations.push(SamplerLimitation::NativeAnisotropicPointUnavailable);
             }
-            if !anisotropy_supported || !filters_linear {
+            if !mip_supported {
+                limitations.push(SamplerLimitation::IndependentAnisotropicMipUnavailable);
+            }
+            if !capabilities.anisotropy || !min_mag_supported || !mip_supported {
                 descriptor.anisotropy = 1;
             }
         }
         AppliedSamplerPolicy {
+            capabilities,
             requested: self,
             descriptor,
             limitations,
@@ -289,7 +290,7 @@ impl RequestedSamplerPolicy {
 #[derive(Debug)]
 pub(super) struct SamplerCache {
     device: wgpu::Device,
-    anisotropy_supported: bool,
+    capabilities: SamplerCapabilities,
     samplers: Mutex<HashMap<SamplerKey, wgpu::Sampler>>,
 }
 
@@ -303,13 +304,21 @@ impl SamplerCache {
     pub fn new(device: &wgpu::Device, anisotropy_supported: bool) -> Self {
         Self {
             device: device.clone(),
-            anisotropy_supported,
+            capabilities: SamplerCapabilities {
+                anisotropy: anisotropy_supported,
+                independent_anisotropic_mip: device
+                    .features()
+                    .contains(wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER),
+                native_anisotropic_point: device
+                    .features()
+                    .contains(wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING),
+            },
             samplers: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn resolve(&self, requested: RequestedSamplerPolicy) -> ResolvedSampler {
-        let policy = requested.apply(self.anisotropy_supported);
+        let policy = requested.apply(self.capabilities);
         let sampler = intern(&self.samplers, policy.descriptor, || {
             self.device.create_sampler(&policy.descriptor.descriptor())
         });
@@ -362,6 +371,14 @@ mod tests {
     };
     use vformats::vtf::texture_flags as flags;
 
+    fn portable(anisotropy: bool) -> SamplerCapabilities {
+        SamplerCapabilities {
+            anisotropy,
+            independent_anisotropic_mip: false,
+            native_anisotropic_point: false,
+        }
+    }
+
     fn request(flags: u32, anisotropy: u16, force_trilinear: bool) -> RequestedSamplerPolicy {
         TextureSamplerPolicy::from_flags(flags, TextureKind::Texture2d)
             .request(SamplerQuality {
@@ -369,6 +386,62 @@ mod tests {
                 force_trilinear,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn point_anisotropy_and_nearest_mip_require_independent_capabilities() {
+        use wgpu::FilterMode::{Linear, Nearest};
+        for native_point in [false, true] {
+            for native_mip in [false, true] {
+                for min in [Nearest, Linear] {
+                    for mag in [Nearest, Linear] {
+                        for mip in [Nearest, Linear] {
+                            let requested = TextureSamplerPolicy {
+                                address: [wgpu::AddressMode::Repeat; 3],
+                                min_filter: min,
+                                mag_filter: mag,
+                                mip_filter: mip,
+                            }
+                            .request(SamplerQuality {
+                                anisotropy: 4,
+                                force_trilinear: false,
+                            })
+                            .unwrap();
+                            let applied = requested.apply(SamplerCapabilities {
+                                anisotropy: true,
+                                independent_anisotropic_mip: native_mip,
+                                native_anisotropic_point: native_point,
+                            });
+                            let point_supported = (min == Linear && mag == Linear) || native_point;
+                            let mip_supported = mip == Linear || native_mip;
+                            assert_eq!(
+                                applied.descriptor.anisotropy,
+                                if point_supported && mip_supported {
+                                    4
+                                } else {
+                                    1
+                                }
+                            );
+                            assert_eq!(applied.descriptor.min_filter, min);
+                            assert_eq!(applied.descriptor.mag_filter, mag);
+                            assert_eq!(applied.descriptor.mip_filter, mip);
+                            assert_eq!(
+                                applied.limitations.contains(
+                                    &SamplerLimitation::NativeAnisotropicPointUnavailable
+                                ),
+                                !point_supported
+                            );
+                            assert_eq!(
+                                applied.limitations.contains(
+                                    &SamplerLimitation::IndependentAnisotropicMipUnavailable
+                                ),
+                                !mip_supported
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -413,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn cubes_clamp_every_axis_without_overriding_filter_flags() {
+    fn cubes_clamp_axes_and_preserve_authored_mip_filtering() {
         let p = TextureSamplerPolicy::from_flags(
             flags::POINTSAMPLE | flags::ANISOTROPIC,
             TextureKind::Cubemap,
@@ -421,36 +494,77 @@ mod tests {
         assert_eq!(p.address, [wgpu::AddressMode::ClampToEdge; 3]);
         assert_eq!(p.min_filter, wgpu::FilterMode::Nearest);
         assert_eq!(p.mip_filter, wgpu::FilterMode::Linear);
+        let plain = TextureSamplerPolicy::from_flags(0, TextureKind::Cubemap)
+            .request(SamplerQuality {
+                anisotropy: 4,
+                force_trilinear: false,
+            })
+            .unwrap()
+            .apply(SamplerCapabilities {
+                anisotropy: true,
+                independent_anisotropic_mip: true,
+                native_anisotropic_point: false,
+            });
+        assert_eq!(plain.descriptor.mip_filter, wgpu::FilterMode::Nearest);
+        assert_eq!(plain.descriptor.anisotropy, 4);
+        assert!(plain.limitations.is_empty());
     }
 
     #[test]
     fn explicit_quality_overrides_mips_without_erasing_point_sampling() {
-        let p = request(flags::POINTSAMPLE, 16, true).apply(true);
+        let p = request(flags::POINTSAMPLE, 16, true).apply(portable(true));
         assert_eq!(p.requested.descriptor.anisotropy, 16);
         assert_eq!(p.descriptor.anisotropy, 1);
         assert_eq!(p.descriptor.mip_filter, wgpu::FilterMode::Nearest);
         assert_eq!(p.descriptor.mag_filter, wgpu::FilterMode::Nearest);
         assert_eq!(
             p.limitations,
-            [SamplerLimitation::AnisotropyRequiresLinearFilters]
+            [
+                SamplerLimitation::NativeAnisotropicPointUnavailable,
+                SamplerLimitation::IndependentAnisotropicMipUnavailable
+            ]
         );
-        assert!(request(0, 16, true).apply(true).limitations.is_empty());
+        assert!(
+            request(0, 16, true)
+                .apply(portable(true))
+                .limitations
+                .is_empty()
+        );
     }
 
     #[test]
     fn nearest_mips_are_preserved_when_anisotropy_cannot_be_expressed() {
-        let p = request(0, 4, false).apply(true);
+        let p = request(0, 4, false).apply(portable(true));
         assert_eq!(p.descriptor.anisotropy, 1);
         assert_eq!(p.descriptor.mip_filter, wgpu::FilterMode::Nearest);
         assert_eq!(
             p.limitations,
-            [SamplerLimitation::AnisotropyRequiresLinearFilters]
+            [SamplerLimitation::IndependentAnisotropicMipUnavailable]
+        );
+    }
+
+    #[test]
+    fn independent_mip_capability_preserves_native_request_without_relaxing_point_filters() {
+        let capabilities = SamplerCapabilities {
+            anisotropy: true,
+            independent_anisotropic_mip: true,
+            native_anisotropic_point: false,
+        };
+        let policy = request(0, 4, false).apply(capabilities);
+        assert_eq!(policy.descriptor, policy.requested.descriptor());
+        assert!(policy.limitations.is_empty());
+        let point = request(flags::POINTSAMPLE, 4, false).apply(capabilities);
+        assert_eq!(point.descriptor.anisotropy, 1);
+        assert_eq!(point.descriptor.mip_filter, wgpu::FilterMode::Nearest);
+        assert_eq!(
+            point.limitations,
+            [SamplerLimitation::NativeAnisotropicPointUnavailable]
         );
     }
 
     #[test]
     fn capability_and_portable_limit_are_reported_separately() {
-        let p = request(flags::TRILINEAR, 32, false).apply(false);
+        let p = request(flags::TRILINEAR, 32, false).apply(portable(false));
         assert_eq!(p.descriptor.anisotropy, 1);
         assert_eq!(
             p.limitations,
@@ -464,7 +578,7 @@ mod tests {
         );
         assert_eq!(
             request(flags::TRILINEAR, 32, false)
-                .apply(true)
+                .apply(portable(true))
                 .descriptor
                 .anisotropy,
             16
@@ -484,7 +598,7 @@ mod tests {
             for anisotropy in [1, 2, 4, 16, 17, u16::MAX] {
                 for force in [false, true] {
                     for supported in [false, true] {
-                        let p = request(flags, anisotropy, force).apply(supported);
+                        let p = request(flags, anisotropy, force).apply(portable(supported));
                         let d = p.descriptor.descriptor();
                         assert!((1..=16).contains(&d.anisotropy_clamp));
                         if d.anisotropy_clamp > 1 {
@@ -503,8 +617,8 @@ mod tests {
     #[test]
     fn lowered_requests_share_objects_without_losing_requested_quality() {
         let cache = Mutex::new(HashMap::new());
-        let a = request(0, 4, false).apply(true);
-        let b = request(0, 1, false).apply(true);
+        let a = request(0, 4, false).apply(portable(true));
+        let b = request(0, 1, false).apply(portable(true));
         assert_eq!(a.descriptor, b.descriptor);
         assert_ne!(a.requested, b.requested);
         assert!(!a.limitations.is_empty());
@@ -512,7 +626,7 @@ mod tests {
         let first = intern(&cache, a.descriptor, || Arc::new(7));
         let second = intern(&cache, b.descriptor, || panic!("duplicate allocation"));
         assert!(Arc::ptr_eq(&first, &second));
-        let clamped = request(flags::CLAMPS, 1, false).apply(true);
+        let clamped = request(flags::CLAMPS, 1, false).apply(portable(true));
         let other = intern(&cache, clamped.descriptor, || Arc::new(7));
         assert!(!Arc::ptr_eq(&first, &other));
     }
@@ -521,7 +635,9 @@ mod tests {
     fn simultaneous_requests_create_one_object_per_applied_descriptor() {
         let cache = Mutex::new(HashMap::new());
         let count = AtomicUsize::new(0);
-        let key = request(flags::TRILINEAR, 4, false).apply(true).descriptor;
+        let key = request(flags::TRILINEAR, 4, false)
+            .apply(portable(true))
+            .descriptor;
         std::thread::scope(|scope| {
             for _ in 0..16 {
                 scope.spawn(|| {
@@ -536,3 +652,7 @@ mod tests {
         assert_eq!(cache.lock().len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "samplers/gpu_tests.rs"]
+mod gpu_tests;

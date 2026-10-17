@@ -49,6 +49,7 @@ geometry = [
 ]
 image = ["iced_graphics/image"]
 strict-assertions = []
+renderer-profiling = []
 svg = [
     "iced_graphics/svg",
     "resvg/text",

@@ -1,16 +1,14 @@
-//! Opt-in GPU acceptance gate for two simultaneous production shader widgets.
 use super::{CaptureCamera, FixedView, Message};
 use iced::advanced::renderer::Headless as _;
 use iced::{Color, Length, Size, mouse};
 use iced_runtime::{UserInterface, user_interface};
 use serde_json::{Value, json};
 
-fn pixels<P: iced::widget::shader::Program<Message>>(
+fn prepare_views<P: iced::widget::shader::Program<Message>>(
     renderer: &mut iced::Renderer,
     views: Vec<(P, u32)>,
     height: u32,
-    settle: bool,
-) -> (Vec<u8>, u32) {
+) -> Size<u32> {
     let width =
         views.iter().map(|(_, width)| *width).sum::<u32>() + 16 * (views.len() as u32 - 1) + 24;
     let widgets = views.into_iter().map(|(view, width)| {
@@ -37,11 +35,20 @@ fn pixels<P: iced::widget::shader::Program<Message>>(
         },
         mouse::Cursor::Unavailable,
     );
-    let size = Size::new(width, height + 24);
+    Size::new(width, height + 24)
+}
+
+fn pixels<P: iced::widget::shader::Program<Message>>(
+    renderer: &mut iced::Renderer,
+    views: Vec<(P, u32)>,
+    height: u32,
+    settle: bool,
+) -> (Vec<u8>, u32) {
+    let size = prepare_views(renderer, views, height);
     if settle {
         let _ = renderer.screenshot(size, 1.0, Color::BLACK);
     }
-    (renderer.screenshot(size, 1.0, Color::BLACK), width)
+    (renderer.screenshot(size, 1.0, Color::BLACK), size.width)
 }
 
 fn crop(bytes: &[u8], width: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
@@ -71,7 +78,9 @@ pub(super) fn verify(
     make: impl Fn(&CaptureCamera) -> FixedView,
     cameras: &[CaptureCamera],
     directory: &std::path::Path,
+    benchmark_frames: usize,
 ) -> Value {
+    let benchmark_cameras = cameras;
     let cameras = cameras
         .iter()
         .filter(|shot| !shot.reflection_target && !shot.refraction_target && !shot.live_animation)
@@ -134,7 +143,52 @@ pub(super) fn verify(
             results.push(json!({"iteration":iteration,"camera":order[side].name,"dimensions":[widths[side],height],"pair_matches_solo_pixels":true,"pixel_crc32":format!("{:08x}",crc32fast::hash(&actual)),"file":file}));
         }
     }
-    json!({"status":"passed","checks":results,"covers":["independent cameras and PVS","independent reflection targets","nonzero widget origins","resize","widget order/count changes"]})
+    let mut record = json!({"status":"passed","checks":results,"covers":["independent cameras and PVS","independent reflection targets","nonzero widget origins","resize","widget order/count changes"]});
+    if benchmark_frames > 0 {
+        record["render_latency"] =
+            benchmark_pair(renderer, &make, benchmark_cameras, benchmark_frames).into();
+    }
+    record
+}
+
+fn benchmark_pair(
+    renderer: &mut iced::Renderer,
+    make: &impl Fn(&CaptureCamera) -> FixedView,
+    cameras: &[CaptureCamera],
+    samples: usize,
+) -> Option<Value> {
+    if samples == 0 {
+        return None;
+    }
+    let mut cameras = cameras.iter().filter(|camera| {
+        !camera.reflection_target && !camera.refraction_target && !camera.live_animation
+    });
+    let first = cameras.next()?;
+    let Some(second) =
+        cameras.find(|camera| camera.eye != first.eye || camera.angles != first.angles)
+    else {
+        return Some(json!({"status":"unavailable","reason":"two distinct camera poses required"}));
+    };
+    let first_view = make(first);
+    let mut second_view = make(second);
+    assert!(std::sync::Arc::ptr_eq(
+        &first_view.viewer.scene,
+        &second_view.viewer.scene
+    ));
+    second_view.camera.water_time = first_view.camera.water_time + 0.75;
+    second_view.camera.model_lighting_time = f64::from(second_view.camera.water_time);
+    let clocks = [first_view.camera.water_time, second_view.camera.water_time];
+    let observers = [
+        first_view.diagnostics.clone(),
+        second_view.diagnostics.clone(),
+    ];
+    let size = prepare_views(renderer, vec![(first_view, 1280), (second_view, 1280)], 720);
+    let mut latency = super::benchmark_render(renderer, size, samples, &observers)?;
+    latency["workload"] = json!("two simultaneous previews sharing one scene");
+    latency["widget_dimensions"] = json!([[1280, 720], [1280, 720]]);
+    latency["cameras"] = json!([first.name, second.name]);
+    latency["water_clocks"] = json!(clocks);
+    Some(latency)
 }
 
 struct BorrowedView<'a>(&'a FixedView, Option<super::super::camera::ViewId>);
@@ -284,8 +338,6 @@ pub(super) fn verify_temporal(
         views[index].camera.yaw = clear.1;
         views[index].camera.pitch = clear.2;
     }
-    // Draw-order identities must break this gate; otherwise frozen captures
-    // could conceal a transfer of temporal GPU history between widgets.
     let legacy_ids = views.each_ref().map(|view| view.camera.view_id);
     for view in &mut views {
         view.camera.water_time = 0.0;
@@ -474,4 +526,28 @@ pub(super) fn verify_doors(
         "distinct_closed_open_mid_pixels": true,
         "covers": ["viewer-local door vertices", "persistent pose swaps", "widget reorder", "resize", "drop and readd", "independent solo renderers"],
     })
+}
+
+#[cfg(test)]
+mod benchmark_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_pair_benchmark_does_not_prepare_views() {
+        let mut renderer = iced::futures::executor::block_on(iced::Renderer::new(
+            iced::Font::default(),
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        assert!(
+            benchmark_pair(
+                &mut renderer,
+                &|_| panic!("disabled view preparation"),
+                &[],
+                0
+            )
+            .is_none()
+        );
+    }
 }

@@ -42,6 +42,10 @@ impl TextureWorkingBudget {
     pub(crate) fn current_bytes(&self) -> usize {
         self.state.lock().bytes
     }
+    #[cfg(test)]
+    pub(super) fn queued_requests(&self) -> usize {
+        self.state.lock().waiting.len()
+    }
     pub(super) fn check_required(&self, bytes: usize) -> Result<(), TextureAssetError> {
         let capacity = self.capacity();
         if bytes > capacity {
@@ -71,7 +75,23 @@ pub(super) struct TextureWorkingRequest {
 }
 
 impl TextureWorkingRequest {
+    #[cfg(test)]
     pub(super) fn acquire(self) -> TextureWorkingLease {
+        self.acquire_cancellable(&crate::preparation::PreparationCancellation::default())
+            .expect("uncancelled working request")
+    }
+
+    pub(super) fn acquire_cancellable(
+        self,
+        cancellation: &crate::preparation::PreparationCancellation,
+    ) -> Result<TextureWorkingLease, crate::preparation::Cancelled> {
+        cancellation.check()?;
+        let wake_budget = Arc::clone(&self.budget);
+        let _registration = cancellation.register(move || {
+            let state = wake_budget.state.lock();
+            wake_budget.changed.notify_all();
+            drop(state);
+        });
         let budget = &self.budget;
         let mut state = budget.state.lock();
         let ticket = state.next_ticket;
@@ -83,17 +103,29 @@ impl TextureWorkingRequest {
                 .checked_add(self.bytes)
                 .is_none_or(|total| total > budget.capacity)
         {
+            if cancellation.is_cancelled() {
+                state.waiting.retain(|queued| *queued != ticket);
+                drop(state);
+                budget.changed.notify_all();
+                return Err(crate::preparation::Cancelled);
+            }
             budget.changed.wait(&mut state);
+        }
+        if cancellation.is_cancelled() {
+            state.waiting.pop_front();
+            drop(state);
+            budget.changed.notify_all();
+            return Err(crate::preparation::Cancelled);
         }
         state.waiting.pop_front();
         state.bytes += self.bytes;
         state.peak = state.peak.max(state.bytes);
         drop(state);
         budget.changed.notify_all();
-        TextureWorkingLease {
+        Ok(TextureWorkingLease {
             budget: self.budget,
             bytes: self.bytes,
-        }
+        })
     }
 }
 
@@ -198,6 +230,118 @@ mod tests {
             budget.request(9),
             Err(TextureAssetError::WorkingLimit { .. })
         ));
+    }
+
+    #[test]
+    fn cancelled_fifo_head_releases_its_successor_without_waiting_for_capacity() {
+        let budget = Arc::new(TextureWorkingBudget::new(8));
+        let held = budget.request(6).unwrap().acquire();
+        let cancellation = crate::preparation::PreparationCancellation::default();
+        let large_budget = Arc::clone(&budget);
+        let large_token = cancellation.clone();
+        let (large_tx, large_rx) = mpsc::channel();
+        let large = thread::spawn(move || {
+            large_tx
+                .send(
+                    large_budget
+                        .request(8)
+                        .unwrap()
+                        .acquire_cancellable(&large_token)
+                        .is_err(),
+                )
+                .unwrap();
+        });
+        wait_queued(&budget, 1);
+        let small_budget = Arc::clone(&budget);
+        let (small_tx, small_rx) = mpsc::channel();
+        let small = thread::spawn(move || {
+            let _lease = small_budget.request(2).unwrap().acquire();
+            small_tx.send(()).unwrap();
+        });
+        wait_queued(&budget, 2);
+        cancellation.cancel();
+        assert!(large_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        small_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        large.join().unwrap();
+        small.join().unwrap();
+        assert_eq!(budget.current_bytes(), 6);
+        assert!(budget.state.lock().waiting.is_empty());
+        drop(held);
+        assert_eq!(budget.current_bytes(), 0);
+    }
+
+    #[test]
+    fn cancelled_source_initializer_releases_admission_and_another_token_can_retry() {
+        let bytes = fixture_vtf_bytes(4, 4, vformats::vtf::VtfFormat::Rgba8888, &[&[42; 64]]);
+        let path = super::super::ContentPath::new("materials/test/cancel.vtf").unwrap();
+        let resolver =
+            MaterialResolver::prop_lighting_fixture(vec![(path.as_str(), bytes)], Vec::new());
+        let working = Arc::new(TextureWorkingBudget::new(4096));
+        let held = working.request(4096).unwrap().acquire();
+        let encoded = Arc::new(super::super::EncodedTextureBudget::new(4096));
+        let cancellation = crate::preparation::PreparationCancellation::default();
+        let cancelled_resolver = resolver
+            .with_encoded_texture_budget(Arc::clone(&encoded))
+            .with_texture_source_working_budget(Arc::clone(&working))
+            .with_cancellation(cancellation.clone());
+        let worker_path = path.clone();
+        let worker = thread::spawn(move || cancelled_resolver.selected_texture_asset(&worker_path));
+        wait_queued(&working, 1);
+        cancellation.cancel();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(
+                super::super::texture_asset::TextureSourceError::Preparation {
+                    error: TextureAssetError::Cancelled(_),
+                    ..
+                }
+            )
+        ));
+        assert_eq!(encoded.encoded_bytes(), 0);
+        assert_eq!(working.current_bytes(), 4096);
+        drop(held);
+        let next = resolver
+            .with_encoded_texture_budget(Arc::clone(&encoded))
+            .with_texture_source_working_budget(Arc::clone(&working));
+        let first = next.selected_texture_asset(&path).unwrap();
+        let second = next.selected_texture_asset(&path).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(encoded.admitted_textures(), 1);
+        assert_eq!(working.current_bytes(), 0);
+    }
+
+    #[test]
+    fn cancelled_resident_initializer_releases_admission_without_poisoning_shared_content() {
+        let bytes = fixture_vtf_bytes(4, 4, vformats::vtf::VtfFormat::Rgba8888, &[&[42; 64]]);
+        let path = super::super::ContentPath::new("materials/test/cancel.vtf").unwrap();
+        let resolver =
+            MaterialResolver::prop_lighting_fixture(vec![(path.as_str(), bytes)], Vec::new());
+        let selected = resolver.selected_texture_asset(&path).unwrap();
+        let working = Arc::new(TextureWorkingBudget::new(4096));
+        let held = working.request(4096).unwrap().acquire();
+        let resident = Arc::new(DecodedTextureBudget::new(64));
+        let cancellation = crate::preparation::PreparationCancellation::default();
+        let cancelled_resolver = resolver
+            .with_decoded_texture_budget(Arc::clone(&resident))
+            .with_texture_working_budget(Arc::clone(&working))
+            .with_cancellation(cancellation.clone());
+        let worker_source = Arc::clone(&selected);
+        let worker =
+            thread::spawn(move || cancelled_resolver.resident_texture(&worker_source, 0..1, false));
+        wait_queued(&working, 1);
+        cancellation.cancel();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(TextureAssetError::Cancelled(_))
+        ));
+        assert_eq!(resident.decoded_bytes(), 0);
+        drop(held);
+        let next = resolver
+            .with_decoded_texture_budget(Arc::clone(&resident))
+            .with_texture_working_budget(Arc::clone(&working));
+        assert!(next.resident_texture(&selected, 0..1, false).is_ok());
+        assert_eq!(resident.decoded_bytes(), 64);
+        assert_eq!(working.current_bytes(), 0);
     }
 
     #[test]
@@ -334,6 +478,10 @@ mod tests {
     #[test]
     fn declared_resource_limit_applies_consistently_to_base_frames_and_cube_selections() {
         let mut cube = fixture_vtf_bytes(1, 1, VtfFormat::Rgba8888, &[&[63; 24]]);
+        cube.splice(64..64, [0; 16]);
+        cube[8..12].copy_from_slice(&5_u32.to_le_bytes());
+        cube[12..16].copy_from_slice(&80_u32.to_le_bytes());
+        cube[63..65].copy_from_slice(&1_u16.to_le_bytes());
         cube[20..24].copy_from_slice(&vformats::vtf::texture_flags::ENVMAP.to_le_bytes());
         cube[26..28].copy_from_slice(&u16::MAX.to_le_bytes());
         let resolver = MaterialResolver::prop_lighting_fixture(vec![

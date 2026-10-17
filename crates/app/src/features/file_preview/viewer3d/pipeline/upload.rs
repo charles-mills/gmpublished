@@ -102,7 +102,18 @@ impl UploadCache {
     ) -> Result<(), Arc<super::residency::SceneUploadError>> {
         let scene = source.render_scene();
         let map = source.map();
-        if self.uploads.contains_key(&key) {
+        let epoch = {
+            let uploader = resources
+                .texture_uploader
+                .lock()
+                .expect("texture uploader lock");
+            uploader.retirement_state().epoch
+        };
+        if self
+            .uploads
+            .get(&key)
+            .is_some_and(|upload| !upload.should_retry_images(epoch))
+        {
             return Ok(());
         }
 
@@ -332,10 +343,17 @@ impl UploadCache {
                     source_index,
                     map_skybox,
                     ranges,
+                    spatial_leaves: OnceLock::new(),
                 }
             })
             .collect()
         });
+        let opaque_placements = super::super::draw_plan::OpaquePlacementIndex::prepare(
+            &meshes,
+            &renderables,
+            scene,
+            map,
+        );
         let mut receiver_faces = HashMap::<u32, Vec<UploadedReceiver>>::new();
         let mut brush_receiver_groups = std::collections::BTreeMap::<_, Vec<(usize, usize)>>::new();
         if let Some(map) = map {
@@ -392,12 +410,25 @@ impl UploadCache {
                             .painted
                             .as_ref()
                             .and_then(|paint| paint.texture.as_ref())
-                            .and_then(|texture| texture.resident())
+                            .map(|texture| (texture.resident(), texture.load_outcome()))
                     } else {
                         skybox.faces[index]
                             .as_ref()
-                            .and_then(|texture| texture.resident())
+                            .map(|texture| (texture.resident(), texture.load_outcome()))
                     };
+                    let role = if material.is_painted() {
+                        "stars"
+                    } else {
+                        "face"
+                    };
+                    let source = source.and_then(|(resident, outcome)| {
+                        if outcome.is_unavailable() {
+                            images.reject("<sky>", role, format!("{outcome:?}"));
+                            None
+                        } else {
+                            resident
+                        }
+                    });
                     let transfer = if material.is_painted() {
                         TextureReadTransfer::Unmodified
                     } else {
@@ -408,7 +439,7 @@ impl UploadCache {
                             match images.view(device, queue, source, transfer, ImageView::D2(0)) {
                                 Ok(view) => Some(view),
                                 Err(error) => {
-                                    images.reject("<sky>", "face", error);
+                                    images.reject_upload("<sky>", role, &error);
                                     None
                                 }
                             }
@@ -418,11 +449,9 @@ impl UploadCache {
                         device,
                         &view,
                         super::sky::SkyUniform::new(material),
-                        material
-                            .painted
-                            .as_ref()
-                            .and_then(|paint| paint.texture.as_ref())
-                            .map_or(0, |texture| texture.flags()),
+                        source
+                            .and_then(|texture| texture.metadata().flags)
+                            .unwrap_or(0),
                         &mut sampler_diagnostics,
                     )
                 })
@@ -470,7 +499,10 @@ impl UploadCache {
         }
         super::transparency::build_parts(&mut meshes, &material_render_modes, scene, map);
         let (images, image_upload_issues) = images.finish();
+        let receiver_faces =
+            super::super::draw_plan::ReceiverIndex::prepare(receiver_faces, map, &meshes);
         let mut upload = UploadedModel {
+            image_rejection_epoch: epoch,
             images,
             image_upload_issues,
             sampler_diagnostics,
@@ -503,6 +535,8 @@ impl UploadCache {
                 })
                 .collect(),
             phy_debug_meshes: OnceLock::new(),
+            model_lighting_references: OnceLock::new(),
+            opaque_placements,
             material_bind_groups,
             water_material_bind_groups,
             material_render_modes,
@@ -552,6 +586,7 @@ pub struct UploadedMapRenderable {
     pub source_index: usize,
     pub map_skybox: bool,
     pub ranges: Vec<UploadedRenderableRange>,
+    pub spatial_leaves: OnceLock<Option<Vec<u32>>>,
 }
 
 #[derive(Debug)]
@@ -562,6 +597,7 @@ pub struct UploadedRenderableRange {
 
 #[derive(Debug)]
 pub struct UploadedModel {
+    image_rejection_epoch: u64,
     images: Vec<Arc<Image>>,
     pub(super) image_upload_issues: Vec<ImageUploadIssue>,
     pub(super) sampler_diagnostics: Vec<super::samplers::SamplerDiagnostic>,
@@ -572,10 +608,12 @@ pub struct UploadedModel {
     pub detail_sprites: Option<UploadedDetailSprites>,
     pub map_skybox_detail_sprites: Option<UploadedDetailSprites>,
     pub overlays: Vec<Arc<UploadedOverlay>>,
-    pub receiver_faces: HashMap<u32, Vec<UploadedReceiver>>,
+    pub receiver_faces: super::super::draw_plan::ReceiverIndex,
     pub brush_receiver_groups: Vec<UploadedBrushReceiverGroup>,
     pub renderables: Vec<UploadedMapRenderable>,
     pub phy_debug_meshes: OnceLock<Vec<UploadedMesh>>,
+    pub(super) model_lighting_references: OnceLock<super::model_lighting_visibility::References>,
+    pub(in super::super) opaque_placements: super::super::draw_plan::OpaquePlacementIndex,
     pub material_bind_groups: Vec<wgpu::BindGroup>,
     pub water_material_bind_groups: Vec<wgpu::BindGroup>,
     pub material_render_modes: Vec<RenderMode>,
@@ -587,6 +625,17 @@ pub struct UploadedModel {
 }
 
 impl UploadedModel {
+    pub(super) fn has_capacity_issues(&self) -> bool {
+        self.image_upload_issues
+            .iter()
+            .any(|issue| issue.cause == super::images::ImageUploadCause::Capacity)
+    }
+    fn should_retry_images(&self, epoch: u64) -> bool {
+        self.image_upload_issues
+            .iter()
+            .any(|issue| issue.retry_after_retirement(self.image_rejection_epoch, epoch))
+    }
+
     pub(super) fn image_stats(&self) -> ImageResidency {
         super::images::lease_stats(&self.images)
     }
@@ -659,12 +708,8 @@ impl UploadedMesh {
 
 #[derive(Debug)]
 pub struct UploadedDetailSprites {
-    pub fast_eligible: Vec<bool>,
-    pub leaf_indices: Vec<u16>,
     pub vertices: wgpu::Buffer,
-    pub all_vertices: Vec<u8>,
     pub material_index: usize,
-    pub underwater_leaves: Vec<bool>,
 }
 
 #[derive(Debug)]
@@ -721,15 +766,8 @@ pub fn upload_detail_sprites(
     queue.write_buffer(&vertices, 0, &vertex_bytes);
 
     Some(UploadedDetailSprites {
-        fast_eligible: sprites.iter().map(|sprite| sprite.fast_eligible).collect(),
-        leaf_indices: sprites.iter().map(|sprite| sprite.leaf_index).collect(),
         vertices,
-        all_vertices: vertex_bytes,
         material_index: first.material_index,
-        underwater_leaves: sprites
-            .iter()
-            .map(|sprite| sprite.underwater_leaf)
-            .collect(),
     })
 }
 

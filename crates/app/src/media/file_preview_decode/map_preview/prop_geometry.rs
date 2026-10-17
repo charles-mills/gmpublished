@@ -116,6 +116,7 @@ pub(super) struct RawMesh {
 pub(super) struct RawPropGeometry {
     pub source: Arc<ModelData>,
     pub meshes: Vec<RawMesh>,
+    counts: GeometryCounts,
 }
 
 impl RawPropGeometry {
@@ -123,12 +124,8 @@ impl RawPropGeometry {
         self.meshes.iter().map(|mesh| mesh.material_slot).collect()
     }
 
-    pub fn counts(&self) -> Result<GeometryCounts, GeometryError> {
-        self.meshes
-            .iter()
-            .try_fold(GeometryCounts::default(), |counts, mesh| {
-                counts.checked_add(mesh.counts)
-            })
+    pub fn counts(&self) -> GeometryCounts {
+        self.counts
     }
 }
 
@@ -218,11 +215,16 @@ impl RawGeometryPlanner {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let counts = meshes
+            .iter()
+            .try_fold(GeometryCounts::default(), |counts, mesh| {
+                counts.checked_add(mesh.counts)
+            })?;
         let geometry = Arc::new(RawPropGeometry {
             source: Arc::clone(model),
             meshes,
+            counts,
         });
-        geometry.counts()?;
         Ok(geometry)
     }
 

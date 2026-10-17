@@ -48,7 +48,7 @@ mod world_lights;
 pub use world_lights::{WorldLight, WorldLightError, WorldLightKind};
 
 mod zip;
-pub use zip::{ZipEntry, ZipError, ZipReader};
+pub use zip::{ZipArchive, ZipEntry, ZipError, ZipReader};
 
 const BSP_MAGIC: &[u8; 4] = b"VBSP";
 const LUMP_COUNT: usize = 64;

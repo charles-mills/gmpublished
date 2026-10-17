@@ -8,6 +8,7 @@ fn fixture() -> (FaceOrdering, MapLeafLocator) {
         displacements: Vec::new(),
         node_faces: std::iter::once(0..2).collect(),
         node_bounds: vec![],
+        child_bounds_contained: vec![],
         leaf_bounds: vec![],
         leaf_solid: vec![],
         leaf_underwater: vec![],
@@ -1118,4 +1119,158 @@ fn optical_leaf_medium_uses_compiled_water_data_instead_of_contents() {
     assert_eq!(visibility.leaf_is_underwater(1), Some(true));
     assert_eq!(visibility.leaf_is_underwater(2), Some(true));
     assert_eq!(visibility.leaf_is_underwater(3), None);
+}
+
+#[test]
+fn inherited_plane_masks_preserve_face_order_and_empty_leaves() {
+    use std::cell::RefCell;
+    let (mut ordering, locator) = fixture();
+    let bounds = super::super::super::MapBounds {
+        min: Vec3::splat(-100.0),
+        max: Vec3::splat(100.0),
+    };
+    ordering.node_bounds = vec![bounds];
+    ordering.leaf_bounds = vec![bounds; 2];
+    ordering.validate_bounds_hierarchy(&locator);
+    assert_eq!(ordering.child_bounds_contained, [[true, true]]);
+    for x in [-10.0, 10.0] {
+        for include_faces in [false, true] {
+            let observed = RefCell::new(Vec::new());
+            let masked = ordering.world_surface_groups_with_culling(
+                &locator,
+                Vec3::new(x, 0.0, 10.0),
+                |_| include_faces,
+                |_, mask| {
+                    observed.borrow_mut().push(mask);
+                    MapBoundsCulling::Visible(MapBoundsCullMask::NONE)
+                },
+                |_| true,
+            );
+            let legacy = ordering.world_surface_groups(
+                &locator,
+                Vec3::new(x, 0.0, 10.0),
+                |_| include_faces,
+                |_| true,
+                |_| true,
+            );
+            assert_eq!(masked, legacy);
+            assert_eq!(
+                observed.into_inner(),
+                [
+                    MapBoundsCullMask::ALL,
+                    MapBoundsCullMask::NONE,
+                    MapBoundsCullMask::NONE
+                ]
+            );
+            assert_eq!(masked.len(), 2);
+            if !include_faces {
+                assert!(masked.iter().all(|leaf| leaf.faces.is_empty()));
+            }
+        }
+    }
+}
+
+#[test]
+fn uncontained_or_invalid_children_restore_all_plane_tests() {
+    use std::cell::RefCell;
+    let (mut ordering, locator) = fixture();
+    let bounds = |min, max| super::super::super::MapBounds {
+        min: Vec3::splat(min),
+        max: Vec3::splat(max),
+    };
+    ordering.node_bounds = vec![bounds(0.0, 10.0)];
+    ordering.leaf_bounds = vec![bounds(1.0, 2.0), bounds(-10.0, -1.0)];
+    ordering.validate_bounds_hierarchy(&locator);
+    assert_eq!(ordering.child_bounds_contained, [[true, false]]);
+    let seen = RefCell::new(Vec::new());
+    let masked = ordering.world_surface_groups_with_culling(
+        &locator,
+        Vec3::new(10.0, 0.0, 10.0),
+        |_| true,
+        |bounds, mask| {
+            seen.borrow_mut().push(mask);
+            if mask != MapBoundsCullMask::NONE && bounds.max[0] < 0.0 {
+                MapBoundsCulling::Outside
+            } else {
+                MapBoundsCulling::Visible(MapBoundsCullMask::NONE)
+            }
+        },
+        |_| true,
+    );
+    let legacy = ordering.world_surface_groups(
+        &locator,
+        Vec3::new(10.0, 0.0, 10.0),
+        |_| true,
+        |bounds| bounds.max[0] >= 0.0,
+        |_| true,
+    );
+    assert_eq!(masked, legacy);
+    assert_eq!(
+        seen.into_inner(),
+        [
+            MapBoundsCullMask::ALL,
+            MapBoundsCullMask::NONE,
+            MapBoundsCullMask::ALL
+        ]
+    );
+    ordering.leaf_bounds[0].min[0] = f32::NAN;
+    ordering.validate_bounds_hierarchy(&locator);
+    assert_eq!(ordering.child_bounds_contained, [[false, false]]);
+    ordering.leaf_bounds[0] = bounds(3.0, 2.0);
+    ordering.validate_bounds_hierarchy(&locator);
+    assert_eq!(ordering.child_bounds_contained, [[false, false]]);
+}
+
+#[test]
+fn uncontained_child_nodes_are_retested_before_their_faces_or_leaves() {
+    use std::cell::RefCell;
+    let (mut ordering, mut locator) = fixture();
+    let bounds = |min, max| super::super::super::MapBounds {
+        min: Vec3::splat(min),
+        max: Vec3::splat(max),
+    };
+    locator.nodes[0].children = [1, -2];
+    locator.nodes.push(MapNode {
+        plane_index: 0,
+        children: [-1, -2],
+    });
+    ordering.node_faces.push(0..0);
+    ordering.node_bounds = vec![bounds(0.0, 10.0), bounds(-10.0, -1.0)];
+    ordering.leaf_bounds = vec![bounds(-9.0, -2.0), bounds(1.0, 2.0)];
+    ordering.validate_bounds_hierarchy(&locator);
+    assert_eq!(
+        ordering.child_bounds_contained,
+        [[false, true], [true, false]]
+    );
+    let masks = RefCell::new(Vec::new());
+    let masked = ordering.world_surface_groups_with_culling(
+        &locator,
+        Vec3::new(10.0, 0.0, 10.0),
+        |_| true,
+        |bounds, mask| {
+            masks.borrow_mut().push(mask);
+            if mask != MapBoundsCullMask::NONE && bounds.max[0] < 0.0 {
+                MapBoundsCulling::Outside
+            } else {
+                MapBoundsCulling::Visible(MapBoundsCullMask::NONE)
+            }
+        },
+        |_| true,
+    );
+    let legacy = ordering.world_surface_groups(
+        &locator,
+        Vec3::new(10.0, 0.0, 10.0),
+        |_| true,
+        |bounds| bounds.max[0] >= 0.0,
+        |_| true,
+    );
+    assert_eq!(masked, legacy);
+    assert_eq!(
+        masks.into_inner(),
+        [
+            MapBoundsCullMask::ALL,
+            MapBoundsCullMask::ALL,
+            MapBoundsCullMask::NONE
+        ]
+    );
 }

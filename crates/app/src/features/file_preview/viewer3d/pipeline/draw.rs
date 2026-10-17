@@ -66,10 +66,19 @@ pub fn draw_scene_plan_opaque<'a>(
     plan: &DrawPlan,
     view: DrawView<'a>,
 ) {
+    if plan.opaque_draw_count() == 0 {
+        return;
+    }
     pass.set_bind_group(0, view.uniforms, &[]);
     for item in &plan.opaque {
         bind_opaque_mesh_pipeline(pass, resources, upload, *item);
-        draw_model_item(pass, upload, *item, view.visibility);
+        if let Some(ranges) = plan.opaque_ranges.get(&item.mesh_index) {
+            for range in &ranges.indices {
+                draw_model_range(pass, upload, *item, range.clone());
+            }
+        } else {
+            draw_model_item(pass, upload, *item, view.visibility);
+        }
     }
 }
 

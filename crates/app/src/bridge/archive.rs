@@ -63,6 +63,16 @@ pub enum PreviewArchiveSourceError {
 }
 
 impl PreviewArchiveSource {
+    pub(crate) fn index_cost_with_limits(
+        &self,
+        limits: vformats::ArchiveIndexLimits,
+    ) -> Result<Option<vformats::ArchiveIndexCost>, GmaError> {
+        match self {
+            Self::Gma(archive) => archive.index_cost_with_limits(limits).map(Some),
+            Self::Folder(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn from_gma(archive: Arc<PreviewArchive>) -> Arc<Self> {
         Arc::new(Self::Gma(archive))
     }

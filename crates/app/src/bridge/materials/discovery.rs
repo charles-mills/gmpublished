@@ -1,213 +1,256 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use super::{
+    ContentPath, LooseSourceDir, sibling_gma::SiblingGmaPath, source_discovery::Discovery,
+};
+use gmpublished_backend::source_discovery::{SourceCategory, SourceDiscoveryError};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-use super::sibling_gma::SiblingGmaPath;
-use super::{ContentPath, LooseSourceDir};
-
-pub(super) fn discover_loose_source_dirs(gmod_dir: &Path) -> Vec<LooseSourceDir> {
+pub(super) fn discover_loose_source_dirs_checked(
+    gmod_dir: &Path,
+    explicit: &[PathBuf],
+    discovery: &mut Discovery<'_>,
+) -> Result<Vec<LooseSourceDir>, SourceDiscoveryError> {
+    discovery.check()?;
     let mut dirs = Vec::new();
     let garrysmod = gmod_dir.join("garrysmod");
-    push_loose_source_dir(&mut dirs, garrysmod.clone());
-
-    let addons = garrysmod.join("addons");
-    for addon in sorted_children(&addons) {
-        if addon.is_dir() {
-            push_loose_source_dir(&mut dirs, addon.path);
+    push_loose_source_dir(&mut dirs, garrysmod.clone(), discovery)?;
+    for addon in discovery.children(&garrysmod.join("addons"))? {
+        if discovery.child_dir(&addon)? {
+            push_loose_source_dir(&mut dirs, addon.path, discovery)?;
         }
     }
-
-    push_loose_source_dir(&mut dirs, garrysmod.join("download"));
-    dirs
+    push_loose_source_dir(&mut dirs, garrysmod.join("download"), discovery)?;
+    for path in explicit {
+        push_loose_source_dir(&mut dirs, path.clone(), discovery)?;
+    }
+    Ok(dirs)
 }
-
-fn push_loose_source_dir(dirs: &mut Vec<LooseSourceDir>, path: PathBuf) {
-    if path.is_dir() {
+fn push_loose_source_dir(
+    dirs: &mut Vec<LooseSourceDir>,
+    path: PathBuf,
+    discovery: &mut Discovery<'_>,
+) -> Result<(), SourceDiscoveryError> {
+    if discovery.is_dir(&path)? {
+        discovery.reserve(&path, dirs)?;
         dirs.push(LooseSourceDir::new(path));
     }
+    Ok(())
 }
-
-const MOUNTED_GAME_DIR_CAP: usize = 32;
-
-/// Find Steam games with `gameinfo.txt` and explicit `cfg/mount.cfg` paths.
-/// Only mount.cfg paths are also searched for loose content.
-pub(super) fn discover_mounted_game_dirs(gmod_dir: &Path) -> Vec<PathBuf> {
+pub(super) fn discover_mounted_game_dirs_checked(
+    gmod_dir: &Path,
+    explicit: &[PathBuf],
+    discovery: &mut Discovery<'_>,
+) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+    discovery.check()?;
     let mut dirs = Vec::new();
     let own_common = gmod_dir.parent();
     if let Some(common) = own_common {
-        push_mountable_game_dirs(common, gmod_dir, &mut dirs);
+        push_mountable_game_dirs(common, gmod_dir, &mut dirs, discovery)?;
     }
-    // Consult Steam libraries only when gmod_dir is itself a Steam install.
-    // Keep arbitrary directories and test fixtures self-contained.
     if own_common.is_some_and(is_steam_common_dir) {
-        let own_common_canonical = own_common.and_then(|dir| fs::canonicalize(dir).ok());
-        for common in gmpublished_backend::steam_library_common_dirs() {
-            if fs::canonicalize(&common).ok() == own_common_canonical {
+        let own_canonical = own_common
+            .map(|dir| discovery.budget.canonical_path(discovery.category, dir))
+            .transpose()?
+            .flatten();
+        for common in discovery
+            .budget
+            .steam_library_common_dirs(&|| discovery.cancellation.is_cancelled())?
+        {
+            let canonical = discovery
+                .budget
+                .canonical_path(discovery.category, &common)?;
+            if own_canonical
+                .as_ref()
+                .zip(canonical.as_ref())
+                .is_some_and(|(own, other)| own == other)
+            {
                 continue;
             }
-            push_mountable_game_dirs(&common, gmod_dir, &mut dirs);
+            push_mountable_game_dirs(&common, gmod_dir, &mut dirs, discovery)?;
         }
     }
-
-    for path in mount_cfg_dirs(gmod_dir) {
-        if dirs.len() >= MOUNTED_GAME_DIR_CAP {
-            break;
-        }
-        if path.is_dir() && !dirs.contains(&path) {
-            dirs.push(path);
+    for path in explicit {
+        if discovery.is_dir(path)? && !dirs.contains(path) {
+            discovery.reserve(path, &mut dirs)?;
+            dirs.push(path.clone());
         }
     }
-    dirs
+    Ok(dirs)
 }
-
-fn push_mountable_game_dirs(common: &Path, gmod_dir: &Path, dirs: &mut Vec<PathBuf>) {
-    'installs: for install in sorted_children(common) {
-        if !install.is_dir() || install.path.file_name() == gmod_dir.file_name() {
+fn push_mountable_game_dirs(
+    common: &Path,
+    gmod_dir: &Path,
+    dirs: &mut Vec<PathBuf>,
+    discovery: &mut Discovery<'_>,
+) -> Result<(), SourceDiscoveryError> {
+    for install in discovery.children(common)? {
+        if !discovery.child_dir(&install)? || install.path.file_name() == gmod_dir.file_name() {
             continue;
         }
-        for child in sorted_children(&install.path) {
-            if dirs.len() >= MOUNTED_GAME_DIR_CAP {
-                break 'installs;
-            }
-            if child.is_dir()
-                && child.path.join("gameinfo.txt").is_file()
+        for child in discovery.children(&install.path)? {
+            if discovery.child_dir(&child)?
+                && discovery
+                    .budget
+                    .metadata(discovery.category, &child.path.join("gameinfo.txt"))?
+                    .is_some_and(|metadata| metadata.is_file())
                 && !dirs.contains(&child.path)
             {
+                discovery.reserve(&child.path, dirs)?;
                 dirs.push(child.path);
             }
         }
     }
+    Ok(())
 }
-
 pub(super) fn is_steam_common_dir(dir: &Path) -> bool {
-    fn is_named(dir: &Path, name: &str) -> bool {
+    fn named(dir: &Path, name: &str) -> bool {
         dir.file_name()
-            .and_then(|file_name| file_name.to_str())
-            .is_some_and(|file_name| file_name.eq_ignore_ascii_case(name))
+            .and_then(|name| name.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(name))
     }
-    is_named(dir, "common")
+    named(dir, "common")
         && dir
             .parent()
-            .is_some_and(|parent| is_named(parent, "steamapps"))
+            .is_some_and(|parent| named(parent, "steamapps"))
 }
-
-/// Only explicit mount.cfg targets need loose-content lookup. Sibling Steam
-/// games are indexed through their VPKs.
-pub(super) fn existing_mount_cfg_dirs(gmod_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = mount_cfg_dirs(gmod_dir);
-    dirs.retain(|dir| dir.is_dir());
-    dirs
-}
-
-fn mount_cfg_dirs(gmod_dir: &Path) -> Vec<PathBuf> {
-    let Ok(text) = fs::read_to_string(gmod_dir.join("garrysmod/cfg/mount.cfg")) else {
-        return Vec::new();
+pub(super) fn mount_cfg_dirs_checked(
+    gmod_dir: &Path,
+    discovery: &mut Discovery<'_>,
+) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+    let path = gmod_dir.join("garrysmod/cfg/mount.cfg");
+    let Some(bytes) =
+        discovery
+            .budget
+            .configuration(SourceCategory::MountedGames, &path, &|| {
+                discovery.cancellation.is_cancelled()
+            })?
+    else {
+        return Ok(Vec::new());
     };
-    let Ok(document) = vformats::keyvalues::parse(&text, &vformats::Limits::default()) else {
-        return Vec::new();
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(Vec::new());
     };
-    document
+    let Ok(document) = vformats::keyvalues::parse(text, &vformats::Limits::default()) else {
+        return Ok(Vec::new());
+    };
+    let mut dirs = Vec::new();
+    for value in document
         .blocks("mountcfg")
         .flat_map(|block| &block.pairs)
         .filter_map(|pair| pair.value.as_str())
-        .map(PathBuf::from)
-        .collect()
+    {
+        discovery.check()?;
+        let path = Path::new(value);
+        discovery.reserve(path, &mut dirs)?;
+        dirs.push(path.to_owned());
+    }
+    Ok(dirs)
 }
-
+#[cfg(test)]
 pub(super) fn discover_sibling_gma_paths(gmod_dir: &Path) -> Vec<SiblingGmaPath> {
+    let limits = super::SourceDiscoveryLimits::default();
+    let mut budget = gmpublished_backend::source_discovery::SourceDiscoveryBudget::new(
+        limits,
+        limits.metadata_bytes,
+    );
+    discover_sibling_gma_paths_checked(
+        gmod_dir,
+        &mut Discovery {
+            budget: &mut budget,
+            cancellation: &crate::preparation::PreparationCancellation::default(),
+            category: SourceCategory::SiblingGma,
+        },
+    )
+    .expect("fixture discovery")
+}
+pub(super) fn discover_sibling_gma_paths_checked(
+    gmod_dir: &Path,
+    discovery: &mut Discovery<'_>,
+) -> Result<Vec<SiblingGmaPath>, SourceDiscoveryError> {
+    discovery.check()?;
     let mut paths = Vec::new();
-    if let Ok(workshop_dir) = fs::canonicalize(gmod_dir.join("../../workshop/content/4000")) {
-        for workshop_item in sorted_children(&workshop_dir) {
-            if workshop_item.is_dir() {
-                let children = sorted_children(&workshop_item.path);
-                let plain_gmas = children
-                    .iter()
-                    .filter(|child| child.is_file() && is_plain_gma_path(&child.path))
-                    .map(|child| child.path.clone())
-                    .collect::<Vec<_>>();
-                if plain_gmas.is_empty() {
-                    paths.extend(
-                        children
-                            .into_iter()
-                            .filter(|child| child.is_file() && is_legacy_bin_path(&child.path))
-                            .map(|child| SiblingGmaPath::legacy_bin(child.path)),
-                    );
+    let workshop = gmod_dir.join("../../workshop/content/4000");
+    let workshop = match fs::canonicalize(&workshop) {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(
+                gmpublished_backend::source_discovery::SourceDiscoveryFailure {
+                    category: SourceCategory::SiblingGma,
+                    path: workshop,
+                    kind: super::source_discovery::DiscoveryFailureKind::Io {
+                        kind: format!("{:?}", error.kind()),
+                        message: error.to_string(),
+                    },
+                }
+                .into(),
+            );
+        }
+    };
+    if let Some(workshop) = workshop {
+        for item in discovery.children(&workshop)? {
+            if !discovery.child_dir(&item)? {
+                continue;
+            }
+            let children = discovery.children(&item.path)?;
+            let mut has_plain = false;
+            for child in &children {
+                if is_plain_gma_path(&child.path) && discovery.child_file(child)? {
+                    has_plain = true;
+                }
+            }
+            for child in children {
+                let selected = if has_plain {
+                    is_plain_gma_path(&child.path)
                 } else {
-                    paths.extend(plain_gmas.into_iter().map(SiblingGmaPath::plain));
+                    is_legacy_bin_path(&child.path)
+                };
+                if selected && discovery.child_file(&child)? {
+                    discovery.reserve(&child.path, &mut paths)?;
+                    paths.push(if has_plain {
+                        SiblingGmaPath::plain(child.path)
+                    } else {
+                        SiblingGmaPath::legacy_bin(child.path)
+                    });
                 }
             }
         }
     }
-
-    for child in sorted_children(&gmod_dir.join("garrysmod/addons")) {
-        if child.is_file() && is_plain_gma_path(&child.path) {
+    for child in discovery.children(&gmod_dir.join("garrysmod/addons"))? {
+        if discovery.child_file(&child)? && is_plain_gma_path(&child.path) {
+            discovery.reserve(&child.path, &mut paths)?;
             paths.push(SiblingGmaPath::plain(child.path));
         }
     }
-
-    collect_download_gma_paths(&gmod_dir.join("garrysmod/download"), 0, &mut paths);
-
-    paths
+    collect_download_gma_paths(
+        &gmod_dir.join("garrysmod/download"),
+        0,
+        &mut paths,
+        discovery,
+    )?;
+    Ok(paths)
 }
-
-fn collect_download_gma_paths(dir: &Path, depth: usize, paths: &mut Vec<SiblingGmaPath>) {
+fn collect_download_gma_paths(
+    dir: &Path,
+    depth: usize,
+    paths: &mut Vec<SiblingGmaPath>,
+    discovery: &mut Discovery<'_>,
+) -> Result<(), SourceDiscoveryError> {
+    discovery.check()?;
     if depth > 3 {
-        return;
+        return Ok(());
     }
-    for child in sorted_children(dir) {
-        if child.is_file() && is_plain_gma_path(&child.path) {
+    for child in discovery.children(dir)? {
+        if discovery.child_file(&child)? && is_plain_gma_path(&child.path) {
+            discovery.reserve(&child.path, paths)?;
             paths.push(SiblingGmaPath::plain(child.path));
-        } else if child.is_dir() {
-            collect_download_gma_paths(&child.path, depth + 1, paths);
+        } else if discovery.child_dir(&child)? {
+            collect_download_gma_paths(&child.path, depth + 1, paths, discovery)?;
         }
     }
-}
-
-struct SortedChild {
-    path: PathBuf,
-    file_type: Option<fs::FileType>,
-}
-
-impl SortedChild {
-    fn is_file(&self) -> bool {
-        self.file_type.as_ref().map_or_else(
-            || self.path.is_file(),
-            |file_type| {
-                if file_type.is_symlink() {
-                    self.path.is_file()
-                } else {
-                    file_type.is_file()
-                }
-            },
-        )
-    }
-
-    fn is_dir(&self) -> bool {
-        self.file_type.as_ref().map_or_else(
-            || self.path.is_dir(),
-            |file_type| {
-                if file_type.is_symlink() {
-                    self.path.is_dir()
-                } else {
-                    file_type.is_dir()
-                }
-            },
-        )
-    }
-}
-
-fn sorted_children(dir: &Path) -> Vec<SortedChild> {
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut children = read_dir
-        .filter_map(Result::ok)
-        .map(|entry| SortedChild {
-            file_type: entry.file_type().ok(),
-            path: entry.path(),
-        })
-        .collect::<Vec<_>>();
-    children.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    children
+    Ok(())
 }
 
 fn is_plain_gma_path(path: &Path) -> bool {

@@ -144,11 +144,29 @@ pub struct PropGeometryReport {
     pub rejected: Vec<GeometryDiagnostic>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct SharedModelGeometry {
+    pub model_count: usize,
+    pub counts: GeometryCounts,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct PropGeometrySummary {
+    pub shared_models: Result<SharedModelGeometry, GeometryError>,
     pub world: PropGeometryReport,
     pub skybox: PropGeometryReport,
     pub doors: PropGeometryReport,
+}
+
+impl Default for PropGeometrySummary {
+    fn default() -> Self {
+        Self {
+            shared_models: Ok(SharedModelGeometry::default()),
+            world: PropGeometryReport::default(),
+            skybox: PropGeometryReport::default(),
+            doors: PropGeometryReport::default(),
+        }
+    }
 }
 
 impl PropGeometrySummary {

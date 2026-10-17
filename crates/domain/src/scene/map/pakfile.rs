@@ -1,11 +1,11 @@
-use super::{BspError, Limits, ZipReader, fmt, normalize_source_path};
+use super::{BspError, Limits, ZipArchive, fmt, normalize_source_path};
 use std::sync::Arc;
 
 pub const MAX_PAKFILE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapPakFile {
-    bytes: Arc<[u8]>,
+    archive: ZipArchive,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,18 +18,40 @@ pub struct MapPakFileEntry {
 impl MapPakFile {
     pub fn from_pak_bytes(bytes: impl Into<Arc<[u8]>>) -> Self {
         Self {
-            bytes: bytes.into(),
+            archive: ZipArchive::new(bytes),
         }
     }
 
+    pub fn index_cost(&self) -> Result<vformats::ArchiveIndexCost, vformats::bsp::ZipError> {
+        self.archive.index_cost()
+    }
+
+    pub fn indexed_entries_with_limits(
+        &self,
+        limits: vformats::ArchiveIndexLimits,
+    ) -> Result<Vec<MapPakFileEntry>, vformats::bsp::ZipError> {
+        let reader = self.archive.reader_with_index_limits(limits)?;
+        Ok(reader
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let path = normalize_pakfile_path(&entry.path)?;
+                is_pakfile_retained_entry(&path).then_some(MapPakFileEntry {
+                    index,
+                    path,
+                    size: entry.uncompressed_size,
+                })
+            })
+            .collect())
+    }
+
     pub fn read_error(&self) -> Option<String> {
-        ZipReader::parse(&self.bytes)
-            .err()
-            .map(|error| error.to_string())
+        self.archive.reader().err().map(|error| error.to_string())
     }
 
     pub fn indexed_entries(&self) -> Result<Vec<MapPakFileEntry>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
+        let reader = self.archive.reader().map_err(pakfile_error)?;
         let mut entries = Vec::new();
         for (index, entry) in reader.entries().iter().enumerate() {
             let Some(path) = normalize_pakfile_path(&entry.path) else {
@@ -53,7 +75,7 @@ impl MapPakFile {
         index: usize,
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
+        let reader = self.archive.reader().map_err(pakfile_error)?;
         reader
             .entries()
             .get(index)
@@ -62,7 +84,7 @@ impl MapPakFile {
     }
 
     pub fn entry_decoder_working_bytes(&self, index: usize) -> Result<Option<u64>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
+        let reader = self.archive.reader().map_err(pakfile_error)?;
         reader
             .entries()
             .get(index)
@@ -76,7 +98,7 @@ impl MapPakFile {
         max_bytes: usize,
         decoder_limit: u64,
     ) -> Result<Option<Vec<u8>>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
+        let reader = self.archive.reader().map_err(pakfile_error)?;
         reader
             .entries()
             .get(index)
@@ -102,7 +124,7 @@ impl MapPakFile {
         max_bytes: u64,
         decoder_limit: u64,
     ) -> Result<Option<Vec<u8>>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
+        let reader = self.archive.reader().map_err(pakfile_error)?;
         let Some(entry) = reader.entries().get(index) else {
             return Ok(None);
         };
@@ -120,7 +142,7 @@ impl MapPakFile {
     }
 
     pub fn entry_bytes_by_index(&self, index: usize) -> Result<Option<Vec<u8>>, BspError> {
-        let reader = ZipReader::parse(&self.bytes).map_err(pakfile_error)?;
+        let reader = self.archive.reader().map_err(pakfile_error)?;
         let Some(entry) = reader.entries().get(index) else {
             return Ok(None);
         };
@@ -183,11 +205,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cloned_pakfiles_reuse_the_nonempty_directory() {
+        let name = b"materials/a.vmt";
+        let mut bytes = vec![0; 46];
+        bytes[..4].copy_from_slice(&0x02014b50_u32.to_le_bytes());
+        bytes[28..30].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(name);
+        let directory_len = bytes.len();
+        let mut end = [0; 22];
+        end[..4].copy_from_slice(&0x06054b50_u32.to_le_bytes());
+        end[8..10].copy_from_slice(&1_u16.to_le_bytes());
+        end[10..12].copy_from_slice(&1_u16.to_le_bytes());
+        end[12..16].copy_from_slice(&(directory_len as u32).to_le_bytes());
+        bytes.extend_from_slice(&end);
+        let pak = MapPakFile::from_pak_bytes(bytes);
+        let clone = pak.clone();
+        let first = pak.archive.reader().unwrap();
+        let second = clone.archive.reader().unwrap();
+        assert_eq!(first.entries().len(), 1);
+        assert_eq!(first.entries().as_ptr(), second.entries().as_ptr());
+        assert_eq!(pak.indexed_entries().unwrap()[0].path, "materials/a.vmt");
+        assert_eq!(
+            pak.indexed_entries().unwrap(),
+            clone.indexed_entries().unwrap()
+        );
+        assert!(!format!("{pak:?}").contains("materials/a.vmt"));
+    }
+
+    #[test]
     fn pakfile_handles_share_the_decoded_byte_allocation() {
         let bytes: Arc<[u8]> = Arc::from([1, 2, 3]);
         let pakfile = MapPakFile::from_pak_bytes(bytes.clone());
         let other = pakfile.clone();
-        assert!(Arc::ptr_eq(&bytes, &pakfile.bytes));
-        assert!(Arc::ptr_eq(&pakfile.bytes, &other.bytes));
+        assert_eq!(Arc::strong_count(&bytes), 2);
+        assert_eq!(pakfile, other);
+        assert!(pakfile.read_error().is_some());
+        assert_eq!(pakfile, other);
+        assert_eq!(Arc::strong_count(&bytes), 2);
     }
 }

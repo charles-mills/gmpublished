@@ -13,7 +13,7 @@ mod geometry_diagnostics;
 mod model_lighting;
 pub use geometry_diagnostics::{
     GeometryComponent, GeometryCounts, GeometryDiagnostic, GeometryError, PropGeometryReport,
-    PropGeometrySummary,
+    PropGeometrySummary, SharedModelGeometry,
 };
 pub use gmpublished_domain::scene::map::{
     MapDoorClass, MapDoorMotion, MapMeshIndexRange, MapMeshVisibility, MapPropVisibility, MapTrace,
@@ -26,6 +26,8 @@ pub use model_lighting::{
 };
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreviewLoadError {
+    #[error(transparent)]
+    Cancelled(#[from] crate::preparation::Cancelled),
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
     #[error(transparent)]
@@ -228,6 +230,7 @@ pub const PHY_DEBUG_MATERIAL_NAME: &str = "__debug/phy_collision";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
+    pub(crate) cancellation: crate::preparation::PreparationCancellation,
     pub(crate) request_id: Generation,
     pub(crate) archive: Arc<PreviewArchiveSource>,
     pub(crate) entry_path: String,
@@ -235,6 +238,23 @@ pub struct PreviewRequest {
     pub(crate) size_bytes: u64,
     pub(crate) crc32: u32,
     pub(crate) bypass_size_limits: bool,
+    pub(crate) map_texture_quality: MapTextureQuality,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MapTextureQuality {
+    #[default]
+    Native,
+    Reduced,
+}
+
+impl MapTextureQuality {
+    pub(crate) const fn max_dimension(self) -> Option<u32> {
+        match self {
+            Self::Native => None,
+            Self::Reduced => Some(512),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -304,6 +324,17 @@ pub struct ParticlePreview {
     pub(crate) systems: Vec<ParticleSystemInfo>,
     pub(crate) materials: Vec<ParticleMaterialSlot>,
     pub(crate) sheet_stats: crate::bridge::materials::sprite_sheet::SpriteSheetStats,
+    pub(crate) source_discovery: crate::bridge::materials::SourceDiscoveryStats,
+}
+
+impl ParticlePreview {
+    pub(crate) fn has_unavailable_content(&self) -> bool {
+        !self.source_discovery.failures.is_empty()
+            || self
+                .materials
+                .iter()
+                .any(ParticleMaterialSlot::is_unavailable)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -316,14 +347,24 @@ pub struct ParticleSystemInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticleMaterialSlot {
     pub(crate) name: String,
+    pub(crate) resolution: crate::bridge::materials::MaterialResolutionOutcome,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
     pub(crate) additive: bool,
     pub(crate) sheet: Option<Arc<vformats::vtf::SpriteSheet>>,
     pub(crate) sheet_error: Option<crate::bridge::materials::sprite_sheet::SpriteSheetResolveError>,
 }
 
-/// PCF material references are inconsistent ("effects\\spark.vmt",
-/// "particle/foo"); loader keys and renderer lookups share this form.
+impl ParticleMaterialSlot {
+    pub(crate) fn is_unavailable(&self) -> bool {
+        self.resolution != crate::bridge::materials::MaterialResolutionOutcome::Loaded
+            || self
+                .texture
+                .as_ref()
+                .is_some_and(|texture| texture.load_outcome().is_unavailable())
+            || self.sheet_error.is_some()
+    }
+}
+
 pub fn normalize_particle_material(name: &str) -> String {
     gmpublished_domain::particles::normalize_material_name(name)
 }
@@ -372,10 +413,14 @@ pub enum ShadingMode {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct MapTexturePreparation {
+    pub source_discovery: crate::bridge::materials::SourceDiscoveryStats,
+    pub archive_indexes: crate::bridge::materials::ArchiveIndexStats,
+    pub max_dimension: Option<u32>,
     pub admitted_source_bytes: u64,
     pub admitted_sources: usize,
     pub admitted_resident_bytes: usize,
     pub admitted_resident_images: usize,
+    pub reduced_resident_images: usize,
     pub source_rejections: usize,
     pub resident_rejections: usize,
     pub header_only_surface_materials: usize,
@@ -717,6 +762,16 @@ pub struct MaterialSlot {
     pub(crate) alpha_policy: crate::bridge::materials::TextureAlphaPolicy,
 }
 
+impl MaterialSlot {
+    pub(crate) fn has_resolved_base(&self) -> bool {
+        self.resolution == crate::bridge::materials::MaterialResolutionOutcome::Loaded
+            && self
+                .texture
+                .as_ref()
+                .is_some_and(|texture| !texture.load_outcome().is_unavailable())
+    }
+}
+
 pub type LightmapSlot = gmpublished_domain::scene::map::LightmapAtlas;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -828,6 +883,7 @@ pub struct MapStats {
     pub(crate) placed_prop_count: u32,
     pub(crate) skipped_prop_count: u32,
     pub(crate) detail_sprite_count: u32,
+    pub(crate) invalid_detail_leaves: u32,
     pub(crate) overlay_count: u32,
     pub(crate) skybox_face_count: u32,
     pub(crate) skybox_prop_count: u32,

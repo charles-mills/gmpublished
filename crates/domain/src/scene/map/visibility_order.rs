@@ -1,4 +1,5 @@
 use super::super::{MapBsp, MapLeafLocator};
+use super::{MapBoundsCullMask, MapBoundsCulling};
 use crate::math::Vec3;
 use std::ops::Range;
 
@@ -47,6 +48,7 @@ pub(super) struct FaceOrdering {
     displacements: Vec<Option<DisplacementGridSize>>,
     node_faces: Vec<Range<u32>>,
     node_bounds: Vec<super::super::MapBounds>,
+    child_bounds_contained: Vec<[bool; 2]>,
     leaf_bounds: Vec<super::super::MapBounds>,
     leaf_solid: Vec<bool>,
     leaf_underwater: Vec<bool>,
@@ -137,6 +139,7 @@ impl FaceOrdering {
                 .collect(),
             root,
             node_bounds,
+            child_bounds_contained: Vec::new(),
             leaf_bounds: bsp
                 .leaves
                 .iter()
@@ -175,8 +178,41 @@ impl FaceOrdering {
                 })
                 .collect(),
         };
+        ordering.validate_bounds_hierarchy(locator);
         ordering.classify_material_groups(bsp, locator);
         ordering
+    }
+
+    fn validate_bounds_hierarchy(&mut self, locator: &MapLeafLocator) {
+        let contains = |parent: super::super::MapBounds, child: super::super::MapBounds| {
+            parent.min.is_finite()
+                && parent.max.is_finite()
+                && child.min.is_finite()
+                && child.max.is_finite()
+                && (0..3).all(|axis| {
+                    parent.min[axis] <= child.min[axis]
+                        && child.min[axis] <= child.max[axis]
+                        && child.max[axis] <= parent.max[axis]
+                })
+        };
+        self.child_bounds_contained = locator
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                node.children.map(|child| {
+                    let Some(&parent) = self.node_bounds.get(index) else {
+                        return false;
+                    };
+                    let bounds = if child < 0 {
+                        self.leaf_bounds.get((-i64::from(child) - 1) as usize)
+                    } else {
+                        self.node_bounds.get(child as usize)
+                    };
+                    bounds.is_some_and(|&child| contains(parent, child))
+                })
+            })
+            .collect();
     }
 
     fn classify_material_groups(&mut self, bsp: &MapBsp, locator: &MapLeafLocator) {
@@ -394,12 +430,35 @@ impl FaceOrdering {
         bounds_visible: impl Fn(super::super::MapBounds) -> bool,
         cluster_visible: impl Fn(i16) -> bool,
     ) -> Vec<super::MapWorldSurfaceGroup> {
-        let mut groups = Vec::<super::MapWorldSurfaceGroup>::new();
-        self.visit_world_surfaces(
+        self.world_surface_groups_with_culling(
             locator,
             eye,
             visible,
-            bounds_visible,
+            |bounds, _| {
+                if bounds_visible(bounds) {
+                    MapBoundsCulling::Visible(MapBoundsCullMask::ALL)
+                } else {
+                    MapBoundsCulling::Outside
+                }
+            },
+            cluster_visible,
+        )
+    }
+
+    pub(super) fn world_surface_groups_with_culling(
+        &self,
+        locator: &MapLeafLocator,
+        eye: Vec3,
+        visible: impl Fn(u32) -> bool,
+        culling: impl Fn(super::super::MapBounds, MapBoundsCullMask) -> MapBoundsCulling,
+        cluster_visible: impl Fn(i16) -> bool,
+    ) -> Vec<super::MapWorldSurfaceGroup> {
+        let mut groups = Vec::<super::MapWorldSurfaceGroup>::new();
+        self.visit_world_surfaces_with_culling(
+            locator,
+            eye,
+            visible,
+            culling,
             cluster_visible,
             |encounter| match encounter {
                 WorldSurfaceEncounter::Leaf(leaf_index) => {
@@ -425,19 +484,44 @@ impl FaceOrdering {
         visible: impl Fn(u32) -> bool,
         bounds_visible: impl Fn(super::super::MapBounds) -> bool,
         cluster_visible: impl Fn(i16) -> bool,
+        emit: impl FnMut(WorldSurfaceEncounter),
+    ) {
+        self.visit_world_surfaces_with_culling(
+            locator,
+            eye,
+            visible,
+            |bounds, _| {
+                if bounds_visible(bounds) {
+                    MapBoundsCulling::Visible(MapBoundsCullMask::ALL)
+                } else {
+                    MapBoundsCulling::Outside
+                }
+            },
+            cluster_visible,
+            emit,
+        );
+    }
+
+    fn visit_world_surfaces_with_culling(
+        &self,
+        locator: &MapLeafLocator,
+        eye: Vec3,
+        visible: impl Fn(u32) -> bool,
+        culling: impl Fn(super::super::MapBounds, MapBoundsCullMask) -> MapBoundsCulling,
+        cluster_visible: impl Fn(i16) -> bool,
         mut emit: impl FnMut(WorldSurfaceEncounter),
     ) {
         enum Visit {
-            Child(i32),
+            Child(i32, MapBoundsCullMask),
             Faces(usize, bool),
         }
-        let mut stack = vec![Visit::Child(self.root)];
+        let mut stack = vec![Visit::Child(self.root, MapBoundsCullMask::ALL)];
         let mut visited = vec![false; locator.nodes.len()];
         let mut marked = vec![false; self.faces.len()];
         let mut emitted = vec![false; self.faces.len()];
         while let Some(visit) = stack.pop() {
             match visit {
-                Visit::Child(child) if child < 0 => {
+                Visit::Child(child, mask) if child < 0 => {
                     let leaf = (-i64::from(child) - 1) as usize;
                     if self.leaf_solid.get(leaf).copied().unwrap_or(false)
                         || locator
@@ -447,11 +531,9 @@ impl FaceOrdering {
                     {
                         continue;
                     }
-                    if self
-                        .leaf_bounds
-                        .get(leaf)
-                        .is_some_and(|bounds| !bounds_visible(*bounds))
-                    {
+                    if self.leaf_bounds.get(leaf).is_some_and(|bounds| {
+                        matches!(culling(*bounds, mask), MapBoundsCulling::Outside)
+                    }) {
                         continue;
                     }
                     emit(WorldSurfaceEncounter::Leaf(leaf as u32));
@@ -504,7 +586,7 @@ impl FaceOrdering {
                         }
                     }
                 }
-                Visit::Child(child) => {
+                Visit::Child(child, mask) => {
                     let Ok(index) = usize::try_from(child) else {
                         continue;
                     };
@@ -515,13 +597,13 @@ impl FaceOrdering {
                         continue;
                     }
                     visited[index] = true;
-                    if self
-                        .node_bounds
-                        .get(index)
-                        .is_some_and(|bounds| !bounds_visible(*bounds))
-                    {
-                        continue;
-                    }
+                    let remaining = match self.node_bounds.get(index) {
+                        Some(bounds) => match culling(*bounds, mask) {
+                            MapBoundsCulling::Outside => continue,
+                            MapBoundsCulling::Visible(remaining) => remaining,
+                        },
+                        None => MapBoundsCullMask::ALL,
+                    };
                     let Some(plane) = usize::try_from(node.plane_index)
                         .ok()
                         .and_then(|index| locator.planes.get(index))
@@ -530,9 +612,20 @@ impl FaceOrdering {
                     };
                     let back = eye.dot(plane.normal) - plane.dist < 0.0;
                     let side = usize::from(back);
-                    stack.push(Visit::Child(node.children[1 - side]));
+                    let child_mask = |side| {
+                        if self
+                            .child_bounds_contained
+                            .get(index)
+                            .is_some_and(|contained| contained[side])
+                        {
+                            remaining
+                        } else {
+                            MapBoundsCullMask::ALL
+                        }
+                    };
+                    stack.push(Visit::Child(node.children[1 - side], child_mask(1 - side)));
                     stack.push(Visit::Faces(index, back));
-                    stack.push(Visit::Child(node.children[side]));
+                    stack.push(Visit::Child(node.children[side], child_mask(side)));
                 }
                 Visit::Faces(node, back) => {
                     let Some(range) = self.node_faces.get(node) else {

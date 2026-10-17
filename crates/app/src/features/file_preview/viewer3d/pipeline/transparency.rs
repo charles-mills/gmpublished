@@ -12,7 +12,7 @@ mod order;
 mod schedule;
 pub use schedule::Diagnostics as TransparencyDiagnostics;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldDrawGroups {
     pub water_side: Option<WaterSide>,
     pub include_water: bool,
@@ -217,12 +217,25 @@ pub fn prepare(
         include_water,
     };
     let Some(plans) = view.plans.as_ref() else {
+        view.queue_cache = super::view_preparation::QueueCache::default();
         view.transparency.clear();
         view.skybox_transparency.clear();
         view.transparency_diagnostics = TransparencyDiagnostics::default();
         view.skybox_transparency_diagnostics = TransparencyDiagnostics::default();
         return;
     };
+    if !view.queue_cache.update(
+        upload,
+        plans,
+        super::view_preparation::QueueInputs {
+            world,
+            skybox,
+            groups: view.world_groups,
+            visibility_revisions: (view.visibility.revision, view.skybox_visibility.revision),
+        },
+    ) {
+        return;
+    }
     (view.transparency, view.transparency_diagnostics) = queue(
         upload,
         &plans.world,
@@ -293,11 +306,11 @@ fn remaining_queue(
     let mut draws = Vec::new();
     for items in [&plan.translucent, &plan.additive] {
         for item in items {
+            if schedule.is_some_and(|schedule| schedule.covers(item.mesh_index, None)) {
+                continue;
+            }
             let mesh = &upload.meshes[item.mesh_index];
             if mesh.transparent_parts.is_empty() {
-                if schedule.is_some_and(|schedule| schedule.covers(item.mesh_index, None)) {
-                    continue;
-                }
                 draws.push(Draw {
                     primitive: Primitive::Mesh(*item, None),
                     depth: depth(uniforms, mesh.centroid()),
@@ -476,7 +489,6 @@ mod tests {
                 DrawItem {
                     mesh_index: index,
                     material_slot: 0,
-                    distance_squared: 0.0,
                 },
                 Some(0..3),
             ),
@@ -666,7 +678,6 @@ mod tests {
             let item = DrawItem {
                 mesh_index: 0,
                 material_slot: 0,
-                distance_squared: 0.0,
             };
             let mut draws = selected
                 .iter()

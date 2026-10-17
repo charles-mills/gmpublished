@@ -25,6 +25,7 @@ mod camera;
 pub(super) mod capture;
 mod doors;
 mod draw_plan;
+pub(super) mod feedback;
 mod pipeline;
 mod source_camera;
 #[cfg(test)]
@@ -37,7 +38,7 @@ use doors::{
     door_world_bounds, expand_bounds, initial_door_swing, trace_aabb_against_aabb,
     transform_door_vertices,
 };
-use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem, prepare_draw_plans};
+use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem};
 use pipeline::ModelPrimitive;
 use pipeline::Uniforms;
 use texture::TextureUploadLevel;

@@ -4,7 +4,7 @@ use gmpublished_domain::math::Vec3;
 
 #[test]
 fn sparse_topology_accounts_for_every_source_vertex() {
-    let mut asset = test_prop_asset(1, vec![10, 11]);
+    let mut asset = test_prop_asset(vec![10, 11]);
     let mesh = &mut Arc::make_mut(&mut asset.model).meshes[0];
     mesh.vertices.resize(1001, mesh.vertices[0]);
     let placement = prop_placement("models/test.mdl", Vec3::ZERO, Vec3::ZERO, 1);
@@ -22,7 +22,7 @@ fn sparse_topology_accounts_for_every_source_vertex() {
 
 #[test]
 fn malformed_second_mesh_rejects_the_entire_model_plan() {
-    let mut asset = test_prop_asset(2, vec![10, 11]);
+    let mut asset = test_prop_asset(vec![10, 11]);
     let model = Arc::make_mut(&mut asset.model);
     model.meshes.push(model.meshes[0].clone());
     model.meshes[1].indices[2] = 3;
@@ -41,7 +41,7 @@ fn malformed_second_mesh_rejects_the_entire_model_plan() {
 #[test]
 fn partial_triangles_and_nonfinite_vertices_are_rejected() {
     let placement = prop_placement("models/test.mdl", Vec3::ZERO, Vec3::ZERO, 0);
-    let mut asset = test_prop_asset(1, vec![10, 11]);
+    let mut asset = test_prop_asset(vec![10, 11]);
     Arc::make_mut(&mut asset.model).meshes[0].indices.push(0);
     assert!(matches!(
         plan_door(&placement, &asset),
@@ -159,14 +159,14 @@ fn allocation_failure_rejects_whole_placement_and_reuses_survivor_buffers() {
             )
         })
         .collect::<Vec<_>>();
-    let mut mixed = test_prop_asset(2, vec![0, 1]);
+    let mut mixed = test_prop_asset(vec![0, 1]);
     let model = Arc::make_mut(&mut mixed.model);
     model.meshes.push(model.meshes[0].clone());
     model.meshes[1].material_index = 1;
     let models = [
         Arc::new(mixed),
-        Arc::new(test_prop_asset(1, vec![1, 1])),
-        Arc::new(test_prop_asset(1, vec![2, 2])),
+        Arc::new(test_prop_asset(vec![1, 1])),
+        Arc::new(test_prop_asset(vec![2, 2])),
     ];
     let selected = selected(&placements, &models);
     let mut calls = BTreeMap::new();
@@ -205,11 +205,11 @@ fn malformed_geometry_is_atomic_and_lighting_context_ids_remain_stable() {
         prop_placement("models/bad.mdl", Vec3::ZERO, Vec3::ZERO, 0),
         prop_placement("models/good.mdl", Vec3::splat(10.0), Vec3::ZERO, 0),
     ];
-    let mut bad = test_prop_asset(2, vec![0, 1]);
+    let mut bad = test_prop_asset(vec![0, 1]);
     let model = Arc::make_mut(&mut bad.model);
     model.meshes.push(model.meshes[0].clone());
     model.meshes[1].indices[2] = 99;
-    let models = [Arc::new(bad), Arc::new(test_prop_asset(1, vec![1, 1]))];
+    let models = [Arc::new(bad), Arc::new(test_prop_asset(vec![1, 1]))];
     let selected = selected(&placements, &models);
     let output = bake_selected_prop_placements_parallel(&selected);
     assert_eq!(output.admitted, [1]);
@@ -228,7 +228,7 @@ fn compiled_lighting_uses_original_mesh_and_vertex_indices() {
         Vec3::ZERO,
         0,
     )];
-    let mut asset = test_prop_asset(2, vec![0, 1]);
+    let mut asset = test_prop_asset(vec![0, 1]);
     let model = Arc::make_mut(&mut asset.model);
     model.meshes.push(model.meshes[0].clone());
     model.meshes.push(model.meshes[0].clone());
@@ -303,7 +303,7 @@ fn source_order_offsets_and_visibility_are_independent_of_worker_count() {
             placement
         })
         .collect::<Vec<_>>();
-    let mut asset = test_prop_asset(2, vec![1, 0]);
+    let mut asset = test_prop_asset(vec![1, 0]);
     let model = Arc::make_mut(&mut asset.model);
     model.meshes.push(model.meshes[0].clone());
     model.meshes[1].material_index = 1;
@@ -362,7 +362,7 @@ fn source_order_offsets_and_visibility_are_independent_of_worker_count() {
 fn finite_inputs_that_overflow_placement_transform_are_rejected_before_allocation() {
     let mut placement = prop_placement("models/overflow.mdl", Vec3::ZERO, Vec3::ZERO, 0);
     placement.scale = f32::MAX;
-    let mut asset = test_prop_asset(1, vec![0, 1]);
+    let mut asset = test_prop_asset(vec![0, 1]);
     Arc::make_mut(&mut asset.model).meshes[0].vertices[0].position = Vec3::splat(2.0);
     let placements = [placement];
     let selected = selected(&placements, &[Arc::new(asset)]);
@@ -379,7 +379,7 @@ fn finite_inputs_that_overflow_placement_transform_are_rejected_before_allocatio
 #[test]
 fn door_planning_omits_empty_meshes_before_validation_without_changing_source_indices() {
     let placement = prop_placement("models/door.mdl", Vec3::ZERO, Vec3::ZERO, 0);
-    let mut asset = test_prop_asset(1, vec![0, 1]);
+    let mut asset = test_prop_asset(vec![0, 1]);
     let model = Arc::make_mut(&mut asset.model);
     let mut empty = model.meshes[0].clone();
     empty.indices.clear();
@@ -398,7 +398,7 @@ fn door_planning_omits_empty_meshes_before_validation_without_changing_source_in
 
 #[test]
 fn raw_plans_and_topology_cache_share_and_release_canonical_source_geometry() {
-    let asset = test_prop_asset(1, vec![0, 1]);
+    let asset = test_prop_asset(vec![0, 1]);
     let source = Arc::downgrade(&asset.model);
     let placement = prop_placement("models/shared.mdl", Vec3::ZERO, Vec3::ZERO, 0);
     let mut planner = RawGeometryPlanner::default();

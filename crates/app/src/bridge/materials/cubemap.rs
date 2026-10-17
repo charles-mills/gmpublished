@@ -12,12 +12,59 @@ use vformats::vtf::{VtfError, VtfFormat, texture_flags};
 #[cfg(test)]
 use vformats::Limits;
 
+const DEFAULT_CUBEMAP: &str = "engine/defaultcubemap";
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CubemapFailure {
+    #[error(transparent)]
+    SourceUnavailable(super::SourceDiscoveryFailure),
+    #[error("cubemap source is absent")]
+    Missing,
+    #[error("cubemap has an invalid VTF payload: {0}")]
+    InvalidVtf(VtfError),
+    #[error("expected a square six-face cubemap")]
+    NotCubemap,
+    #[error("HDR cubemaps require a floating-point scene mode")]
+    UnsupportedHdr,
+    #[error("cubemap frame {requested} exceeds frame count {count}")]
+    Frame { requested: u32, count: u32 },
+    #[error("invalid cubemap path")]
+    Path,
+    #[error("cubemap source read failed: {0}")]
+    SourceRead(Arc<str>),
+    #[error("cubemap source admission rejected")]
+    SourceBudget,
+    #[error(transparent)]
+    Texture(TextureAssetError),
+    #[error("default cubemap failed after {authored}: {fallback}")]
+    DefaultUnavailable {
+        authored: Box<Self>,
+        fallback: Box<Self>,
+    },
+}
+
+impl CubemapFailure {
+    fn substitutes_default(&self) -> bool {
+        matches!(self, Self::Missing)
+            || matches!(self, Self::InvalidVtf(error) if super::native_invalid_texture(error))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CubemapResolution {
+    Authored,
+    Default { authored_failure: CubemapFailure },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCubemap {
     resident: super::TextureResidency,
     source_metadata: Option<Arc<TextureMetadata>>,
     load_outcome: TextureLoadOutcome,
     pub frame: u32,
+    pub resolution: super::CubemapResolution,
+    pub effective_path: Option<String>,
+    pub failure: Option<super::CubemapFailure>,
 }
 
 impl ResolvedCubemap {
@@ -96,6 +143,9 @@ impl ResolvedCubemap {
             source_metadata: Some(source_metadata),
             load_outcome: TextureLoadOutcome::Generated,
             frame,
+            resolution: CubemapResolution::Authored,
+            effective_path: None,
+            failure: None,
         })
     }
 }
@@ -186,6 +236,9 @@ fn decode_cubemap(
         source_metadata: Some(asset.metadata_arc()),
         load_outcome: TextureLoadOutcome::Loaded,
         frame,
+        resolution: CubemapResolution::Authored,
+        effective_path: None,
+        failure: None,
     })
 }
 
@@ -215,7 +268,11 @@ impl MaterialResolver {
         let source = if path == "env_cubemap" {
             EnvironmentMapSource::LocalProbe
         } else {
-            EnvironmentMapSource::Named(self.resolve_cubemap(&path, frame)?)
+            EnvironmentMapSource::Named(
+                self.resolve_named_cubemap(&path, frame)
+                    .inspect_err(|error| log::warn!("cubemap {path}: {error}"))
+                    .ok()?,
+            )
         };
         let mask_texture = material
             .effective_envmap_mask()
@@ -246,84 +303,144 @@ impl MaterialResolver {
     }
 
     pub(crate) fn resolve_cubemap(&self, name: &str, frame: u32) -> Option<Arc<ResolvedCubemap>> {
-        let normalized = normalize_texture_name(name)?;
+        self.load_cubemap(name, frame)
+            .inspect_err(|error| log::warn!("cubemap {name}: {error}"))
+            .ok()
+            .map(Arc::new)
+    }
+
+    fn resolve_named_cubemap(
+        &self,
+        name: &str,
+        frame: u32,
+    ) -> Result<Arc<ResolvedCubemap>, CubemapFailure> {
+        match self.load_cubemap(name, frame) {
+            Ok(cube) => Ok(Arc::new(cube)),
+            Err(authored) if authored.substitutes_default() && name != DEFAULT_CUBEMAP => {
+                let mut cube = self.load_cubemap(DEFAULT_CUBEMAP, 0).map_err(|fallback| {
+                    CubemapFailure::DefaultUnavailable {
+                        authored: Box::new(authored.clone()),
+                        fallback: Box::new(fallback),
+                    }
+                })?;
+                cube.resolution = CubemapResolution::Default {
+                    authored_failure: authored,
+                };
+                Ok(Arc::new(cube))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn load_cubemap(&self, name: &str, frame: u32) -> Result<ResolvedCubemap, CubemapFailure> {
+        let normalized = normalize_texture_name(name).ok_or(CubemapFailure::Path)?;
         if std::path::Path::new(&normalized)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("hdr"))
         {
-            log::warn!(
-                "cubemap {name}: HDR resource requires a coherent floating-point scene mode"
-            );
-            return None;
+            return Err(CubemapFailure::UnsupportedHdr);
         }
-        let path = texture_path(&normalized)?;
+        let path = texture_path(&normalized).ok_or(CubemapFailure::Path)?;
         let selected = match self.selected_texture_asset(&path) {
             Ok(selected) => selected,
-            Err(super::TextureSourceError::Preparation { .. }) => {
-                return Some(Arc::new(ResolvedCubemap::unavailable(
-                    None,
-                    TextureLoadOutcome::Unplanned,
-                )));
+            Err(super::TextureSourceError::SourceUnavailable(error)) => {
+                let mut cube =
+                    ResolvedCubemap::unavailable(None, TextureLoadOutcome::SourceUnavailable);
+                cube.effective_path = Some(normalized);
+                cube.failure = Some(CubemapFailure::SourceUnavailable(error));
+                return Ok(cube);
             }
-            Err(
-                super::TextureSourceError::EncodedBudget { metadata, .. }
-                | super::TextureSourceError::WorkingBudget { metadata, .. },
-            ) => {
-                return Some(Arc::new(ResolvedCubemap::unavailable(
+            Err(super::TextureSourceError::Preparation { error, .. }) => {
+                let mut cube = ResolvedCubemap::unavailable(None, TextureLoadOutcome::Unplanned);
+                cube.effective_path = Some(normalized);
+                cube.failure = Some(CubemapFailure::Texture(error));
+                return Ok(cube);
+            }
+            Err(super::TextureSourceError::EncodedBudget { metadata, .. }) => {
+                let mut cube = ResolvedCubemap::unavailable(
                     metadata,
                     TextureLoadOutcome::SourceBudgetRejected,
-                )));
+                );
+                cube.effective_path = Some(normalized);
+                cube.failure = Some(CubemapFailure::SourceBudget);
+                return Ok(cube);
             }
-            Err(error) => {
-                log::warn!("cubemap {name}: {error}");
-                return None;
+            Err(super::TextureSourceError::WorkingBudget {
+                metadata, error, ..
+            }) => {
+                let mut cube = ResolvedCubemap::unavailable(
+                    metadata,
+                    TextureLoadOutcome::SourceBudgetRejected,
+                );
+                cube.effective_path = Some(normalized);
+                cube.failure = Some(CubemapFailure::Texture(error));
+                return Ok(cube);
+            }
+            Err(super::TextureSourceError::Missing) => return Err(CubemapFailure::Missing),
+            Err(super::TextureSourceError::Read { message, .. }) => {
+                return Err(CubemapFailure::SourceRead(message));
+            }
+            Err(super::TextureSourceError::Invalid { error, .. }) => {
+                return Err(match error {
+                    TextureAssetError::Vtf(error) => CubemapFailure::InvalidVtf(error),
+                    error => CubemapFailure::Texture(error),
+                });
             }
         };
         let source_metadata = selected.asset.metadata_arc();
-        if let Err(error) = validate_cubemap(&source_metadata, frame) {
-            log::warn!("cubemap {name}: {error}");
-            return None;
-        }
-        let (resident, load_outcome, frame) = match self.resident_texture(
-            &selected,
-            0..6,
-            !self.bc_textures_enabled(),
-        ) {
-            Ok(resident) => {
-                let outcome = resident.load_outcome();
-                (resident, outcome, frame)
-            }
-            Err(error) => {
-                log::warn!("cubemap {name}: {error}");
-                if matches!(&error,TextureAssetError::Vtf(error) if super::native_invalid_texture(error))
-                {
-                    return None;
+        validate_cubemap(&source_metadata, frame).map_err(|error| match error {
+            CubemapDecodeError::NotCubemap => CubemapFailure::NotCubemap,
+            CubemapDecodeError::UnsupportedHdr => CubemapFailure::UnsupportedHdr,
+            CubemapDecodeError::Texture(_) => CubemapFailure::Frame {
+                requested: frame,
+                count: source_metadata.frame_count,
+            },
+        })?;
+        let (resident, load_outcome, frame, failure) =
+            match self.resident_texture(&selected, 0..6, !self.bc_textures_enabled()) {
+                Ok(resident) => {
+                    let outcome = resident.load_outcome();
+                    (resident, outcome, frame, None)
                 }
-                let outcome = match error {
-                    TextureAssetError::DimensionLimit(_)
-                    | TextureAssetError::Budget
-                    | TextureAssetError::ResidentImageBudget { .. }
-                    | TextureAssetError::WorkingLimit { .. }
-                    | TextureAssetError::ImageCount(_)
-                    | TextureAssetError::Vtf(VtfError::DecodedTooLarge { .. }) => {
-                        TextureLoadOutcome::QualityRejected
+                Err(error) => {
+                    if let TextureAssetError::Vtf(vtf) = &error
+                        && super::native_invalid_texture(vtf)
+                    {
+                        return Err(CubemapFailure::InvalidVtf(vtf.clone()));
                     }
-                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
-                        TextureLoadOutcome::Unplanned
-                    }
-                    _ => TextureLoadOutcome::Unsupported,
-                };
-                let fallback =
-                    ResolvedCubemap::unavailable(Some(Arc::clone(&source_metadata)), outcome);
-                (fallback.resident, outcome, 0)
-            }
-        };
-        Some(Arc::new(ResolvedCubemap {
+                    let outcome = match &error {
+                        TextureAssetError::DimensionLimit(_)
+                        | TextureAssetError::Budget
+                        | TextureAssetError::ResidentImageBudget { .. }
+                        | TextureAssetError::WorkingLimit { .. }
+                        | TextureAssetError::ImageCount(_)
+                        | TextureAssetError::Vtf(VtfError::DecodedTooLarge { .. }) => {
+                            TextureLoadOutcome::QualityRejected
+                        }
+                        TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
+                            TextureLoadOutcome::Unplanned
+                        }
+                        _ => TextureLoadOutcome::Unsupported,
+                    };
+                    let fallback =
+                        ResolvedCubemap::unavailable(Some(Arc::clone(&source_metadata)), outcome);
+                    (
+                        fallback.resident,
+                        outcome,
+                        0,
+                        Some(CubemapFailure::Texture(error)),
+                    )
+                }
+            };
+        Ok(ResolvedCubemap {
             resident,
             source_metadata: Some(source_metadata),
             load_outcome,
             frame,
-        }))
+            resolution: CubemapResolution::Authored,
+            effective_path: Some(normalized),
+            failure,
+        })
     }
 }
 
@@ -332,7 +449,7 @@ mod tests {
     use super::*;
     use crate::test_support::fixture_vtf_bytes;
 
-    fn fixture(faces: u8, frames: u16, mip_count: u8) -> Vec<u8> {
+    pub(super) fn fixture(faces: u8, frames: u16, mip_count: u8) -> Vec<u8> {
         let mut payload = Vec::new();
         for mip in (0..mip_count).rev() {
             let side = 4_usize >> mip;
@@ -351,6 +468,10 @@ mod tests {
         }
         let placeholder = vec![&[][..]; usize::from(mip_count)];
         let mut bytes = fixture_vtf_bytes(4, 4, VtfFormat::Rgba8888, &placeholder);
+        bytes.resize(80, 0);
+        bytes[8..12].copy_from_slice(&(if faces == 7 { 2_u32 } else { 5_u32 }).to_le_bytes());
+        bytes[12..16].copy_from_slice(&80_u32.to_le_bytes());
+        bytes[63..65].copy_from_slice(&1_u16.to_le_bytes());
         bytes[20..24].copy_from_slice(&texture_flags::ENVMAP.to_le_bytes());
         bytes[24..26].copy_from_slice(&frames.to_le_bytes());
         bytes[26..28].copy_from_slice(&(if faces == 7 { 0_u16 } else { u16::MAX }).to_le_bytes());
@@ -382,6 +503,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn legacy_sentinel_keeps_the_stored_sphere_out_of_the_resident_cube() {
+        let mut bytes = fixture(7, 2, 3);
+        bytes[26..28].copy_from_slice(&u16::MAX.to_le_bytes());
+        let cube = decode_cubemap(&bytes, 1, None, &Limits::default()).unwrap();
+        let metadata = cube.source_metadata().unwrap();
+        assert_eq!(metadata.face_count, 7);
+        assert_eq!(metadata.first_frame, u16::MAX);
+        let resident = cube.resident().unwrap();
+        assert_eq!(resident.layers().len(), 12);
+        assert_eq!(resident.byte_len(), 1008);
+        assert!(resident.layer_index(1, 6).is_none());
+        assert_eq!(
+            cube.face(5).unwrap()[0].bytes.as_slice()[..4],
+            [100, 70, 0, 42]
+        );
+        let mut truncated = fixture(6, 1, 3);
+        truncated[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        assert!(matches!(
+            decode_cubemap(&truncated, 0, None, &Limits::default()),
+            Err(CubemapDecodeError::Texture(TextureAssetError::Vtf(
+                VtfError::Truncated { .. }
+            )))
+        ));
     }
 
     #[test]
@@ -427,7 +574,11 @@ mod tests {
         let first =
             MaterialResolver::prop_lighting_fixture(vec![(path, fixture(6, 2, 3))], Vec::new());
         let mut other_bytes = fixture(6, 2, 3);
-        other_bytes[64..68].copy_from_slice(&[199; 4]);
+        let image = vformats::vtf::parse(&other_bytes, &Limits::default())
+            .unwrap()
+            .stored_image(0, 0, 2)
+            .unwrap();
+        other_bytes[image.byte_range.start..image.byte_range.start + 4].copy_from_slice(&[199; 4]);
         let other = MaterialResolver::prop_lighting_fixture(vec![(path, other_bytes)], Vec::new());
         let a = first.resolve_cubemap("maps/shared/c0_0_0", 0).unwrap();
         assert!(Arc::ptr_eq(
@@ -514,3 +665,7 @@ mod tests {
         assert_eq!(failed.decoded_bytes(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "cubemap/named_tests.rs"]
+mod named_tests;

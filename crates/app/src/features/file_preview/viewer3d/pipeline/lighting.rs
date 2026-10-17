@@ -78,20 +78,33 @@ impl Frame {
         map: Option<&MapPreview>,
         time: f64,
         active_contexts: &[bool],
+        #[cfg(feature = "map-capture")] observer: Option<
+            &super::super::capture::CaptureDiagnostics,
+        >,
     ) {
+        #[cfg(feature = "map-capture")]
+        let lightmap_span = observer
+            .and_then(|observer| observer.span(super::super::capture::Phase::LightmapUpdate));
         self.lightmap
             .update(map.and_then(|map| map.lightmap.as_ref()), time as f32);
+        #[cfg(feature = "map-capture")]
+        drop(lightmap_span);
+        #[cfg(feature = "map-capture")]
+        let _model_span = observer
+            .and_then(|observer| observer.span(super::super::capture::Phase::ModelLightingUpdate));
         if self.model.advance(
             map.map_or(&[], |map| map.model_lighting.as_slice()),
             &styles(map, time),
             time,
             active_contexts,
         ) {
-            queue.write_buffer(
-                &self.model_lights,
-                0,
-                bytemuck::cast_slice(self.model.data()),
-            );
+            for range in self.model.changed_ranges() {
+                queue.write_buffer(
+                    &self.model_lights,
+                    (range.start * std::mem::size_of::<model_lighting::GpuModelContext>()) as u64,
+                    bytemuck::cast_slice(&self.model.data()[range.clone()]),
+                );
+            }
         }
     }
 }

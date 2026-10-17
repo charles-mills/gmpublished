@@ -12,6 +12,7 @@ use gmpublished_domain::scene::map::{
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::OnceLock;
 
 struct WorldFace {
     draw: DrawGroup,
@@ -41,6 +42,7 @@ struct LeafDetails {
 pub enum ScheduleUnavailable {
     NotMap,
     MissingTopology,
+    MissingReceiverPreparation,
     UnsupportedTraversalContext,
 }
 
@@ -63,6 +65,17 @@ pub struct Diagnostics {
     pub unavailable: Option<ScheduleUnavailable>,
     pub rejected: Vec<RejectedResource>,
     pub fallback: Vec<FallbackResource>,
+}
+
+fn prepared_leaves(
+    leaves: Option<&[MapWorldSurfaceGroup]>,
+    has_receivers: bool,
+) -> Result<&[MapWorldSurfaceGroup], ScheduleUnavailable> {
+    leaves.ok_or(if has_receivers {
+        ScheduleUnavailable::UnsupportedTraversalContext
+    } else {
+        ScheduleUnavailable::MissingReceiverPreparation
+    })
 }
 
 #[derive(Default)]
@@ -91,9 +104,10 @@ impl Schedule {
             .ok_or(ScheduleUnavailable::MissingTopology)?;
         let mut diagnostics = Diagnostics::default();
         let leaves = pruned_leaves(
-            plan.transparency_leaves
-                .as_ref()
-                .ok_or(ScheduleUnavailable::UnsupportedTraversalContext)?,
+            prepared_leaves(
+                plan.transparency_leaves.as_deref(),
+                !map.surface_receivers.is_empty(),
+            )?,
             groups.water_side,
             |leaf| topology.leaf_is_underwater(leaf),
             &mut diagnostics.rejected,
@@ -125,7 +139,12 @@ impl Schedule {
                 .or_default()
                 .push(mark);
         }
-        for (&face, receivers) in &upload.assets.receiver_faces {
+        for face in upload
+            .assets
+            .receiver_faces
+            .world_faces_for_meshes(items.keys().copied())
+        {
+            let receivers = upload.assets.receiver_faces.get(&face).unwrap();
             let receivers = receivers.iter().filter(|receiver| {
                 map.surface_receivers[receiver.source_index].owner.id() == MapSurfaceOwnerId::World
                     && items.contains_key(&receiver.mesh_index)
@@ -241,6 +260,10 @@ impl Schedule {
             if renderable.map_skybox != skybox {
                 continue;
             }
+            let mut ranges = admitted_ranges(&renderable.ranges, &items).peekable();
+            if ranges.peek().is_none() {
+                continue;
+            }
             let source = if skybox {
                 &map.map_skybox_renderables
             } else {
@@ -261,9 +284,11 @@ impl Schedule {
                     leaves.iter().map(|leaf| u32::from(*leaf)),
                     &indices,
                 )),
-                MapPropLeafMembership::SpatialBounds => {
-                    bounds_leaf(topology, bounds.world, &indices)
-                }
+                MapPropLeafMembership::SpatialBounds => cached_bounds_leaf(
+                    &renderable.spatial_leaves,
+                    || topology.leaves_for_aabb(bounds.world),
+                    &indices,
+                ),
             };
             let Some(leaf) = leaf else {
                 schedule
@@ -280,10 +305,7 @@ impl Schedule {
                 source.origin,
                 (bounds.local.min + bounds.local.max) * 0.5,
             );
-            for range in &renderable.ranges {
-                let Some(&item) = items.get(&range.mesh_index) else {
-                    continue;
-                };
+            for (range, item) in ranges {
                 schedule
                     .ranges
                     .entry(item.mesh_index)
@@ -561,6 +583,26 @@ fn bounds_leaf(
     bounds_leaf_query(topology.leaves_for_aabb(bounds), visible)
 }
 
+fn admitted_ranges<'a>(
+    ranges: &'a [super::super::upload::UploadedRenderableRange],
+    items: &'a HashMap<usize, DrawItem>,
+) -> impl Iterator<Item = (&'a super::super::upload::UploadedRenderableRange, DrawItem)> {
+    ranges
+        .iter()
+        .filter_map(|range| items.get(&range.mesh_index).map(|&item| (range, item)))
+}
+
+fn cached_bounds_leaf(
+    cache: &OnceLock<Option<Vec<u32>>>,
+    query: impl FnOnce() -> Option<Vec<u32>>,
+    visible: &HashMap<u32, usize>,
+) -> Option<Option<usize>> {
+    Some(nearest_visible_leaf(
+        cache.get_or_init(query).as_deref()?.iter().copied(),
+        visible,
+    ))
+}
+
 fn bounds_leaf_query(
     leaves: Option<Vec<u32>>,
     visible: &HashMap<u32, usize>,
@@ -612,6 +654,20 @@ fn mesh_draw(upload: &ViewerScene, item: DrawItem, indices: Range<u32>, depth: f
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn absent_receiver_preparation_and_empty_visible_world_are_distinct() {
+        assert_eq!(
+            prepared_leaves(None, false),
+            Err(ScheduleUnavailable::MissingReceiverPreparation)
+        );
+        assert_eq!(
+            prepared_leaves(None, true),
+            Err(ScheduleUnavailable::UnsupportedTraversalContext)
+        );
+        assert_eq!(prepared_leaves(Some(&[]), false), Ok([].as_slice()));
+        assert_eq!(prepared_leaves(Some(&[]), true), Ok([].as_slice()));
+    }
+
     use super::*;
     use gmpublished_domain::scene::map::{MapDisplacementRendering, MapWorldMaterialGroup};
 
@@ -649,6 +705,48 @@ mod tests {
             )]
         );
         assert!(schedule.diagnostics.unavailable.is_none());
+    }
+
+    #[test]
+    fn water_side_omission_does_not_release_world_meshes_to_fallback() {
+        let mut schedule = Schedule::default();
+        let rendering = MapWorldSurfaceRendering {
+            material_group: MapWorldMaterialGroup::AboveWater,
+            displacement: None,
+        };
+        let leaves = [
+            MapWorldSurfaceGroup {
+                leaf_index: 1,
+                faces: vec![10],
+            },
+            MapWorldSurfaceGroup {
+                leaf_index: 2,
+                faces: vec![11],
+            },
+        ];
+        for (face, mesh) in [(10, 0), (11, 1)] {
+            assert_eq!(
+                schedule.admit_world_face(face, [mesh], Some(rendering), false),
+                Some(rendering)
+            );
+        }
+        let selected = pruned_leaves(
+            &leaves,
+            Some(super::super::WaterSide::Above),
+            |leaf| Some(leaf == 2),
+            &mut schedule.diagnostics.rejected,
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .flat_map(|leaf| leaf.faces.iter().copied())
+                .collect::<Vec<_>>(),
+            [10]
+        );
+        assert!(schedule.covers(0, None));
+        assert!(schedule.covers(1, None));
+        assert!(schedule.operations.is_empty());
+        assert!(schedule.diagnostics.rejected.is_empty());
     }
 
     #[test]
@@ -697,6 +795,94 @@ mod tests {
         assert_eq!(bounds_leaf_query(Some(vec![]), &visible), Some(None));
         assert_eq!(bounds_leaf_query(Some(vec![3, 4]), &visible), Some(None));
         assert_eq!(bounds_leaf_query(Some(vec![7, 2]), &visible), Some(Some(0)));
+    }
+
+    #[test]
+    fn admitted_placement_ranges_preserve_source_order_and_mixed_meshes() {
+        use super::super::super::upload::UploadedRenderableRange;
+        let ranges = [
+            UploadedRenderableRange {
+                mesh_index: 9,
+                indices: 0..3,
+            },
+            UploadedRenderableRange {
+                mesh_index: 4,
+                indices: 3..6,
+            },
+            UploadedRenderableRange {
+                mesh_index: 9,
+                indices: 6..9,
+            },
+            UploadedRenderableRange {
+                mesh_index: 2,
+                indices: 0..3,
+            },
+        ];
+        let item = |mesh_index| DrawItem {
+            mesh_index,
+            material_slot: mesh_index,
+        };
+        let items = HashMap::from([(2, item(2)), (9, item(9))]);
+        assert_eq!(
+            admitted_ranges(&ranges, &items)
+                .map(|(range, item)| (item.mesh_index, range.indices.clone()))
+                .collect::<Vec<_>>(),
+            [(9, 0..3), (9, 6..9), (2, 0..3)]
+        );
+        assert!(admitted_ranges(&ranges, &HashMap::new()).next().is_none());
+    }
+
+    #[test]
+    fn immutable_spatial_membership_reuses_lookup_but_selects_each_views_nearest_leaf() {
+        let cache = OnceLock::new();
+        let queries = std::cell::Cell::new(0);
+        let query = || {
+            queries.set(queries.get() + 1);
+            Some(vec![7, 2, 9])
+        };
+        assert_eq!(
+            cached_bounds_leaf(&cache, query, &HashMap::from([(7, 1), (2, 0)])),
+            Some(Some(0))
+        );
+        assert_eq!(
+            cached_bounds_leaf(&cache, query, &HashMap::from([(9, 0), (7, 2)])),
+            Some(Some(0))
+        );
+        assert_eq!(
+            cached_bounds_leaf(&cache, query, &HashMap::from([(5, 0)])),
+            Some(None)
+        );
+        assert_eq!(queries.get(), 1);
+    }
+
+    #[test]
+    fn cached_failed_lookup_keeps_fallback_distinct_from_known_empty_membership() {
+        for (members, expected) in [(None, None), (Some(Vec::new()), Some(None))] {
+            let cache = OnceLock::new();
+            let visible = HashMap::from([(1, 0)]);
+            assert_eq!(cached_bounds_leaf(&cache, || members, &visible), expected);
+            assert_eq!(
+                cached_bounds_leaf(
+                    &cache,
+                    || panic!("membership was already prepared"),
+                    &visible
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn partial_placement_claim_keeps_unadmitted_and_straddling_triangles_in_fallback() {
+        let mut schedule = Schedule::default();
+        schedule.ranges.insert(3, std::iter::once(3..9).collect());
+        assert!(!schedule.covers(3, None));
+        assert!(!schedule.covers(3, Some(&(0..3))));
+        assert!(schedule.covers(3, Some(&(3..6))));
+        assert!(!schedule.covers(3, Some(&(8..11))));
+        assert!(!schedule.covers(4, None));
+        assert!(schedule.diagnostics.fallback.is_empty());
+        assert!(schedule.diagnostics.rejected.is_empty());
     }
 
     fn sprite(index: usize, distance_squared: f32) -> Sprite {
@@ -874,7 +1060,6 @@ mod tests {
                 DrawItem {
                     mesh_index,
                     material_slot: 0,
-                    distance_squared: 0.0,
                 },
                 None,
             ),

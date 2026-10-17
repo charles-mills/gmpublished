@@ -26,6 +26,8 @@ pub mod layer;
 pub mod primitive;
 pub mod settings;
 pub mod window;
+#[cfg(feature = "renderer-profiling")]
+pub mod profiling;
 
 #[cfg(feature = "geometry")]
 pub mod geometry;
@@ -93,9 +95,23 @@ pub struct Renderer {
     image_cache: std::cell::RefCell<image::Cache>,
 
     staging_belt: wgpu::util::StagingBelt,
+    #[cfg(feature = "renderer-profiling")]
+    profiler: profiling::GpuProfiler,
+    #[cfg(feature = "renderer-profiling")]
+    profile_pending: Option<profiling::Pending>,
+    #[cfg(feature = "renderer-profiling")]
+    profile_token: Option<profiling::FrameToken>,
 }
 
 impl Renderer {
+    pub fn device(&self) -> &wgpu::Device {
+        &self.engine.device
+    }
+
+    pub fn target_format(&self) -> wgpu::TextureFormat {
+        self.engine.format
+    }
+
     pub fn new(
         engine: Engine,
         default_font: Font,
@@ -127,6 +143,13 @@ impl Renderer {
                 buffer::MAX_WRITE_SIZE as u64,
             ),
 
+            #[cfg(feature = "renderer-profiling")]
+            profiler: profiling::GpuProfiler::default(),
+            #[cfg(feature = "renderer-profiling")]
+            profile_pending: None,
+            #[cfg(feature = "renderer-profiling")]
+            profile_token: None,
+
             engine,
         }
     }
@@ -137,14 +160,36 @@ impl Renderer {
         target: &wgpu::TextureView,
         viewport: &Viewport,
     ) -> wgpu::CommandEncoder {
-        let mut encoder = self.engine.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some("iced_wgpu encoder"),
-            },
-        );
+        let mut encoder =
+            self.engine
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("iced_wgpu encoder"),
+                });
 
+        #[cfg(feature = "renderer-profiling")]
+        let token = profiling::begin();
+        #[cfg(feature = "renderer-profiling")]
+        let mut pending = self
+            .profiler
+            .begin(&self.engine.device, &mut encoder, token);
+        #[cfg(feature = "renderer-profiling")]
+        let prepare_started = std::time::Instant::now();
         self.prepare(&mut encoder, viewport);
+        #[cfg(feature = "renderer-profiling")]
+        let prepare_ms = profiling::elapsed(prepare_started);
+        #[cfg(feature = "renderer-profiling")]
+        let encode_started = std::time::Instant::now();
         self.render(&mut encoder, target, clear_color, viewport);
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(token) = token {
+            profiling::update(token, |sample| {
+                sample.cpu_prepare_ms = prepare_ms;
+                sample.cpu_encode_ms = profiling::elapsed(encode_started);
+            });
+        }
+        #[cfg(feature = "renderer-profiling")]
+        let cleanup_started = std::time::Instant::now();
 
         self.quad.trim();
         self.triangle.trim();
@@ -159,6 +204,21 @@ impl Renderer {
             self.image_cache.borrow_mut().trim();
         }
 
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(pending) = pending.as_mut() {
+            self.profiler.resolve(&mut encoder, pending);
+        }
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(token) = token {
+            profiling::update(token, |sample| {
+                sample.cpu_cleanup_ms = profiling::elapsed(cleanup_started)
+            });
+        }
+        #[cfg(feature = "renderer-profiling")]
+        {
+            self.profile_pending = pending;
+            self.profile_token = token;
+        }
         encoder
     }
 
@@ -172,7 +232,20 @@ impl Renderer {
         let encoder = self.draw(clear_color, frame, viewport);
 
         self.staging_belt.finish();
+        #[cfg(feature = "renderer-profiling")]
+        let submit_started = std::time::Instant::now();
         let submission = self.engine.queue.submit([encoder.finish()]);
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(token) = self.profile_token {
+            profiling::update(token, |sample| {
+                sample.cpu_submit_ms = profiling::elapsed(submit_started)
+            });
+            profiling::submitted(token);
+        }
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(pending) = self.profile_pending.take() {
+            self.profiler.submitted(&self.engine.queue, pending);
+        }
         self.staging_belt.recall();
         submission
     }
@@ -274,6 +347,10 @@ impl Renderer {
 
         self.staging_belt.finish();
         let index = self.engine.queue.submit([encoder.finish()]);
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(pending) = self.profile_pending.take() {
+            self.profiler.submitted(&self.engine.queue, pending);
+        }
         self.staging_belt.recall();
 
         let slice = output_buffer.slice(..);
@@ -935,7 +1012,10 @@ impl renderer::Headless for Renderer {
             .await
             .ok()?;
 
-        let requested_features = (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::CLIP_DISTANCES).intersection(adapter.features());
+        let requested_features = (wgpu::Features::TEXTURE_COMPRESSION_BC
+            | wgpu::Features::CLIP_DISTANCES
+            | wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER
+            | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING).intersection(adapter.features());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("iced_wgpu [headless]"),

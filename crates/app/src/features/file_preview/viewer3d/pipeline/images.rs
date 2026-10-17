@@ -49,11 +49,11 @@ pub(super) struct Image {
     layers: u32,
     dimensions: [u32; 2],
     bytes: u64,
-    views: Mutex<HashMap<ViewKey, wgpu::TextureView>>,
+    views: Mutex<HashMap<ViewKey, super::texture_upload::UploadedView>>,
 }
 
 impl Image {
-    fn view(&self, key: ViewKey) -> Result<wgpu::TextureView, UploadError> {
+    fn view(&self, key: ViewKey) -> Result<super::texture_upload::UploadedView, UploadError> {
         let (dimension, first, count) = match key.dimension {
             ImageView::D2(layer) => (wgpu::TextureViewDimension::D2, layer, 1),
             ImageView::Array => (wgpu::TextureViewDimension::D2Array, 0, self.layers),
@@ -207,11 +207,40 @@ impl ImageCache {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub(super) enum ImageUploadCause {
+    Resource,
+    Capacity,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ImageUploadIssue {
+    pub cause: ImageUploadCause,
     pub material: String,
     pub role: String,
     pub reason: String,
+}
+
+impl ImageUploadIssue {
+    fn from_upload(material: &str, role: &str, error: &UploadError) -> Self {
+        let cause = if matches!(
+            error,
+            UploadError::Upload(super::texture_upload::UploadError::ImageBudget { .. })
+        ) {
+            ImageUploadCause::Capacity
+        } else {
+            ImageUploadCause::Resource
+        };
+        Self {
+            cause,
+            material: material.to_owned(),
+            role: role.to_owned(),
+            reason: error.to_string(),
+        }
+    }
+    pub(super) fn retry_after_retirement(&self, rejected_epoch: u64, current_epoch: u64) -> bool {
+        self.cause == ImageUploadCause::Capacity && current_epoch != rejected_epoch
+    }
 }
 
 pub(super) struct ImageLease<'a> {
@@ -229,7 +258,7 @@ impl ImageLease<'_> {
         source: &ResidentTexture,
         transfer: TextureReadTransfer,
         dimension: ImageView,
-    ) -> Result<wgpu::TextureView, UploadError> {
+    ) -> Result<super::texture_upload::UploadedView, UploadError> {
         validate_view(source, dimension)?;
         let image = self.cache.get(device, &self.uploader, source, transfer)?;
         let view = image.view(ViewKey {
@@ -244,17 +273,33 @@ impl ImageLease<'_> {
         let reason = reason.to_string();
         log::warn!("material {material} {role}: {reason}");
         self.issues.push(ImageUploadIssue {
+            cause: ImageUploadCause::Resource,
             material: material.to_owned(),
             role: role.to_owned(),
             reason,
         });
     }
 
+    pub(super) fn reject_upload(&mut self, material: &str, role: &str, error: &UploadError) {
+        let issue = ImageUploadIssue::from_upload(material, role, error);
+        log::warn!("material {material} {role}: {error}");
+        self.issues.push(issue);
+    }
+
     pub(super) fn finish(mut self) -> (Vec<Arc<Image>>, Vec<ImageUploadIssue>) {
         self.uploader.lock().expect("texture uploader lock").flush();
         let mut seen = std::collections::HashSet::new();
         self.images.retain(|image| seen.insert(Arc::as_ptr(image)));
-        (self.images, self.issues)
+        (
+            std::mem::take(&mut self.images),
+            std::mem::take(&mut self.issues),
+        )
+    }
+}
+
+impl Drop for ImageLease<'_> {
+    fn drop(&mut self) {
+        self.uploader.lock().expect("texture uploader lock").flush();
     }
 }
 
@@ -416,7 +461,7 @@ fn upload(
         }
     }
     let alternate_format = [format.add_srgb_suffix()];
-    let texture = uploader.allocate(&wgpu::TextureDescriptor {
+    let texture = uploader.allocate_material(&wgpu::TextureDescriptor {
         label: Some("file_preview.image"),
         size: wgpu::Extent3d {
             width: dimensions[0],
@@ -721,5 +766,210 @@ mod tests {
         let (cube_lease, _) = cube_lease.finish();
         assert_eq!(cube_lease.len(), 1);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    }
+    #[test]
+    #[ignore = "requires an exclusively reserved Vulkan GPU"]
+    fn gpu_material_budget_shares_views_retires_and_flushes_cancelled_leases() {
+        use super::super::texture_upload::{TextureUploader, UploadPolicy};
+        use crate::bridge::materials::{DecodedTextureFrames, ResolvedTextureMip};
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = iced::futures::executor::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .unwrap();
+        let (device, queue) = iced::futures::executor::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor::default()),
+        )
+        .unwrap();
+        let caps = adapter.get_downlevel_capabilities();
+        assert!(caps.flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS));
+        let frames = |value| {
+            DecodedTextureFrames::from_rgba(
+                0,
+                (0..2)
+                    .map(|_| {
+                        [4, 2, 1]
+                            .map(|side| ResolvedTextureMip {
+                                rgba: [value, 0, 0, 255].repeat((side * side) as usize),
+                                width: side,
+                                height: side,
+                            })
+                            .to_vec()
+                    })
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let source = frames(21);
+        let equivalent = frames(21);
+        let distinct = frames(22);
+        let uploader = TextureUploader::shared(
+            &device,
+            &queue,
+            UploadPolicy {
+                aggregate_staging_bytes: 512,
+                batch_bytes: 256,
+                material_image_bytes: 168,
+                material_image_allocations: 1,
+            },
+        )
+        .unwrap();
+        let mut cache = ImageCache::new(Some(&caps));
+        let mut first = cache.lease(&uploader);
+        let raw = first
+            .view(
+                &device,
+                &queue,
+                source.resident().unwrap(),
+                TextureReadTransfer::Unmodified,
+                ImageView::Array,
+            )
+            .unwrap();
+        let srgb = first
+            .view(
+                &device,
+                &queue,
+                source.resident().unwrap(),
+                TextureReadTransfer::SrgbToLinear,
+                ImageView::D2(0),
+            )
+            .unwrap();
+        let (first, _) = first.finish();
+        let mut second = cache.lease(&uploader);
+        let shared = second
+            .view(
+                &device,
+                &queue,
+                equivalent.resident().unwrap(),
+                TextureReadTransfer::Unmodified,
+                ImageView::D2(1),
+            )
+            .unwrap();
+        let (second, _) = second.finish();
+        assert!(Arc::ptr_eq(&first[0], &second[0]));
+        assert_eq!((cache.stats().uploads, cache.stats().cache_hits), (1, 2));
+        let copied = uploader.lock().unwrap().stats().copied_bytes;
+        let mut rejected = cache.lease(&uploader);
+        assert!(matches!(
+            rejected.view(
+                &device,
+                &queue,
+                distinct.resident().unwrap(),
+                TextureReadTransfer::Unmodified,
+                ImageView::Array
+            ),
+            Err(UploadError::Upload(
+                super::super::texture_upload::UploadError::ImageBudget { .. }
+            ))
+        ));
+        drop(rejected);
+        assert_eq!(uploader.lock().unwrap().stats().copied_bytes, copied);
+        drop(first);
+        drop(second);
+        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 168);
+        drop(raw);
+        drop(srgb);
+        drop(shared);
+        for _ in 0..2 {
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        }
+        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 0);
+        cache.trim();
+        let mut reload = cache.lease(&uploader);
+        let reloaded = reload
+            .view(
+                &device,
+                &queue,
+                source.resident().unwrap(),
+                TextureReadTransfer::Unmodified,
+                ImageView::D2(0),
+            )
+            .unwrap();
+        let (reload, _) = reload.finish();
+        drop(reload);
+        drop(reloaded);
+        for _ in 0..2 {
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        }
+        assert_eq!(cache.stats().uploads, 2);
+        let submissions = uploader.lock().unwrap().stats().submissions;
+        let mut cancelled = cache.lease(&uploader);
+        cancelled
+            .view(
+                &device,
+                &queue,
+                distinct.resident().unwrap(),
+                TextureReadTransfer::Unmodified,
+                ImageView::Array,
+            )
+            .unwrap();
+        drop(cancelled);
+        assert!(uploader.lock().unwrap().stats().submissions > submissions);
+        for _ in 0..2 {
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        }
+        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 0);
+        let mut incompatible = ImageCache::new(None);
+        let mut lease = incompatible.lease(&uploader);
+        lease
+            .view(
+                &device,
+                &queue,
+                source.resident().unwrap(),
+                TextureReadTransfer::Unmodified,
+                ImageView::Array,
+            )
+            .unwrap();
+        assert!(matches!(
+            lease.view(
+                &device,
+                &queue,
+                source.resident().unwrap(),
+                TextureReadTransfer::SrgbToLinear,
+                ImageView::Array
+            ),
+            Err(UploadError::Upload(
+                super::super::texture_upload::UploadError::ImageBudget { .. }
+            ))
+        ));
+        let (images, _) = lease.finish();
+        assert_eq!(images.len(), 1);
+        assert_eq!(uploader.lock().unwrap().stats().material_image_bytes, 168);
+        drop(images);
+        for _ in 0..2 {
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        }
+        assert_eq!(
+            uploader.lock().unwrap().stats().material_image_allocations,
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    #[test]
+    fn only_typed_capacity_refusals_retry_after_actual_retirement() {
+        let capacity = ImageUploadIssue::from_upload(
+            "wall",
+            "base",
+            &UploadError::Upload(super::super::texture_upload::UploadError::ImageBudget {
+                bytes: 64,
+                allocations: 1,
+            }),
+        );
+        let device = ImageUploadIssue::from_upload("wall", "base", &UploadError::DeviceLimit);
+        let view = ImageUploadIssue::from_upload("wall", "base", &UploadError::InvalidView);
+        assert_eq!(capacity.cause, ImageUploadCause::Capacity);
+        assert!(!capacity.retry_after_retirement(4, 4));
+        assert!(capacity.retry_after_retirement(4, 5));
+        for intrinsic in [device, view] {
+            assert_eq!(intrinsic.cause, ImageUploadCause::Resource);
+            assert!(!intrinsic.retry_after_retirement(4, 5));
+        }
     }
 }

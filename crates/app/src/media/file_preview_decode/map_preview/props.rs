@@ -137,13 +137,11 @@ impl std::ops::Add for PropBakeSkipStats {
 pub(in super::super) struct PropModelAsset {
     pub(in super::super) model: Arc<ModelData>,
     pub(in super::super) material_indices: BTreeMap<usize, usize>,
-    pub(in super::super) default_triangle_count: usize,
 }
 
 #[derive(Debug)]
 pub(in super::super) struct LoadedPropModel {
     pub(in super::super) model: Arc<ModelData>,
-    pub(in super::super) default_triangle_count: usize,
     pub(in super::super) physics: LoadedPropPhysics,
     pub(in super::super) collision: Option<Arc<MapWalkPropModel>>,
 }
@@ -544,7 +542,6 @@ pub(super) fn bake_map_doors_from_loaded_model_cache(
                             context.table,
                         ),
                         model: Arc::clone(&model.model),
-                        default_triangle_count: model.default_triangle_count,
                     })
                 } else {
                     model
@@ -556,14 +553,13 @@ pub(super) fn bake_map_doors_from_loaded_model_cache(
                         context.table,
                     ),
                     model: Arc::clone(&model.model),
-                    default_triangle_count: model.default_triangle_count,
                 });
                 let lighting = legacy_prop_lighting_fallback(placement, lighting);
                 let prepared = (|| {
                     let counts = if hidden {
                         GeometryCounts::default()
                     } else {
-                        geometry.geometry.counts()?
+                        geometry.geometry.counts()
                     };
                     baked.geometry.planned = baked.geometry.planned.checked_add(counts)?;
                     let admitted = baked.geometry.admitted.checked_add(counts)?;
@@ -813,7 +809,6 @@ fn bake_loaded_prop_selection(
                 prop.model = Arc::new(PropModelAsset {
                     model: Arc::clone(&prop.model.model),
                     material_indices: indices,
-                    default_triangle_count: prop.model.default_triangle_count,
                 });
             }
         }
@@ -826,7 +821,6 @@ fn bake_loaded_prop_selection(
             prop.model = Arc::new(PropModelAsset {
                 model: Arc::clone(&prop.model.model),
                 material_indices,
-                default_triangle_count: prop.model.default_triangle_count,
             });
         }
     }
@@ -1062,7 +1056,6 @@ pub(in super::super) struct SelectedPropPlacements<'a> {
 trait AdmissionModel {
     fn model(&self) -> &Arc<ModelData>;
     fn has_material(&self, slot: usize) -> bool;
-    fn default_triangle_count(&self) -> usize;
 }
 
 impl AdmissionModel for LoadedPropModel {
@@ -1071,9 +1064,6 @@ impl AdmissionModel for LoadedPropModel {
     }
     fn has_material(&self, slot: usize) -> bool {
         slot < self.model.material_names.len()
-    }
-    fn default_triangle_count(&self) -> usize {
-        self.default_triangle_count
     }
 }
 
@@ -1084,9 +1074,6 @@ impl AdmissionModel for PropModelAsset {
     }
     fn has_material(&self, slot: usize) -> bool {
         self.material_indices.contains_key(&slot)
-    }
-    fn default_triangle_count(&self) -> usize {
-        self.default_triangle_count
     }
 }
 
@@ -1156,27 +1143,29 @@ fn select_models<'a, T: AdmissionModel>(
             continue;
         };
 
-        if baked_triangles.saturating_add(model.default_triangle_count()) > triangle_cap {
-            let remaining = capped_count.saturating_sub(index);
-            skip_stats.triangle_cap = skip_stats.triangle_cap.saturating_add(remaining);
-            let placed_count = selected.len();
-            log::debug!(
-                "map preview static props triangle cap {triangle_cap}: placed {placed_count}, skipped remaining {remaining}"
-            );
-            break;
-        }
-
-        if has_bakeable_mesh(placement, model.model(), |slot| model.has_material(slot)) {
-            baked_triangles = baked_triangles.saturating_add(model.default_triangle_count());
-            selected.push(SelectedModelPlacement {
-                source_index: index,
-                placement,
-                geometry: geometry.world(placement, model.model(), |slot| model.has_material(slot)),
-                model,
-            });
-        } else {
+        if !has_bakeable_mesh(placement, model.model(), |slot| model.has_material(slot)) {
             skip_stats.no_bakeable_mesh = skip_stats.no_bakeable_mesh.saturating_add(1);
+            continue;
         }
+        let raw = geometry.world(placement, model.model(), |slot| model.has_material(slot));
+        if let Ok(raw) = &raw {
+            let triangles = raw.counts().indices / 3;
+            let Some(total) = baked_triangles
+                .checked_add(triangles)
+                .filter(|total| *total <= triangle_cap)
+            else {
+                let remaining = capped_count.saturating_sub(index);
+                skip_stats.triangle_cap = skip_stats.triangle_cap.saturating_add(remaining);
+                break;
+            };
+            baked_triangles = total;
+        }
+        selected.push(SelectedModelPlacement {
+            source_index: index,
+            placement,
+            geometry: raw,
+            model,
+        });
     }
 
     if skip_stats.has_skips() {
@@ -1338,10 +1327,7 @@ pub(in super::super) fn record_prop_door_material_resolution(
             .material_indices
             .get(&source_slot)
             .and_then(|&slot| materials.get(slot))
-            .is_some_and(|material| {
-                material.resolution == crate::bridge::materials::MaterialResolutionOutcome::Loaded
-                    && material.texture.is_some()
-            });
+            .is_some_and(MaterialSlot::has_resolved_base);
         if resolved {
             entry.resolved_used_material_slots.insert(source_slot);
         } else {
@@ -1576,12 +1562,6 @@ pub(in super::super) fn load_prop_model_with_options(
     {
         log::debug!("compiled prop lighting layout unavailable for {model_path}: {reason}");
     }
-    let default_triangle_count = model
-        .meshes
-        .iter()
-        .filter(|mesh| mesh.bodygroup_choice == 0)
-        .map(|mesh| mesh.indices.len() / 3)
-        .sum::<usize>();
 
     let physics = load_prop_physics(&phy_path, resolver);
     let collision = match &physics {
@@ -1602,7 +1582,6 @@ pub(in super::super) fn load_prop_model_with_options(
 
     Some(LoadedPropModel {
         model: Arc::new(model),
-        default_triangle_count,
         physics,
         collision,
     })
@@ -1679,7 +1658,6 @@ fn prop_model_asset_from_loaded(
     PropModelAsset {
         model: Arc::clone(&loaded.model),
         material_indices,
-        default_triangle_count: loaded.default_triangle_count,
     }
 }
 
@@ -1776,7 +1754,6 @@ fn bake_prop_placement_with_compiled(
         model: Arc::new(PropModelAsset {
             model: Arc::clone(&model.model),
             material_indices: model.material_indices.clone(),
-            default_triangle_count: model.default_triangle_count,
         }),
         lighting,
         compiled_lighting: compiled.map(|compiled| {
@@ -1898,15 +1875,15 @@ mod compiled_bake_tests {
             prop_placement("models/capped.mdl", Vec3::splat(20.0), Vec3::ZERO, 0),
             prop_placement("models/suffix.mdl", Vec3::splat(30.0), Vec3::ZERO, 0),
         ];
-        let mut bad = test_prop_asset(1, vec![0, 1]);
+        let mut bad = test_prop_asset(vec![0, 1]);
         Arc::make_mut(&mut bad.model).meshes[0].indices[2] = 99;
         let bad = Arc::new(bad);
-        let good = Arc::new(test_prop_asset(1, vec![0, 1]));
+        let good = Arc::new(test_prop_asset(vec![0, 1]));
         let mut calls = Vec::new();
         let selected = select_static_prop_placements(
             &placements,
             4,
-            2,
+            1,
             &mut |placement| {
                 calls.push(placement.model_path.clone());
                 Some(if placement.model_path == "models/bad.mdl" {
@@ -1955,7 +1932,7 @@ mod compiled_bake_tests {
             Vec3::new(0.0, 90.0, 0.0),
             1,
         );
-        let mut asset = test_prop_asset(2, vec![7, 8]);
+        let mut asset = test_prop_asset(vec![7, 8]);
         let model = Arc::make_mut(&mut asset.model);
         model.meshes.push(model.meshes[0].clone());
         model.meshes[1].material_index = 1;
@@ -1988,7 +1965,7 @@ mod compiled_bake_tests {
             0,
         );
         placement.scale = 2.0;
-        let mut model = (*test_prop_asset(1, vec![0, 1]).model).clone();
+        let mut model = (*test_prop_asset(vec![0, 1]).model).clone();
         model.view_min = Vec3::new(2.0, 3.0, 4.0);
         model.view_max = Vec3::new(8.0, 9.0, 10.0);
         model.bounds_min = Vec3::splat(-999.0);
@@ -2028,7 +2005,7 @@ mod compiled_bake_tests {
 
     #[test]
     fn renderable_identity_and_draw_order_survive_parallel_material_merging() {
-        let mut asset = test_prop_asset(2, vec![1, 0]);
+        let mut asset = test_prop_asset(vec![1, 0]);
         let mut model = (*asset.model).clone();
         let mut second = model.meshes[0].clone();
         second.material_index = 1;
@@ -2121,7 +2098,7 @@ mod compiled_bake_tests {
         );
         placement.scale = 2.5;
         placement.diffuse_modulation = [128, 64, 255, 96];
-        let model = test_prop_asset(1, vec![0, 1]);
+        let model = test_prop_asset(vec![0, 1]);
         let compiled = CompiledPropLighting {
             illumination: vec![vec![Vec3::ZERO; 3]],
         };
@@ -2164,7 +2141,7 @@ mod compiled_bake_tests {
                 0,
             ),
         ];
-        let model = Arc::new(test_prop_asset(1, vec![0, 1]));
+        let model = Arc::new(test_prop_asset(vec![0, 1]));
         let selected = placements
             .iter()
             .enumerate()
@@ -2197,7 +2174,7 @@ mod compiled_bake_tests {
     #[test]
     fn ordinary_fallback_keeps_its_previous_vertex_contract() {
         let placement = prop_placement("models/test/chair.mdl", Vec3::ZERO, Vec3::ZERO, 0);
-        let model = test_prop_asset(1, vec![0, 1]);
+        let model = test_prop_asset(vec![0, 1]);
         let mut baked = BTreeMap::new();
         assert!(bake_prop_placement_with_compiled(
             &placement,

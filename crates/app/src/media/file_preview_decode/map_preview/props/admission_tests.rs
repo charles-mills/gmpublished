@@ -6,7 +6,6 @@ use crate::test_support::fixture_vtf_bytes;
 fn loaded(asset: &PropModelAsset) -> Arc<LoadedPropModel> {
     Arc::new(LoadedPropModel {
         model: Arc::clone(&asset.model),
-        default_triangle_count: asset.default_triangle_count,
         physics: LoadedPropPhysics::Missing,
         collision: None,
     })
@@ -22,11 +21,13 @@ fn raw_selection_preserves_authored_prefix_skip_counts_and_lookup_order() {
     placements[1].render_mode = 6;
     placements[2].model_path = "models/invalid.txt".into();
     placements[5].skin = 99;
-    let good = Arc::new(test_prop_asset(1, vec![0, 1]));
-    let mut empty = test_prop_asset(1, vec![]);
+    let good = Arc::new(test_prop_asset(vec![0, 1]));
+    let mut empty = test_prop_asset(vec![]);
     Arc::make_mut(&mut empty.model).material_names.clear();
     let empty = Arc::new(empty);
-    let big = Arc::new(test_prop_asset(3, vec![0, 1]));
+    let mut big = test_prop_asset(vec![0, 1]);
+    Arc::make_mut(&mut big.model).meshes[0].indices = vec![0, 1, 2, 0, 1, 2, 0, 1, 2];
+    let big = Arc::new(big);
     let assets = HashMap::from([
         ("models/good.mdl", Arc::clone(&good)),
         ("models/empty.mdl", empty),
@@ -103,7 +104,7 @@ fn raw_selection_preserves_authored_prefix_skip_counts_and_lookup_order() {
 
 #[test]
 fn raw_material_eligibility_matches_bound_slots_for_skin_fallback_and_bodygroups() {
-    let mut asset = test_prop_asset(1, vec![0, 1]);
+    let mut asset = test_prop_asset(vec![0, 1]);
     let placement = prop_placement("models/test.mdl", Vec3::ZERO, Vec3::ZERO, 0);
     for skin in [-1, 0, 1, 99] {
         let mut placement = placement.clone();
@@ -160,12 +161,7 @@ fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() 
         .iter()
         .zip(&placements)
         .map(|(name, placement)| {
-            let triangles = if *name == "test/admitted" {
-                MAP_PROP_TRIANGLE_CAP
-            } else {
-                1
-            };
-            let mut asset = test_prop_asset(triangles, vec![0]);
+            let mut asset = test_prop_asset(vec![0]);
             let model = Arc::make_mut(&mut asset.model);
             model.material_names = vec![(*name).into()];
             model.skin_tables = vec![vec![0]];
@@ -173,11 +169,15 @@ fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() 
         })
         .collect::<HashMap<_, _>>();
     let mut table = MaterialTable::default();
-    let baked = bake_static_props_from_loaded_model_cache(
-        &placements,
+    let selection = select_models(&placements, placements.len(), 1, &mut |placement| {
+        models.get(&placement.model_path).cloned().flatten()
+    });
+    let prepared = pre_resolve_prop_materials(selection.material_inputs(), &resolver);
+    let baked = bake_loaded_prop_selection(
+        selection,
         &resolver,
         &mut table,
-        &models,
+        Some(&prepared),
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
             environment_maps: None,
@@ -238,7 +238,7 @@ fn texture_fixture(names: &[&str], bytes: usize) -> (MaterialResolver, Arc<Decod
 }
 
 fn one_material(name: &str) -> Arc<LoadedPropModel> {
-    let mut asset = test_prop_asset(1, vec![0]);
+    let mut asset = test_prop_asset(vec![0]);
     let model = Arc::make_mut(&mut asset.model);
     model.material_names = vec![name.into()];
     model.skin_tables = vec![vec![0]];
@@ -270,7 +270,7 @@ fn bake_loaded(
 #[test]
 fn only_effective_skin_and_bodygroup_slots_select_textures() {
     let (resolver, budget) = texture_fixture(&["test/skin0", "test/skin1", "test/unused"], 32);
-    let mut asset = test_prop_asset(1, vec![0, 1, 2]);
+    let mut asset = test_prop_asset(vec![0, 1, 2]);
     let model = Arc::make_mut(&mut asset.model);
     model.material_names = vec![
         "test/skin0".into(),
@@ -351,7 +351,7 @@ fn malformed_selected_geometry_does_not_spend_texture_budget_or_compact_lighting
 #[test]
 fn referenced_missing_material_keeps_a_real_error_slot_without_resolving_unused_slots() {
     let (resolver, _) = texture_fixture(&["test/unused"], 16);
-    let mut asset = test_prop_asset(1, vec![0, 1]);
+    let mut asset = test_prop_asset(vec![0, 1]);
     let model = Arc::make_mut(&mut asset.model);
     model.material_names = vec!["test/unused".into(), "test/missing".into()];
     let placements = [prop_placement(
@@ -467,4 +467,59 @@ fn hidden_and_malformed_doors_prepare_bounds_without_crowding_visible_textures()
     assert_eq!(budget.decoded_bytes(), 16);
     assert_eq!(budget.rejected_textures(), 0);
     assert_eq!(table.slots().len(), 1);
+}
+
+#[test]
+fn malformed_oversized_geometry_does_not_charge_or_terminate_valid_prefix() {
+    let placements = ["bad", "good", "suffix"]
+        .map(|name| prop_placement(&format!("models/{name}.mdl"), Vec3::ZERO, Vec3::ZERO, 0));
+    let mut bad = test_prop_asset(vec![0, 1]);
+    Arc::make_mut(&mut bad.model).meshes[0].indices = vec![0, 1, 99, 0, 1, 2, 0, 1, 2];
+    let bad = Arc::new(bad);
+    let good = Arc::new(test_prop_asset(vec![0, 1]));
+    let selected = select_static_prop_placements(
+        &placements,
+        3,
+        1,
+        &mut |placement| {
+            Some(if placement.model_path.ends_with("bad.mdl") {
+                Arc::clone(&bad)
+            } else {
+                Arc::clone(&good)
+            })
+        },
+        StaticPropLightingInputs {
+            ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
+            environment_lighting: None,
+            lightmap_source: None,
+            walk_collision: None,
+        },
+    );
+    assert_eq!(
+        selected
+            .placements
+            .iter()
+            .map(|p| (p.source_index, p.lighting_context))
+            .collect::<Vec<_>>(),
+        [(0, 1), (1, 2)]
+    );
+    assert!(matches!(
+        selected.placements[0].geometry,
+        Err(GeometryError::IndexOutOfBounds { .. })
+    ));
+    assert_eq!(
+        selected.placements[1]
+            .geometry
+            .as_ref()
+            .unwrap()
+            .counts()
+            .indices,
+        3
+    );
+    assert_eq!(selected.skip_stats.triangle_cap, 1);
+    let baked = bake_selected_prop_placements_serial(&selected.placements);
+    assert_eq!(baked.admitted, [1]);
+    assert_eq!(baked.geometry.admitted.indices, 3);
+    assert_eq!(baked.geometry.rejected[0].placement_index, 0);
 }

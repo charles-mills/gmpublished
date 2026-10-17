@@ -1,26 +1,10 @@
-//! VPK archive directories (versions 1 and 2), sans-io.
-//!
-//! [`parse`] reads a `_dir.vpk`'s bytes and yields entries
-//! whose payloads are *located*, not read: preload bytes are borrowed
-//! from the directory, and [`VpkLocation`] names exactly which file and
-//! byte range holds the rest. The caller owns all I/O — mmap, `pread`,
-//! or an HTTP range request are equally at home:
-//!
-//! - [`VpkLocation::InDirectory`]: read from the `_dir.vpk` itself at
-//!   the given absolute offset.
-//! - [`VpkLocation::InArchive`]: open the numbered sibling
-//!   (`pak01_dir.vpk` → `pak01_007.vpk`, see [`sibling_archive_name`])
-//!   and read the range.
-//!
-//! [`VpkEntry::assemble`] glues preload + chunk bytes back into the
-//! full payload. Game-directory discovery and mount ordering are
-//! deliberately out of scope — that is application policy, not format.
+//! VPK v1/v2 directories with borrowed preloads and explicit payload locations.
 
 use std::borrow::Cow;
 use std::fmt;
 
-use crate::Limits;
 use crate::entry_path::is_unsafe_entry_path;
+use crate::{ArchiveIndexCost, ArchiveIndexLimit, ArchiveIndexLimits, Limits};
 
 const VPK_SIGNATURE: u32 = 0x55aa_1234;
 const VPK_V1_HEADER_BYTES: u64 = 12;
@@ -32,17 +16,14 @@ const VPK_ENTRY_TERMINATOR: u16 = 0xffff;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VpkDirectory<'a> {
     version: u32,
-    /// Entries sorted by path (deterministic; duplicate paths keep the
-    /// last occurrence, matching engine override order).
+    // Stable path sorting retains the last duplicate.
     entries: Vec<VpkEntry<'a>>,
 }
 
 /// One directory entry with its payload location.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VpkEntry<'a> {
-    /// Full entry path, composed from the tree's extension/directory/
-    /// name triple (owning is honest: the wire format never stores it
-    /// contiguously).
+    /// Composed extension/directory/name path.
     pub path: String,
     /// IEEE CRC-32 of the full payload (preload + located bytes).
     pub crc32: u32,
@@ -144,6 +125,8 @@ pub fn sibling_archive_name(dir_file_name: &str, archive: u16) -> Option<String>
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VpkError {
+    #[allow(missing_docs)]
+    IndexLimit(ArchiveIndexLimit),
     /// Input exceeds [`Limits::max_input_bytes`].
     InputTooLarge {
         /// Input length in bytes.
@@ -185,6 +168,7 @@ pub enum VpkError {
 impl fmt::Display for VpkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::IndexLimit(error) => error.fmt(f),
             Self::InputTooLarge { len, max } => {
                 write!(f, "vpk directory is {len} bytes, over the {max}-byte limit")
             }
@@ -231,6 +215,16 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    fn c_bytes(&mut self) -> Result<&'a [u8], VpkError> {
+        let rest = self.bytes.get(self.pos..).ok_or(VpkError::Corrupt)?;
+        let nul = rest
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(VpkError::Corrupt)?;
+        self.pos += nul + 1;
+        Ok(&rest[..nul])
+    }
+
     /// NUL-terminated tree string, lossily decoded (real trees contain
     /// non-UTF-8 name bytes).
     fn c_string(&mut self) -> Result<Cow<'a, str>, VpkError> {
@@ -245,8 +239,132 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parse a `_dir.vpk`'s bytes into located entries.
+#[allow(missing_docs)]
+pub fn index_cost(dir_bytes: &[u8], limits: &Limits) -> Result<ArchiveIndexCost, VpkError> {
+    if dir_bytes.len() as u64 > limits.max_input_bytes {
+        return Err(VpkError::InputTooLarge {
+            len: dir_bytes.len() as u64,
+            max: limits.max_input_bytes,
+        });
+    }
+    let mut header = Reader::at(dir_bytes, 0);
+    if header.u32().map_err(|_| VpkError::BadMagic)? != VPK_SIGNATURE {
+        return Err(VpkError::BadMagic);
+    }
+    let version = header.u32().map_err(|_| VpkError::BadMagic)?;
+    let tree_size = u64::from(header.u32().map_err(|_| VpkError::BadMagic)?);
+    let start = match version {
+        1 => VPK_V1_HEADER_BYTES,
+        2 => {
+            header.take(16).map_err(|_| VpkError::BadMagic)?;
+            VPK_V2_HEADER_BYTES
+        }
+        other => return Err(VpkError::UnsupportedVersion(other)),
+    };
+    let end = start
+        .checked_add(tree_size)
+        .filter(|end| *end <= dir_bytes.len() as u64)
+        .ok_or(VpkError::Corrupt)?;
+    let mut r = Reader::at(
+        &dir_bytes[..usize::try_from(end).map_err(|_| VpkError::Corrupt)?],
+        start as usize,
+    );
+    let mut cost = ArchiveIndexCost {
+        directory_bytes: end,
+        ..ArchiveIndexCost::default()
+    };
+    loop {
+        let extension = r.c_bytes()?;
+        if extension.is_empty() {
+            break;
+        }
+        let extension_len = if extension == b" " {
+            0
+        } else {
+            crate::archive_index::lossy_utf8_len(extension).ok_or(VpkError::Corrupt)?
+        };
+        loop {
+            let directory = r.c_bytes()?;
+            if directory.is_empty() {
+                break;
+            }
+            let directory_len = if directory == b" " {
+                0
+            } else {
+                crate::archive_index::lossy_utf8_len(directory).ok_or(VpkError::Corrupt)?
+            };
+            loop {
+                let name = r.c_bytes()?;
+                if name.is_empty() {
+                    break;
+                }
+                r.u32()?;
+                let preload = r.u16()?;
+                r.u16()?;
+                r.u32()?;
+                let len = r.u32()?;
+                if r.u16()? != VPK_ENTRY_TERMINATOR {
+                    return Err(VpkError::Corrupt);
+                }
+                let size = u64::from(preload) + u64::from(len);
+                if size > limits.max_entry_bytes {
+                    return Err(VpkError::EntryTooLarge {
+                        size,
+                        max: limits.max_entry_bytes,
+                    });
+                }
+                r.take(usize::from(preload))?;
+                if cost.entries >= limits.max_entries {
+                    return Err(VpkError::TooManyEntries {
+                        max: limits.max_entries,
+                    });
+                }
+                cost.entries += 1;
+                let path_len = directory_len
+                    .checked_add(usize::from(directory_len != 0))
+                    .and_then(|size| size.checked_add(crate::archive_index::lossy_utf8_len(name)?))
+                    .and_then(|size| size.checked_add(extension_len))
+                    .and_then(|size| size.checked_add(usize::from(extension_len != 0)))
+                    .ok_or(VpkError::Corrupt)?;
+                cost.string_bytes = cost
+                    .string_bytes
+                    .checked_add(path_len as u64)
+                    .ok_or(VpkError::Corrupt)?;
+                cost.copied_bytes = cost
+                    .copied_bytes
+                    .checked_add(u64::from(preload))
+                    .ok_or(VpkError::Corrupt)?;
+            }
+        }
+    }
+    cost.record_bytes = (cost.entries as u64)
+        .checked_mul(std::mem::size_of::<VpkEntry<'_>>() as u64)
+        .ok_or(VpkError::Corrupt)?;
+    Ok(cost)
+}
+
+#[allow(missing_docs)]
 pub fn parse<'a>(dir_bytes: &'a [u8], limits: &Limits) -> Result<VpkDirectory<'a>, VpkError> {
+    parse_with_index_limits(dir_bytes, limits, ArchiveIndexLimits::default())
+}
+
+#[allow(missing_docs)]
+pub fn parse_with_index_limits<'a>(
+    dir_bytes: &'a [u8],
+    limits: &Limits,
+    index_limits: ArchiveIndexLimits,
+) -> Result<VpkDirectory<'a>, VpkError> {
+    let cost = index_cost(dir_bytes, limits)?;
+    index_limits.check(cost).map_err(VpkError::IndexLimit)?;
+    parse_directory(dir_bytes, limits, cost.entries)
+}
+
+/// Parse a `_dir.vpk`'s bytes into located entries.
+fn parse_directory<'a>(
+    dir_bytes: &'a [u8],
+    limits: &Limits,
+    capacity: usize,
+) -> Result<VpkDirectory<'a>, VpkError> {
     if dir_bytes.len() as u64 > limits.max_input_bytes {
         return Err(VpkError::InputTooLarge {
             len: dir_bytes.len() as u64,
@@ -271,11 +389,10 @@ pub fn parse<'a>(dir_bytes: &'a [u8], limits: &Limits) -> Result<VpkDirectory<'a
         .checked_add(tree_size)
         .filter(|end| *end <= dir_bytes.len() as u64)
         .ok_or(VpkError::Corrupt)?;
-    // Embedded payload offsets in the tree are relative to the end of
-    // the tree; expose them as absolute directory-file offsets.
+    // Embedded offsets start after the tree.
     let data_base = tree_end;
 
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(capacity);
     loop {
         let extension = r.c_string()?;
         if extension.is_empty() {

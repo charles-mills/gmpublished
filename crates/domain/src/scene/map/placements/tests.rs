@@ -47,8 +47,8 @@ fn detail_sprites_keep_authored_leaf_identity_when_origins_and_clusters_match() 
     bsp.leaves[0].leaf_water_data = -1;
     bsp.leaves[1].leaf_water_data = 0;
     bsp.detail_props = Some(detail_props(&[0, 1]));
-    let (sprites, skybox) =
-        partitioned_detail_sprite_placements(&bsp, &SkyboxPartition::inactive(false));
+    let details = partitioned_detail_sprite_placements(&bsp, &SkyboxPartition::inactive(false));
+    let (sprites, skybox) = (details.world, details.skybox);
     assert!(skybox.is_empty());
     assert_eq!(sprites.len(), 2);
     assert_eq!(sprites[0].origin, sprites[1].origin);
@@ -95,8 +95,8 @@ fn detail_fast_eligibility_preserves_raw_source_permutation() {
     props.props[2].shape_size = 1;
     let mut bsp = super::super::tests::brush_collision_bsp("");
     bsp.detail_props = Some(props);
-    let (sprites, skybox) =
-        partitioned_detail_sprite_placements(&bsp, &SkyboxPartition::inactive(false));
+    let details = partitioned_detail_sprite_placements(&bsp, &SkyboxPartition::inactive(false));
+    let (sprites, skybox) = (details.world, details.skybox);
     assert!(skybox.is_empty());
     assert_eq!(
         sprites
@@ -106,4 +106,54 @@ fn detail_fast_eligibility_preserves_raw_source_permutation() {
         [true, false, false]
     );
     assert!(sprites.iter().all(|sprite| sprite.orientation == 2));
+}
+
+#[test]
+fn authored_detail_leaf_owns_cluster_medium_and_sky_partition() {
+    let mut bsp = super::super::tests::brush_collision_bsp("");
+    bsp.nodes[0].children = [-1, -1];
+    bsp.leaves[0].cluster = 0;
+    bsp.leaves[1].cluster = 1;
+    bsp.leaves[0].leaf_water_data = -1;
+    bsp.leaves[1].leaf_water_data = 0;
+    let mut vis = Vec::new();
+    vis.extend_from_slice(&2_i32.to_le_bytes());
+    for offset in [20_i32, 20, 21, 21] {
+        vis.extend_from_slice(&offset.to_le_bytes());
+    }
+    vis.extend_from_slice(&[1, 2]);
+    let mut container = vec![0; 1036];
+    container[..4].copy_from_slice(b"VBSP");
+    container[4..8].copy_from_slice(&20_i32.to_le_bytes());
+    let entry = 8 + vformats::bsp::lump_ids::VISIBILITY * 16;
+    container[entry..entry + 4].copy_from_slice(&1036_i32.to_le_bytes());
+    container[entry + 4..entry + 8].copy_from_slice(&(vis.len() as i32).to_le_bytes());
+    container.extend_from_slice(&vis);
+    bsp.visibility = vformats::bsp::parse(&container, &vformats::Limits::default())
+        .unwrap()
+        .visibility(&vformats::Limits::default())
+        .unwrap()
+        .map(vformats::bsp::Visibility::into_owned);
+    bsp.detail_props = Some(detail_props(&[0, 1, u16::MAX]));
+    let partition = SkyboxPartition::Active {
+        camera_reachable: vec![true, false],
+        sky_reachable: vec![false, true],
+        completion_bounds: None,
+    };
+    let details = partitioned_detail_sprite_placements(&bsp, &partition);
+    assert_eq!(details.invalid_leaves, 1);
+    assert_eq!(details.world.len(), 1);
+    assert_eq!(details.skybox.len(), 1);
+    let world = details.world[0];
+    let sky = details.skybox[0];
+    assert_eq!(world.origin, sky.origin);
+    assert_eq!(
+        super::super::MapLeafLocator::from_bsp(&bsp).leaf_at(sky.origin),
+        Some(0)
+    );
+    assert_eq!(world.visibility, MapVisibilityBucket::Cluster(0));
+    assert_eq!(sky.visibility, MapVisibilityBucket::Cluster(1));
+    assert_eq!(sky.leaf_index, 1);
+    assert!(!world.underwater_leaf);
+    assert!(sky.underwater_leaf);
 }

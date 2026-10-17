@@ -16,6 +16,7 @@ pub enum Message {
     LoadStageChanged(Generation, PreviewLoadStage),
     Loaded(Generation, Box<Result<PreviewData, PreviewLoadError>>),
     AnimationTick(Instant),
+    RenderFeedbackChanged(Generation),
     AudioToggleRequested,
     AudioPlaybackStarted(Generation),
     AudioPlaybackPaused(Generation),
@@ -31,6 +32,7 @@ pub enum Message {
     MapFogToggled(bool),
     MapSkyboxToggled(bool),
     MapVisibilityToggled(bool),
+    MapReducedTextureDetailToggled(bool),
     PhyDebugToggled(bool),
     FlyCameraChanged {
         pose: FlyPose,

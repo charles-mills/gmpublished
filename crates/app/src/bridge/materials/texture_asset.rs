@@ -104,6 +104,7 @@ impl TextureResidency {
             Self::Deferred(_) => super::TextureLoadOutcome::Deferred,
         }
     }
+    #[cfg(any(test, feature = "map-capture"))]
     pub(super) fn dimensions(&self, metadata: &TextureMetadata) -> [u32; 2] {
         self.resident().map_or_else(
             || {
@@ -330,6 +331,10 @@ impl ResidentTexture {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TextureAssetError {
     #[error(transparent)]
+    Cancelled(#[from] crate::preparation::Cancelled),
+    #[error(transparent)]
+    ArchiveIndex(vformats::ArchiveIndexLimit),
+    #[error(transparent)]
     Vtf(#[from] VtfError),
     #[error("texture storage does not match its source format")]
     Storage,
@@ -436,12 +441,10 @@ impl TextureAsset {
     }
     pub fn first_mip(&self, max: Option<u32>) -> Result<u8, TextureAssetError> {
         let max = max.unwrap_or(u32::MAX).max(1);
-        let mips = if self
-            .metadata
-            .flags
-            .is_some_and(|flags| flags & vformats::vtf::texture_flags::NOMIP != 0)
-        {
-            1
+        let mips = if self.metadata.flags.is_some_and(|flags| {
+            flags & (vformats::vtf::texture_flags::NOMIP | vformats::vtf::texture_flags::NOLOD) != 0
+        }) {
+            return Ok(0);
         } else {
             self.metadata.mip_count
         };
@@ -452,6 +455,7 @@ impl TextureAsset {
                     .iter()
                     .all(|&side| side.checked_shr(u32::from(mip)).unwrap_or(0).max(1) <= max)
             })
+            .or_else(|| mips.checked_sub(1))
             .ok_or(TextureAssetError::DimensionLimit(max))
     }
 
@@ -553,14 +557,20 @@ impl TextureAsset {
         limits: &Limits,
     ) -> Result<Arc<ResidentTexture>, TextureAssetError> {
         let recipe = self.plan(frames, faces, mips, storage, limits)?;
-        self.materialize_recipe(&recipe, limits)
+        self.materialize_recipe(
+            &recipe,
+            limits,
+            &crate::preparation::PreparationCancellation::default(),
+        )
     }
 
     fn materialize_recipe(
         &self,
         recipe: &TextureRecipe,
         limits: &Limits,
+        cancellation: &crate::preparation::PreparationCancellation,
     ) -> Result<Arc<ResidentTexture>, TextureAssetError> {
+        cancellation.check()?;
         let id = &recipe.id;
         let frames = id.frames.clone();
         let faces = id.faces.clone();
@@ -575,6 +585,7 @@ impl TextureAsset {
             for frame in frames.clone() {
                 for face in faces.clone() {
                     for mip in mips.clone() {
+                        cancellation.check()?;
                         let image = vtf.stored_image(frame, face, mip)?;
                         bytes.extend_from_slice(&self.bytes[image.byte_range]);
                     }
@@ -591,6 +602,7 @@ impl TextureAsset {
             for face in faces.clone() {
                 let mut chain = Vec::with_capacity(usize::from(id.mip_count));
                 for source_mip in mips.clone() {
+                    cancellation.check()?;
                     let image = vtf.stored_image(frame, face, source_mip)?;
                     let bytes = if let Some(backing) = &compact {
                         let end = offset + image.byte_range.len();
@@ -642,6 +654,8 @@ pub(super) enum TextureSourceError {
     },
     #[error("texture source is absent")]
     Missing,
+    #[error(transparent)]
+    SourceUnavailable(super::SourceDiscoveryFailure),
     #[error(
         "texture source {origin:?}: {declared_bytes} encoded bytes rejected; header inspection: {inspection:?}"
     )]
@@ -683,19 +697,20 @@ pub(super) struct SelectedTextureAsset {
 struct CachedSource {
     token: u64,
     read_cost: OnceLock<super::texture_source::TextureSourceReadCost>,
-    payload: OnceLock<Result<Arc<SelectedTextureAsset>, TextureSourceError>>,
+    payload: crate::preparation::FlightCell<Result<Arc<SelectedTextureAsset>, TextureSourceError>>,
 }
 impl Default for CachedSource {
     fn default() -> Self {
         Self {
             token: super::texture_source::source_token(),
             read_cost: OnceLock::new(),
-            payload: OnceLock::new(),
+            payload: Default::default(),
         }
     }
 }
 type SourceCell = Arc<CachedSource>;
-type ResidentCell = Arc<OnceLock<Result<Arc<ResidentTexture>, TextureAssetError>>>;
+type ResidentCell =
+    Arc<crate::preparation::FlightCell<Result<Arc<ResidentTexture>, TextureAssetError>>>;
 
 #[derive(Debug, Default)]
 pub(super) struct TextureAssetCache {
@@ -753,7 +768,10 @@ impl MaterialResolver {
             .and_then(|bytes| self.source_working_request(cost.decoder_bytes, bytes))
             .map_err(|error| error.to_string())
             .and_then(|working| {
-                let _working = working.map(super::texture_working::TextureWorkingRequest::acquire);
+                let _working = working
+                    .map(|request| request.acquire_cancellable(&self.config.cancellation))
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
                 descriptor
                     .prefix(vformats::vtf::MAX_HEADER_BYTES, cost.decoder_bytes)
                     .map_err(|error| error.to_string())
@@ -780,6 +798,16 @@ impl MaterialResolver {
         &self,
         path: &ContentPath,
     ) -> Result<Arc<SelectedTextureAsset>, TextureSourceError> {
+        self.check_cancelled()
+            .map_err(|error| TextureSourceError::Preparation {
+                path: path.clone(),
+                error: error.into(),
+            })?;
+        let cancellation = &self.config.cancellation;
+        let cancelled = |error: crate::preparation::Cancelled| TextureSourceError::Preparation {
+            path: path.clone(),
+            error: error.into(),
+        };
         let cell = self
             .shared
             .texture_assets
@@ -797,7 +825,7 @@ impl MaterialResolver {
             })?;
         let budget = self.config.encoded_texture_budget.as_ref();
         let result = if let Some(cached) = cell.payload.get() {
-            let (origin, size, metadata) = match cached {
+            let (origin, size, metadata) = match &cached {
                 Ok(selected) => (
                     Some(selected.origin.clone()),
                     selected.asset.bytes.len() as u64,
@@ -837,7 +865,7 @@ impl MaterialResolver {
                     inspection: None,
                 });
             }
-            cached.clone()
+            cached
         } else {
             let mut descriptor = None;
             for source in self.sources() {
@@ -851,37 +879,50 @@ impl MaterialResolver {
                         break;
                     }
                     Ok(None) => {}
+                    Err(super::SourceError::Discovery(error)) => {
+                        return Err(TextureSourceError::SourceUnavailable(error));
+                    }
+                    Err(super::SourceError::IndexLimit(error)) => {
+                        return Err(TextureSourceError::WorkingBudget {
+                            origin,
+                            error: TextureAssetError::ArchiveIndex(error),
+                            metadata: None,
+                            inspection: Some(
+                                "archive index unavailable under declared policy".into(),
+                            ),
+                        });
+                    }
                     Err(error) => {
                         return cell
                             .payload
-                            .get_or_init(|| {
-                                Err(TextureSourceError::Read {
+                            .get_or_try_init(cancellation, || {
+                                Ok(Err(TextureSourceError::Read {
                                     origin,
                                     message: error.to_string().into(),
-                                })
+                                }))
                             })
-                            .clone();
+                            .map_err(cancelled)?;
                     }
                 }
             }
             let Some(mut descriptor) = descriptor else {
                 return cell
                     .payload
-                    .get_or_init(|| Err(TextureSourceError::Missing))
-                    .clone();
+                    .get_or_try_init(cancellation, || Ok(Err(TextureSourceError::Missing)))
+                    .map_err(cancelled)?;
             };
             let cost = match descriptor.cost() {
                 Ok(cost) => *cell.read_cost.get_or_init(|| cost),
                 Err(error) => {
                     return cell
                         .payload
-                        .get_or_init(|| {
-                            Err(TextureSourceError::Read {
+                        .get_or_try_init(cancellation, || {
+                            Ok(Err(TextureSourceError::Read {
                                 origin: descriptor.origin.clone(),
                                 message: error.to_string().into(),
-                            })
+                            }))
                         })
-                        .clone();
+                        .map_err(cancelled)?;
                 }
             };
             let working = match self
@@ -908,32 +949,43 @@ impl MaterialResolver {
                 });
             }
             cell.payload
-                .get_or_init(|| {
-                    let _working =
-                        working.map(super::texture_working::TextureWorkingRequest::acquire);
-                    let origin = descriptor.origin.clone();
-                    let bytes: Arc<[u8]> = descriptor
-                        .bytes(cost.decoder_bytes)
-                        .map_err(|error| TextureSourceError::Read {
-                            origin: origin.clone(),
-                            message: error.to_string().into(),
-                        })?
-                        .into();
-                    let asset = TextureAsset::from_bytes(Arc::clone(&bytes), &Limits::default())
-                        .map_err(|error| TextureSourceError::Invalid {
-                            origin: origin.clone(),
-                            bytes: TextureBytes {
-                                range: 0..bytes.len(),
-                                backing: bytes,
-                            },
-                            error,
-                        })?;
-                    Ok(Arc::new(SelectedTextureAsset { origin, asset }))
+                .get_or_try_init(cancellation, || {
+                    let _working = working
+                        .map(|request| request.acquire_cancellable(cancellation))
+                        .transpose()?;
+                    cancellation.check()?;
+                    Ok((|| {
+                        let origin = descriptor.origin.clone();
+                        let bytes: Arc<[u8]> = descriptor
+                            .bytes(cost.decoder_bytes)
+                            .map_err(|error| TextureSourceError::Read {
+                                origin: origin.clone(),
+                                message: error.to_string().into(),
+                            })?
+                            .into();
+                        let asset =
+                            TextureAsset::from_bytes(Arc::clone(&bytes), &Limits::default())
+                                .map_err(|error| TextureSourceError::Invalid {
+                                    origin: origin.clone(),
+                                    bytes: TextureBytes {
+                                        range: 0..bytes.len(),
+                                        backing: bytes,
+                                    },
+                                    error,
+                                })?;
+                        Ok(Arc::new(SelectedTextureAsset { origin, asset }))
+                    })())
                 })
-                .clone()
+                .unwrap_or_else(|error| Err(cancelled(error)))
         };
-        if matches!(result, Err(TextureSourceError::Read { .. }))
-            && let Some(budget) = budget
+        if matches!(
+            result,
+            Err(TextureSourceError::Read { .. }
+                | TextureSourceError::Preparation {
+                    error: TextureAssetError::Cancelled(_),
+                    ..
+                })
+        ) && let Some(budget) = budget
         {
             budget.release(cell.token);
         }
@@ -956,6 +1008,7 @@ impl MaterialResolver {
         faces: Range<u32>,
         force_rgba: bool,
     ) -> Result<TextureResidency, TextureAssetError> {
+        self.check_cancelled()?;
         let asset = &selected.asset;
         let metadata = asset.metadata();
         asset.validate_payload()?;
@@ -1052,7 +1105,7 @@ impl MaterialResolver {
             {
                 admissions.release(id);
             }
-            return Err(error.clone());
+            return Err(error);
         }
         if matches!(
             self.config.texture_access,
@@ -1062,11 +1115,13 @@ impl MaterialResolver {
             budget.try_admit(id, size, recipe.image_count)?;
         }
         let result = cell
-            .get_or_init(|| {
-                let _working = working.map(super::texture_working::TextureWorkingRequest::acquire);
-                asset.materialize_recipe(&recipe, &limits)
+            .get_or_try_init(&self.config.cancellation, || {
+                let _working = working
+                    .map(|request| request.acquire_cancellable(&self.config.cancellation))
+                    .transpose()?;
+                Ok(asset.materialize_recipe(&recipe, &limits, &self.config.cancellation))
             })
-            .clone();
+            .unwrap_or_else(|error| Err(TextureAssetError::Cancelled(error)));
         if result.is_err() {
             match &self.config.texture_access {
                 super::texture_plan::TextureAccess::Admitted(admissions) => admissions.release(id),
@@ -1633,21 +1688,22 @@ mod tests {
             .texture;
         assert_eq!(loaded.source_metadata().unwrap().mip_count, 2);
         assert_eq!(loaded.resident().unwrap().id().mip_count, 1);
-        let rejected = resolver
+        let retained = resolver
             .with_decoded_texture_max_dimension(1)
             .resolve_primary(&[], "test/image")
             .into_material()
             .unwrap()
             .texture;
-        assert_eq!(rejected.load_outcome(), TextureLoadOutcome::QualityRejected);
-        assert_eq!(rejected.mapping_dimensions(), Some((2, 2)));
-        assert!(rejected.has_effective_base_texture());
+        assert_eq!(retained.load_outcome(), TextureLoadOutcome::Loaded);
+        assert_eq!(retained.resident().unwrap().id().first_source_mip, 0);
+        assert_eq!(retained.mapping_dimensions(), Some((2, 2)));
+        assert!(retained.has_effective_base_texture());
         assert_eq!(
-            rejected.flags(),
+            retained.flags(),
             Some(texture_flags::NOMIP | texture_flags::EIGHTBITALPHA)
         );
         assert_eq!(
-            rejected.reflectivity_bits().unwrap().map(f32::from_bits),
+            retained.reflectivity_bits().unwrap().map(f32::from_bits),
             [0.125, 0.25, 0.5]
         );
         assert_eq!(
@@ -1657,6 +1713,30 @@ mod tests {
                 .reflectivity,
             Vec3::new(0.125, 0.25, 0.5)
         );
+    }
+
+    #[test]
+    fn quality_reduction_uses_authored_mips_and_preserves_nolod_residency() {
+        for (flags, first, count) in [(0, 1, 1), (texture_flags::NOLOD, 0, 2)] {
+            let resolver = resolver(rgba_asset(flags));
+            let native = resolver
+                .resolve_primary(&[], "test/image")
+                .into_material()
+                .unwrap()
+                .texture;
+            assert_eq!(native.resident().unwrap().id().first_source_mip, 0);
+            assert_eq!(native.resident().unwrap().id().mip_count, 2);
+            let reduced = resolver
+                .with_decoded_texture_max_dimension(1)
+                .resolve_primary(&[], "test/image")
+                .into_material()
+                .unwrap()
+                .texture;
+            assert_eq!(reduced.load_outcome(), TextureLoadOutcome::Loaded);
+            assert_eq!(reduced.resident().unwrap().id().first_source_mip, first);
+            assert_eq!(reduced.resident().unwrap().id().mip_count, count);
+            assert_eq!(reduced.mapping_dimensions(), native.mapping_dimensions());
+        }
     }
 
     #[test]

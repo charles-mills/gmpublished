@@ -3111,3 +3111,256 @@ fn representative_mapping_uses_effective_role_priority_and_source_dimensions() {
     }
     assert_eq!(MaterialShader::Unknown.mapping_dimensions(None), None);
 }
+
+#[test]
+fn rejected_warm_pak_index_blocks_lower_materials_without_poisoning_shared_directory() {
+    let pak = MapPakFile::from_pak_bytes(zip_fixture([zip_stored_entry(
+        "materials/test/image.vmt",
+        br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
+    )]));
+    assert_eq!(pak.indexed_entries().unwrap().len(), 1);
+    let addon = Arc::new(
+        PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Lower")
+                .entry(
+                    "materials/test/image.vmt",
+                    br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
+                )
+                .entry("materials/test/image.vtf", create_vtf_bytes(&[23; 16]))
+                .build(),
+        )
+        .unwrap(),
+    );
+    let strict = MaterialResolver::with_pakfile_source_and_index_limits(
+        Arc::clone(&addon),
+        None,
+        pak.clone(),
+        vformats::ArchiveIndexLimits {
+            entries: 0,
+            ..Default::default()
+        },
+        Arc::new(TextureWorkingBudget::new(1024 * 1024)),
+    );
+    assert!(matches!(
+        strict.resolve_primary(&[], "test/image"),
+        MaterialResolution::IndexUnavailable { .. }
+    ));
+    let path = content_path("materials/test/image.vtf");
+    assert!(matches!(
+        strict.selected_texture_asset(&path),
+        Err(TextureSourceError::WorkingBudget {
+            error: TextureAssetError::ArchiveIndex(_),
+            ..
+        })
+    ));
+    assert_eq!(strict.archive_index_stats().archives, 0);
+    let wide = MaterialResolver::with_pakfile_source(addon, None, pak);
+    assert_eq!(
+        wide.resolve_primary(&[], "test/image").outcome(),
+        MaterialResolutionOutcome::Loaded
+    );
+}
+
+#[test]
+fn aggregate_sibling_admission_keeps_earlier_sources_and_blocks_unknown_later_entries() {
+    let root = tempfile::TempDir::new().unwrap();
+    let addons = root.path().join("garrysmod/addons");
+    write_gma_fixture(
+        addons.join("a.gma"),
+        &GmaFixtureBuilder::new("First")
+            .entry("materials/first.vmt", b"UnlitGeneric {}".to_vec())
+            .build(),
+    );
+    write_gma_fixture(
+        addons.join("b.gma"),
+        &GmaFixtureBuilder::new("Second")
+            .entry("materials/second.vmt", b"UnlitGeneric {}".to_vec())
+            .build(),
+    );
+    write_vpk_fixture(
+        &root.path().join("garrysmod/garrysmod_dir.vpk"),
+        vec![("materials/second.vmt", b"UnlitGeneric {}".to_vec())],
+    );
+    let resolver = MaterialResolver::new_with_index_limits(
+        PreviewArchiveSource::from_folder([]),
+        Some(root.path().to_owned()),
+        vformats::ArchiveIndexLimits {
+            entries: 1,
+            ..Default::default()
+        },
+        Arc::new(TextureWorkingBudget::new(1024 * 1024)),
+    );
+    assert_eq!(
+        resolver.entry_bytes("materials/first.vmt").unwrap(),
+        b"UnlitGeneric {}"
+    );
+    assert!(matches!(
+        resolver.resolve_primary(&[], "second"),
+        MaterialResolution::IndexUnavailable { .. }
+    ));
+    assert_eq!(resolver.archive_index_stats().archives, 1);
+    assert_eq!(resolver.archive_index_stats().entries, 1);
+    assert!(resolver.shared.game_vpks.get_ref().is_none());
+}
+
+#[test]
+fn unavailable_patch_include_is_not_a_missing_material_or_patch_shader_fallback() {
+    let pak = MapPakFile::from_pak_bytes(zip_fixture([zip_stored_entry(
+        "materials/test/patch.vmt",
+        br#"Patch { "include" "test/base" }"#.to_vec(),
+    )]));
+    let addon = Arc::new(
+        PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Include")
+                .entry(
+                    "materials/test/base.vmt",
+                    br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
+                )
+                .build(),
+        )
+        .unwrap(),
+    );
+    let resolver = MaterialResolver::with_pakfile_source_and_index_limits(
+        addon,
+        None,
+        pak,
+        vformats::ArchiveIndexLimits {
+            entries: 1,
+            ..Default::default()
+        },
+        Arc::new(TextureWorkingBudget::new(1024 * 1024)),
+    );
+    assert!(matches!(
+        resolver.resolve_primary(&[], "test/patch"),
+        MaterialResolution::IndexUnavailable { .. }
+    ));
+    assert!(matches!(
+        resolver.resolve_primary(&[], "test/patch"),
+        MaterialResolution::IndexUnavailable { .. }
+    ));
+    assert_eq!(resolver.archive_index_stats().archives, 1);
+}
+
+#[test]
+fn rejected_vpk_index_never_turns_into_a_lower_mount_lookup() {
+    let root = tempfile::TempDir::new().unwrap();
+    let game = root.path().join("game");
+    let first = game.join("garrysmod/garrysmod_dir.vpk");
+    write_vpk_fixture(
+        &first,
+        vec![("materials/large/name/a.vmt", b"UnlitGeneric {}".to_vec())],
+    );
+    write_vpk_fixture(
+        &game.join("garrysmod/fallbacks_dir.vpk"),
+        vec![("materials/target.vmt", b"UnlitGeneric {}".to_vec())],
+    );
+    let resolver = MaterialResolver::new_with_index_limits(
+        PreviewArchiveSource::from_folder([]),
+        Some(game),
+        vformats::ArchiveIndexLimits {
+            directory_bytes: 24,
+            ..Default::default()
+        },
+        Arc::new(TextureWorkingBudget::new(1024 * 1024)),
+    );
+    assert!(matches!(
+        resolver.resolve_primary(&[], "target"),
+        MaterialResolution::IndexUnavailable { .. }
+    ));
+    assert_eq!(resolver.game_vpks().unwrap().len(), 1);
+    assert_eq!(resolver.archive_index_stats().archives, 0);
+}
+
+#[test]
+fn cancelled_partial_sibling_index_releases_records_and_allows_another_token_to_retry() {
+    use std::{
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+    fn wait_queued(budget: &TextureWorkingBudget, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while budget.queued_requests() < count {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    for name in ["a", "b"] {
+        write_gma_fixture(
+            game.join(format!("garrysmod/addons/{name}.gma")),
+            &GmaFixtureBuilder::new(name)
+                .entry(format!("materials/{name}.vtf"), create_vtf_bytes(&[42; 16]))
+                .build(),
+        );
+    }
+    let working = Arc::new(TextureWorkingBudget::new(128 * 1024));
+    let resolver = MaterialResolver::new_with_index_limits(
+        PreviewArchiveSource::from_folder([]),
+        Some(game),
+        vformats::ArchiveIndexLimits::default(),
+        Arc::clone(&working),
+    );
+    let held = working.request(128 * 1024).unwrap().acquire();
+    let cancellation = crate::preparation::PreparationCancellation::default();
+    let cancelled = resolver.with_cancellation(cancellation.clone());
+    let worker =
+        thread::spawn(move || cancelled.selected_texture_asset(&content_path("materials/b.vtf")));
+    wait_queued(&working, 1);
+    let blocker_budget = Arc::clone(&working);
+    let (blocked_tx, blocked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let blocker = thread::spawn(move || {
+        let _lease = blocker_budget.request(128 * 1024).unwrap().acquire();
+        blocked_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    });
+    wait_queued(&working, 2);
+    drop(held);
+    blocked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_queued(&working, 1);
+    assert_eq!(resolver.archive_index_stats().archives, 1);
+    cancellation.cancel();
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(TextureSourceError::Preparation {
+            error: TextureAssetError::Cancelled(_),
+            ..
+        })
+    ));
+    assert_eq!(resolver.archive_index_stats().archives, 0);
+    assert_eq!(resolver.archive_index_stats().entries, 0);
+    assert!(resolver.shared.sibling_gmas.get_ref().is_none());
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    assert!(
+        resolver
+            .selected_texture_asset(&content_path("materials/b.vtf"))
+            .is_ok()
+    );
+    assert_eq!(resolver.archive_index_stats().archives, 2);
+    assert_eq!(working.current_bytes(), 0);
+}
+
+#[test]
+fn already_cancelled_source_factory_stops_before_discovery_or_pak_index() {
+    let token = crate::preparation::PreparationCancellation::default();
+    token.cancel();
+    let pak = MapPakFile::from_pak_bytes(zip_fixture([zip_stored_entry(
+        "materials/a.vtf",
+        create_vtf_bytes(&[42; 16]),
+    )]));
+    assert!(matches!(
+        MaterialResolver::with_pakfile_source_cancellable(
+            PreviewArchiveSource::from_folder([]),
+            Some(PathBuf::from("/unreadable-not-visited")),
+            pak.clone(),
+            vformats::ArchiveIndexLimits::default(),
+            Arc::new(TextureWorkingBudget::new(1024)),
+            token
+        ),
+        Err(crate::preparation::Cancelled)
+    ));
+    assert_eq!(pak.indexed_entries().unwrap().len(), 1);
+}

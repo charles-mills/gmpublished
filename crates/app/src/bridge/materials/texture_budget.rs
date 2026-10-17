@@ -39,6 +39,16 @@ impl DecodedTextureBudget {
         self.state.lock().cost.images
     }
 
+    pub(crate) fn reduced_images(&self) -> usize {
+        self.state
+            .lock()
+            .admitted
+            .iter()
+            .filter(|(id, _)| id.first_source_mip > 0)
+            .map(|(_, cost)| cost.images)
+            .sum()
+    }
+
     pub(crate) fn rejected_textures(&self) -> usize {
         self.state.lock().rejected.len()
     }

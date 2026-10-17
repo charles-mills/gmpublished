@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,19 +10,29 @@ use parking_lot::Mutex;
 
 use gmpublished_backend::GmaView;
 
-use super::{
-    ContentPath, GMA_MAGIC, MAX_LEGACY_BIN_ENTRY_TABLE_BYTES, MAX_LEGACY_BIN_FETCH_BYTES,
-    MAX_SIBLING_GMA_ARCHIVES, SourceError, normalize_archive_path,
-};
+use super::{ContentPath, MAX_LEGACY_BIN_FETCH_BYTES, SourceError, normalize_archive_path};
 
 #[derive(Debug)]
 pub(super) struct SiblingGmaIndex {
     archives: Vec<SiblingGmaArchive>,
     entries: HashMap<String, SiblingGmaEntryRef>,
     legacy_bin_cache: Mutex<Option<LegacyBinCache>>,
+    blocked: Option<vformats::ArchiveIndexLimit>,
+    _reservations: Vec<super::source_index::IndexReservation>,
 }
 
 impl SiblingGmaIndex {
+    pub(super) fn index_error(
+        &self,
+        path: Option<&ContentPath>,
+    ) -> Option<vformats::ArchiveIndexLimit> {
+        if path.is_some_and(|path| self.entries.contains_key(path.as_str())) {
+            None
+        } else {
+            self.blocked
+        }
+    }
+
     pub(super) fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
         self.entries.keys().for_each(|path| visit(path));
     }
@@ -47,8 +57,7 @@ impl SiblingGmaIndex {
         let archive = &self.archives[entry.archive_index];
         match &archive.kind {
             SiblingGmaArchiveKind::Plain { .. } => Ok(0),
-            SiblingGmaArchiveKind::LegacyBin { path, .. } => legacy_bin_working_bytes(path)
-                .map_err(|error| SourceError::SiblingGma(error.to_string())),
+            SiblingGmaArchiveKind::LegacyBin { header, .. } => Ok(header.working_bytes),
         }
     }
 
@@ -76,10 +85,11 @@ impl SiblingGmaIndex {
                     .map_err(|error| SourceError::SiblingGma(error.to_string()));
             }
             (
-                SiblingGmaArchiveKind::LegacyBin { path, .. },
+                SiblingGmaArchiveKind::LegacyBin { path, header, .. },
                 SiblingGmaEntryLocation::LegacyBin { offset, len },
             ) => {
-                let mut reader = legacy_bin_decoder_with_limit(path, decoder_limit)
+                let mut reader = LegacyBinSource::open_matching(path, *header)
+                    .and_then(|source| source.into_decoder(decoder_limit))
                     .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
                 let skipped = io::copy(&mut reader.by_ref().take(*offset), &mut io::sink())
                     .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
@@ -119,11 +129,16 @@ impl SiblingGmaIndex {
                 .map(Some)
                 .map_err(|error| SourceError::SiblingGma(error.to_string())),
             (
-                SiblingGmaArchiveKind::LegacyBin { path, data_end },
+                SiblingGmaArchiveKind::LegacyBin {
+                    path,
+                    data_end,
+                    header,
+                },
                 SiblingGmaEntryLocation::LegacyBin { offset, len },
             ) => Ok(self.legacy_bin_entry_bytes(
                 entry.archive_index,
                 path,
+                *header,
                 *data_end,
                 *offset,
                 *len,
@@ -136,6 +151,7 @@ impl SiblingGmaIndex {
         &self,
         archive_index: usize,
         path: &Path,
+        header: LegacyBinHeader,
         data_end: u64,
         offset: u64,
         len: u64,
@@ -165,7 +181,7 @@ impl SiblingGmaIndex {
         } else {
             end
         };
-        let bytes = match decompress_legacy_bin_prefix(path, target_end) {
+        let bytes = match decompress_legacy_bin_prefix(path, header, target_end) {
             Ok(bytes) => bytes,
             Err(error) => {
                 log::debug!(
@@ -193,8 +209,14 @@ pub(super) struct SiblingGmaArchive {
 
 #[derive(Debug)]
 pub(super) enum SiblingGmaArchiveKind {
-    Plain { path: PathBuf },
-    LegacyBin { path: PathBuf, data_end: u64 },
+    Plain {
+        path: PathBuf,
+    },
+    LegacyBin {
+        path: PathBuf,
+        data_end: u64,
+        header: LegacyBinHeader,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -243,214 +265,261 @@ pub(super) enum SiblingGmaPathKind {
     LegacyBin,
 }
 
-#[derive(Debug)]
-pub(super) struct LegacyBinEntry {
-    normalized_path: String,
-    offset: u64,
-    len: u64,
-}
-
-#[derive(Debug)]
-pub(super) struct LegacyBinIndex {
-    entries: Vec<LegacyBinEntry>,
-    data_end: u64,
-}
-
+#[cfg(test)]
 pub(super) fn build_sibling_gma_index(paths: &[SiblingGmaPath]) -> SiblingGmaIndex {
-    let skipped = paths.len().saturating_sub(MAX_SIBLING_GMA_ARCHIVES);
-    if skipped > 0 {
-        log::debug!(
-            "skipping {skipped} sibling material GMA archives over cap {MAX_SIBLING_GMA_ARCHIVES}"
-        );
-    }
+    build_sibling_gma_index_with_budget(paths, &super::SourceIndexBudget::defaults())
+}
 
-    // Nested Rayon requests can deadlock this OnceLock.
-    type IndexedArchive = (SiblingGmaArchive, Vec<(String, SiblingGmaEntryLocation)>);
-    let indexed: Vec<Option<IndexedArchive>> = paths[..paths.len().min(MAX_SIBLING_GMA_ARCHIVES)]
-        .iter()
-        .map(|path| match path.kind {
-            SiblingGmaPathKind::Plain => {
-                // Close after indexing so idle archives hold no file descriptors.
-                let view = match GmaView::open(&path.path) {
-                    Ok(view) => view,
-                    Err(error) => {
-                        log::debug!(
-                            "sibling material GMA open failed for {}: {error}",
-                            path.path.display()
-                        );
-                        return None;
-                    }
-                };
-                let bundle = match view.meta(&path.path) {
-                    Ok(bundle) => bundle,
-                    Err(error) => {
-                        log::debug!(
-                            "sibling material GMA entry table failed for {}: {error}",
-                            path.path.display()
-                        );
-                        return None;
-                    }
-                };
-                drop(view);
-                let entries = bundle
-                    .entries
-                    .into_iter()
-                    .filter_map(|entry| {
-                        let normalized = normalize_archive_path(&entry.path)?;
-                        Some((
-                            normalized,
-                            SiblingGmaEntryLocation::Plain {
-                                offset: entry.data_offset,
-                                len: entry.size,
-                            },
-                        ))
-                    })
-                    .collect();
-                Some((
-                    SiblingGmaArchive {
-                        kind: SiblingGmaArchiveKind::Plain {
-                            path: path.path.clone(),
-                        },
-                    },
-                    entries,
-                ))
-            }
-            SiblingGmaPathKind::LegacyBin => {
-                let legacy_index = match read_legacy_bin_index(&path.path) {
-                    Ok(index) => index,
-                    Err(error) => {
-                        log::debug!(
-                            "sibling material legacy GMA index failed for {}: {error}",
-                            path.path.display()
-                        );
-                        return None;
-                    }
-                };
-                let entries = legacy_index
-                    .entries
-                    .into_iter()
-                    .map(|entry| {
-                        (
-                            entry.normalized_path,
-                            SiblingGmaEntryLocation::LegacyBin {
-                                offset: entry.offset,
-                                len: entry.len,
-                            },
-                        )
-                    })
-                    .collect();
-                Some((
-                    SiblingGmaArchive {
-                        kind: SiblingGmaArchiveKind::LegacyBin {
-                            path: path.path.clone(),
-                            data_end: legacy_index.data_end,
-                        },
-                    },
-                    entries,
-                ))
-            }
+fn adapter_cost(
+    mut cost: vformats::ArchiveIndexCost,
+    path: &Path,
+) -> Result<vformats::ArchiveIndexCost, gmpublished_backend::GmaError> {
+    let overflow = || {
+        gmpublished_backend::GmaError::IndexLimit(vformats::ArchiveIndexLimit::arithmetic_overflow())
+    };
+    let per_entry = size_of::<gmpublished_backend::GmaIndexedEntry>()
+        + size_of::<(String, SiblingGmaEntryRef)>();
+    cost.record_bytes = cost
+        .record_bytes
+        .checked_add(
+            (cost.entries as u64)
+                .checked_mul(per_entry as u64)
+                .ok_or_else(overflow)?,
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (size_of::<SiblingGmaArchive>()
+                    + size_of::<super::source_index::IndexReservation>()) as u64,
+            )
         })
-        .collect();
+        .ok_or_else(overflow)?;
+    cost.string_bytes = cost
+        .string_bytes
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(path.as_os_str().len() as u64))
+        .ok_or_else(overflow)?;
+    Ok(cost)
+}
 
-    let mut archives = Vec::new();
-    let mut entries = HashMap::new();
-    for (archive, archive_entries) in indexed.into_iter().flatten() {
-        let archive_index = archives.len();
-        for (normalized, location) in archive_entries {
-            entries
+#[cfg(test)]
+pub(super) fn build_sibling_gma_index_with_budget(
+    paths: &[SiblingGmaPath],
+    budget: &Arc<super::SourceIndexBudget>,
+) -> SiblingGmaIndex {
+    build_sibling_gma_index_cancellable(
+        paths,
+        budget,
+        &crate::preparation::PreparationCancellation::default(),
+    )
+    .expect("uncancelled index construction")
+}
+
+enum IndexBuildError {
+    Cancelled(crate::preparation::Cancelled),
+    Gma(gmpublished_backend::GmaError),
+}
+impl From<crate::preparation::Cancelled> for IndexBuildError {
+    fn from(error: crate::preparation::Cancelled) -> Self {
+        Self::Cancelled(error)
+    }
+}
+impl From<std::io::Error> for IndexBuildError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Gma(error.into())
+    }
+}
+impl From<gmpublished_backend::GmaError> for IndexBuildError {
+    fn from(error: gmpublished_backend::GmaError) -> Self {
+        Self::Gma(error)
+    }
+}
+
+pub(super) fn build_sibling_gma_index_cancellable(
+    paths: &[SiblingGmaPath],
+    budget: &Arc<super::SourceIndexBudget>,
+    cancellation: &crate::preparation::PreparationCancellation,
+) -> Result<SiblingGmaIndex, crate::preparation::Cancelled> {
+    let mut index = SiblingGmaIndex {
+        archives: Vec::new(),
+        entries: HashMap::new(),
+        legacy_bin_cache: Mutex::new(None),
+        blocked: None,
+        _reservations: Vec::new(),
+    };
+    for path in paths {
+        cancellation.check()?;
+        let result = (|| {
+            let limits = budget.limits();
+            let (entries, kind) = match path.kind {
+                SiblingGmaPathKind::Plain => {
+                    let view = GmaView::open(&path.path)?;
+                    let _working = budget
+                        .working_request(64 * 1024)
+                        .map_err(gmpublished_backend::GmaError::IndexLimit)?
+                        .acquire_cancellable(cancellation)?;
+                    let cost = view.index_cost_with_limits(limits)?;
+                    let reservation = budget
+                        .reserve(adapter_cost(cost, &path.path)?)
+                        .map_err(gmpublished_backend::GmaError::IndexLimit)?;
+                    let bundle = view.meta_with_index_limits(&path.path, limits)?;
+                    index._reservations.push(reservation);
+                    (
+                        bundle.entries,
+                        SiblingGmaArchiveKind::Plain {
+                            path: path.path.clone(),
+                        },
+                    )
+                }
+                SiblingGmaPathKind::LegacyBin => {
+                    let mut source = LegacyBinSource::open(&path.path)?;
+                    let decoder_bytes = source.header.working_bytes;
+                    let working = decoder_bytes.checked_add(64 * 1024).ok_or_else(|| {
+                        gmpublished_backend::GmaError::IndexLimit(
+                            vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                        )
+                    })?;
+                    let _working = budget
+                        .working_request(working)
+                        .map_err(gmpublished_backend::GmaError::IndexLimit)?
+                        .acquire_cancellable(cancellation)?;
+                    let cost = GmaView::stream_index_cost(source.decoder()?, u64::MAX, limits)?;
+                    let reservation = budget
+                        .reserve(adapter_cost(cost, &path.path)?)
+                        .map_err(gmpublished_backend::GmaError::IndexLimit)?;
+                    let bundle = GmaView::stream_index(source.decoder()?, u64::MAX, limits, cost)?;
+                    let data_end = bundle.entries.last().map_or(cost.directory_bytes, |entry| {
+                        entry.data_offset.saturating_add(entry.size)
+                    });
+                    index._reservations.push(reservation);
+                    (
+                        bundle.entries,
+                        SiblingGmaArchiveKind::LegacyBin {
+                            path: path.path.clone(),
+                            data_end,
+                            header: source.header,
+                        },
+                    )
+                }
+            };
+            Ok::<_, IndexBuildError>((entries, kind))
+        })();
+        let (entries, kind) = match result {
+            Ok(indexed) => indexed,
+            Err(IndexBuildError::Cancelled(error)) => return Err(error),
+            Err(IndexBuildError::Gma(gmpublished_backend::GmaError::IndexLimit(error))) => {
+                index.blocked = Some(budget.reject(error));
+                break;
+            }
+            Err(IndexBuildError::Gma(error)) => {
+                log::debug!(
+                    "sibling GMA index failed for {}: {error}",
+                    path.path.display()
+                );
+                continue;
+            }
+        };
+        let archive_index = index.archives.len();
+        let legacy = matches!(kind, SiblingGmaArchiveKind::LegacyBin { .. });
+        for entry in entries {
+            let Some(normalized) = normalize_archive_path(&entry.path) else {
+                continue;
+            };
+            let location = if legacy {
+                SiblingGmaEntryLocation::LegacyBin {
+                    offset: entry.data_offset,
+                    len: entry.size,
+                }
+            } else {
+                SiblingGmaEntryLocation::Plain {
+                    offset: entry.data_offset,
+                    len: entry.size,
+                }
+            };
+            index
+                .entries
                 .entry(normalized)
-                .or_insert_with(|| SiblingGmaEntryRef {
+                .or_insert(SiblingGmaEntryRef {
                     archive_index,
                     location,
                 });
         }
-        archives.push(archive);
+        index.archives.push(SiblingGmaArchive { kind });
+    }
+    cancellation.check()?;
+    Ok(index)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct LegacyBinHeader {
+    bytes: [u8; 13],
+    working_bytes: usize,
+}
+
+impl LegacyBinHeader {
+    fn read(input: &mut impl Read) -> io::Result<Self> {
+        let bytes = read_array::<13, _>(input)?;
+        let working_bytes = legacy_decoder_working_bytes(
+            u32::from_le_bytes(bytes[1..5].try_into().expect("4 bytes")),
+            bytes[0],
+        )?;
+        Ok(Self {
+            bytes,
+            working_bytes,
+        })
     }
 
-    SiblingGmaIndex {
-        archives,
-        entries,
-        legacy_bin_cache: Mutex::new(None),
+    fn decoder<R: Read>(self, input: R) -> io::Result<lzma_rust2::LzmaReader<BufReader<R>>> {
+        lzma_rust2::LzmaReader::new_with_props(
+            BufReader::with_capacity(8192, input),
+            u64::from_le_bytes(self.bytes[5..13].try_into().expect("8 bytes")),
+            self.bytes[0],
+            u32::from_le_bytes(self.bytes[1..5].try_into().expect("4 bytes")),
+            None,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 }
 
-pub(super) fn read_legacy_bin_index(path: &Path) -> io::Result<LegacyBinIndex> {
-    let decoder = legacy_bin_decoder(path)?;
-    let limited = LimitedReader::new(decoder, MAX_LEGACY_BIN_ENTRY_TABLE_BYTES);
-    let mut reader = BufReader::with_capacity(64 * 1024, limited);
-    let magic = read_array::<4, _>(&mut reader)?;
-    if &magic != GMA_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "missing GMA header",
-        ));
-    }
-    let version = read_u8(&mut reader)?;
-    read_u64_le(&mut reader)?; // steamid
-    read_u64_le(&mut reader)?; // timestamp
-    if version > 1 {
-        read_nt_string(&mut reader)?;
-    }
-    read_nt_string(&mut reader)?; // title
-    read_nt_string(&mut reader)?; // description
-    read_nt_string(&mut reader)?; // author
-    read_i32_le(&mut reader)?; // addon version
+struct LegacyBinSource {
+    file: File,
+    header: LegacyBinHeader,
+}
 
-    let mut entries = Vec::new();
-    let mut entry_cursor = 0_u64;
-    loop {
-        let index = read_u32_le(&mut reader)?;
-        if index == 0 {
-            break;
+impl LegacyBinSource {
+    fn open(path: &Path) -> io::Result<Self> {
+        let mut file = File::open(path)?;
+        let header = LegacyBinHeader::read(&mut file)?;
+        Ok(Self { file, header })
+    }
+
+    fn open_matching(path: &Path, header: LegacyBinHeader) -> io::Result<Self> {
+        let source = Self::open(path)?;
+        if source.header != header {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "legacy GMA header changed after indexing",
+            ));
         }
-        let entry_path = read_nt_string(&mut reader)?;
-        let size = read_i64_le(&mut reader)?;
-        read_u32_le(&mut reader)?; // crc
-        let size = u64::try_from(size)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative GMA entry size"))?;
-        let offset = entry_cursor;
-        entry_cursor = entry_cursor.checked_add(size).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "GMA entry table overflow")
-        })?;
-        if let Some(normalized_path) = normalize_archive_path(&entry_path) {
-            entries.push(LegacyBinEntry {
-                normalized_path,
-                offset,
-                len: size,
-            });
+        Ok(source)
+    }
+
+    fn decoder(&mut self) -> io::Result<lzma_rust2::LzmaReader<BufReader<&mut File>>> {
+        self.file.seek(SeekFrom::Start(13))?;
+        self.header.decoder(&mut self.file)
+    }
+
+    fn into_decoder(self, limit: usize) -> io::Result<lzma_rust2::LzmaReader<BufReader<File>>> {
+        if self.header.working_bytes > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!(
+                    "LZMA decoder requires {} bytes; limit {limit}",
+                    self.header.working_bytes
+                ),
+            ));
         }
+        self.header.decoder(self.file)
     }
-
-    // Buffered payload bytes do not belong to the table.
-    let data_start = reader
-        .get_ref()
-        .bytes_read()
-        .saturating_sub(reader.buffer().len() as u64);
-    for entry in &mut entries {
-        entry.offset = entry.offset.checked_add(data_start).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "GMA entry offset overflow")
-        })?;
-    }
-    let data_end = data_start
-        .checked_add(entry_cursor)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "GMA data offset overflow"))?;
-    Ok(LegacyBinIndex { entries, data_end })
-}
-
-pub(super) fn legacy_bin_decoder(
-    path: &Path,
-) -> io::Result<lzma_rust2::LzmaReader<BufReader<File>>> {
-    legacy_bin_decoder_with_limit(
-        path,
-        usize::try_from(vformats::Limits::default().max_input_bytes).unwrap_or(usize::MAX),
-    )
-}
-
-pub(super) fn legacy_bin_working_bytes(path: &Path) -> io::Result<usize> {
-    let mut input = File::open(path)?;
-    let header = read_array::<13, _>(&mut input)?;
-    let dict = u32::from_le_bytes(header[1..5].try_into().expect("4 bytes"));
-    legacy_decoder_working_bytes(dict, header[0])
 }
 
 fn legacy_decoder_working_bytes(dict: u32, props: u8) -> io::Result<usize> {
@@ -464,45 +533,17 @@ fn legacy_decoder_working_bytes(dict: u32, props: u8) -> io::Result<usize> {
         })
 }
 
-fn legacy_bin_decoder_with_limit(
+fn decompress_legacy_bin_prefix(
     path: &Path,
-    limit: usize,
-) -> io::Result<lzma_rust2::LzmaReader<BufReader<File>>> {
-    let mut input = File::open(path)?;
-    let header = read_array::<13, _>(&mut input)?;
-    let props = header[0];
-    let dict_size = u32::from_le_bytes(
-        header[1..5]
-            .try_into()
-            .expect("slice length was checked above"),
-    );
-    let unpacked_size = u64::from_le_bytes(
-        header[5..13]
-            .try_into()
-            .expect("slice length was checked above"),
-    );
-    let required = legacy_decoder_working_bytes(dict_size, props)?;
-    if required > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            format!("LZMA decoder requires {required} bytes; limit {limit}"),
-        ));
-    }
-    lzma_rust2::LzmaReader::new_with_props(
-        BufReader::with_capacity(8192, input),
-        unpacked_size,
-        props,
-        dict_size,
-        None,
-    )
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
-pub(super) fn decompress_legacy_bin_prefix(path: &Path, target_len: u64) -> io::Result<Vec<u8>> {
+    header: LegacyBinHeader,
+    target_len: u64,
+) -> io::Result<Vec<u8>> {
     let target_len = target_len.min(MAX_LEGACY_BIN_FETCH_BYTES);
     let target_len_usize = usize::try_from(target_len)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "legacy GMA target too large"))?;
-    let mut decoder = legacy_bin_decoder(path)?;
+    let mut decoder = LegacyBinSource::open_matching(path, header)?.into_decoder(
+        usize::try_from(vformats::Limits::default().max_input_bytes).unwrap_or(usize::MAX),
+    )?;
     let mut bytes = Vec::with_capacity(target_len_usize.min(1024 * 1024));
     let mut chunk = [0_u8; 16 * 1024];
     while bytes.len() < target_len_usize {
@@ -531,77 +572,124 @@ pub(super) fn slice_legacy_bin_entry(bytes: &[u8], offset: u64, len: u64) -> Opt
     bytes.get(start..end)
 }
 
-pub(super) struct LimitedReader<R> {
-    inner: R,
-    bytes_read: u64,
-    limit: u64,
-}
-
-impl<R> LimitedReader<R> {
-    fn new(inner: R, limit: u64) -> Self {
-        Self {
-            inner,
-            bytes_read: 0,
-            limit,
-        }
-    }
-
-    fn bytes_read(&self) -> u64 {
-        self.bytes_read
-    }
-}
-
-impl<R: Read> Read for LimitedReader<R> {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if self.bytes_read >= self.limit {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "legacy GMA entry table exceeded decompressed cap",
-            ));
-        }
-        let remaining = usize::try_from(self.limit - self.bytes_read).unwrap_or(usize::MAX);
-        let read_len = output.len().min(remaining);
-        let n = self.inner.read(&mut output[..read_len])?;
-        self.bytes_read = self.bytes_read.saturating_add(n as u64);
-        Ok(n)
-    }
-}
-
 pub(super) fn read_array<const N: usize, R: Read>(reader: &mut R) -> io::Result<[u8; N]> {
     let mut bytes = [0_u8; N];
     reader.read_exact(&mut bytes)?;
     Ok(bytes)
 }
 
-pub(super) fn read_u8(reader: &mut impl Read) -> io::Result<u8> {
-    Ok(read_array::<1, _>(reader)?[0])
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{GmaFixtureBuilder, write_gma_fixture};
+    use std::io::Write;
 
-pub(super) fn read_u32_le(reader: &mut impl Read) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(read_array::<4, _>(reader)?))
-}
-
-pub(super) fn read_i32_le(reader: &mut impl Read) -> io::Result<i32> {
-    Ok(i32::from_le_bytes(read_array::<4, _>(reader)?))
-}
-
-pub(super) fn read_u64_le(reader: &mut impl Read) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(read_array::<8, _>(reader)?))
-}
-
-pub(super) fn read_i64_le(reader: &mut impl Read) -> io::Result<i64> {
-    Ok(i64::from_le_bytes(read_array::<8, _>(reader)?))
-}
-
-pub(super) fn read_nt_string(reader: &mut impl BufRead) -> io::Result<String> {
-    let mut bytes = Vec::new();
-    let read = reader.read_until(0, &mut bytes)?;
-    if read == 0 || bytes.last() != Some(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "unterminated GMA string",
-        ));
+    fn fixture(root: &Path) -> PathBuf {
+        let raw = write_gma_fixture(
+            root.join("source.gma"),
+            &GmaFixtureBuilder::new("Pinned header")
+                .entry("materials/a.vmt", b"UnlitGeneric {}".to_vec())
+                .build(),
+        );
+        let input = std::fs::read(raw).unwrap();
+        let mut encoder = lzma_rust2::LzmaWriter::new_use_header(
+            Vec::new(),
+            &lzma_rust2::LzmaOptions::with_preset(1),
+            None,
+        )
+        .unwrap();
+        encoder.write_all(&input).unwrap();
+        let path = root.join("source.bin");
+        std::fs::write(&path, encoder.finish().unwrap()).unwrap();
+        path
     }
-    bytes.pop();
-    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+
+    fn larger_dictionary(path: &Path, mut header: [u8; 13]) {
+        header[1..5].copy_from_slice(&(1024u32 * 1024 * 1024).to_le_bytes());
+        std::fs::write(path, header).unwrap();
+    }
+
+    #[test]
+    fn index_cost_and_both_scans_keep_the_original_opened_file_and_header() {
+        let root = tempfile::TempDir::new().unwrap();
+        let path = fixture(root.path());
+        let mut source = LegacyBinSource::open(&path).unwrap();
+        let header = source.header;
+        let budget = super::super::SourceIndexBudget::new(
+            vformats::ArchiveIndexLimits::default(),
+            Arc::new(super::super::TextureWorkingBudget::new(
+                header.working_bytes + 64 * 1024,
+            )),
+        );
+        let _working = budget.working(header.working_bytes + 64 * 1024).unwrap();
+        std::fs::rename(&path, root.path().join("original.bin")).unwrap();
+        larger_dictionary(&path, header.bytes);
+        let cost = GmaView::stream_index_cost(source.decoder().unwrap(), u64::MAX, budget.limits())
+            .unwrap();
+        let bundle =
+            GmaView::stream_index(source.decoder().unwrap(), u64::MAX, budget.limits(), cost)
+                .unwrap();
+        assert_eq!(bundle.entries.len(), 1);
+        assert_eq!(bundle.entries[0].path, "materials/a.vmt");
+        assert_eq!(source.header, header);
+        assert!(
+            matches!(LegacyBinSource::open_matching(&path, header), Err(error) if error.kind() == io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn excessive_dictionary_keeps_a_policy_barrier_before_any_later_archive() {
+        let root = tempfile::TempDir::new().unwrap();
+        let first = fixture(root.path());
+        let header = LegacyBinSource::open(&first).unwrap().header;
+        larger_dictionary(&first, header.bytes);
+        let second = write_gma_fixture(
+            root.path().join("later.gma"),
+            &GmaFixtureBuilder::new("Later")
+                .entry("materials/lower.vmt", b"UnlitGeneric {}".to_vec())
+                .build(),
+        );
+        let budget = super::super::SourceIndexBudget::new(
+            vformats::ArchiveIndexLimits::default(),
+            Arc::new(super::super::TextureWorkingBudget::new(64 * 1024)),
+        );
+        let index = build_sibling_gma_index_with_budget(
+            &[
+                SiblingGmaPath::legacy_bin(first),
+                SiblingGmaPath::plain(second),
+            ],
+            &budget,
+        );
+        assert!(index.archives.is_empty());
+        assert_eq!(
+            index
+                .index_error(Some(&ContentPath::new("materials/lower.vmt").unwrap()))
+                .unwrap()
+                .kind,
+            vformats::ArchiveIndexLimitKind::WorkingBytes
+        );
+        assert_eq!(budget.stats().archives, 0);
+        assert_eq!(budget.stats().rejected_archives, 1);
+    }
+
+    #[test]
+    fn payload_reads_reuse_the_admitted_header_cost_and_refuse_replacements() {
+        let root = tempfile::TempDir::new().unwrap();
+        let path = fixture(root.path());
+        let header = LegacyBinSource::open(&path).unwrap().header;
+        let index = build_sibling_gma_index(&[SiblingGmaPath::legacy_bin(path.clone())]);
+        let content = ContentPath::new("materials/a.vmt").unwrap();
+        assert_eq!(
+            index.texture_decoder_working_bytes(&content).unwrap(),
+            header.working_bytes
+        );
+        larger_dictionary(&path, header.bytes);
+        assert_eq!(
+            index.texture_decoder_working_bytes(&content).unwrap(),
+            header.working_bytes
+        );
+        assert!(
+            matches!(index.texture_entry_range(&content, 64, usize::MAX), Err(SourceError::SiblingGma(error)) if error == "legacy GMA header changed after indexing")
+        );
+    }
 }

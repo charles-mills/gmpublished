@@ -29,6 +29,12 @@ fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
             let _changed = state.apply_loaded(request_id, *result);
             Vec::new()
         }
+        Message::RenderFeedbackChanged(generation) => {
+            if !state.accepts_render_feedback(generation) {
+                return Vec::new();
+            }
+            Vec::new()
+        }
         Message::AnimationTick(now) => {
             state.tick_animation(now);
             if state.audio_playing()
@@ -104,6 +110,9 @@ fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
             state.set_map_visibility_enabled(enabled);
             Vec::new()
         }
+        Message::MapReducedTextureDetailToggled(reduced) => state
+            .reload_map_texture_quality(reduced)
+            .map_or_else(Vec::new, |request| vec![Effect::LoadRequested(request)]),
         Message::PhyDebugToggled(enabled) => {
             state.set_phy_debug_enabled(enabled);
             Vec::new()

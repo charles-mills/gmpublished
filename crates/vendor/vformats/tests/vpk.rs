@@ -385,3 +385,40 @@ fn duplicate_paths_keep_the_last_entry() {
         }
     }
 }
+
+#[test]
+fn shared_tree_prefix_path_expansion_is_charged_before_owned_strings() {
+    let directory = "d".repeat(4096);
+    let mut tree = b"vtf\0".to_vec();
+    tree.extend_from_slice(directory.as_bytes());
+    tree.push(0);
+    for index in 0..32 {
+        tree.extend_from_slice(format!("image{index}\0").as_bytes());
+        tree.extend_from_slice(&0u32.to_le_bytes());
+        tree.extend_from_slice(&0u16.to_le_bytes());
+        tree.extend_from_slice(&DIR_ARCHIVE_INDEX.to_le_bytes());
+        tree.extend_from_slice(&0u32.to_le_bytes());
+        tree.extend_from_slice(&0u32.to_le_bytes());
+        tree.extend_from_slice(&ENTRY_TERMINATOR.to_le_bytes());
+    }
+    tree.extend_from_slice(&[0, 0, 0]);
+    let mut bytes = VPK_SIGNATURE.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&tree);
+    let cost = vformats::vpk::index_cost(&bytes, &Limits::default()).unwrap();
+    assert_eq!(cost.entries, 32);
+    assert!(cost.string_bytes > bytes.len() as u64 * 20);
+    let strict = vformats::ArchiveIndexLimits {
+        retained_bytes: bytes.len() as u64 * 2,
+        ..Default::default()
+    };
+    assert!(matches!(
+        vformats::vpk::parse_with_index_limits(&bytes, &Limits::default(), strict),
+        Err(VpkError::IndexLimit(_))
+    ));
+    assert_eq!(
+        parse(&bytes, &Limits::default()).unwrap().entries().len(),
+        32
+    );
+}

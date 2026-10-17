@@ -8,6 +8,9 @@ const DEFAULT_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct TextureResourcePolicy {
+    pub source_discovery_limits: crate::bridge::materials::SourceDiscoveryLimits,
+    pub archive_index_limits: vformats::ArchiveIndexLimits,
+    pub archive_index_working_budget: Arc<TextureWorkingBudget>,
     pub resident_bytes: usize,
     pub resident_images: usize,
     pub source_encoded_bytes: usize,
@@ -24,6 +27,9 @@ impl Default for TextureResourcePolicy {
         static PAYLOAD: OnceLock<Arc<TextureWorkingBudget>> = OnceLock::new();
         static SOURCE: OnceLock<Arc<TextureWorkingBudget>> = OnceLock::new();
         Self {
+            source_discovery_limits: Default::default(),
+            archive_index_limits: vformats::ArchiveIndexLimits::default(),
+            archive_index_working_budget: MaterialResolver::default_archive_index_working_budget(),
             resident_bytes: DEFAULT_BYTES,
             resident_images: vformats::Limits::default().max_entries,
             source_encoded_bytes: DEFAULT_BYTES,
@@ -42,19 +48,10 @@ impl Default for TextureResourcePolicy {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MapTextureResidency {
-    pub max_dimension: u32,
+    pub max_dimension: Option<u32>,
     pub resources: TextureResourcePolicy,
-}
-
-impl Default for MapTextureResidency {
-    fn default() -> Self {
-        Self {
-            max_dimension: 512,
-            resources: TextureResourcePolicy::default(),
-        }
-    }
 }
 
 pub(super) struct TexturePreparationResources {
@@ -65,6 +62,42 @@ pub(super) struct TexturePreparationResources {
 }
 
 impl TexturePreparationResources {
+    pub fn for_archive_cancellable(
+        archive: Arc<crate::bridge::archive::PreviewArchiveSource>,
+        gmod_dir: Option<std::path::PathBuf>,
+        policy: &TextureResourcePolicy,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        let resolver = MaterialResolver::new_with_source_policy_cancellable(
+            archive,
+            gmod_dir,
+            policy.archive_index_limits,
+            Arc::clone(&policy.archive_index_working_budget),
+            policy.source_discovery_limits,
+            cancellation,
+        )?;
+        Ok(Self::new(&resolver, policy))
+    }
+
+    pub fn for_map_cancellable(
+        archive: Arc<crate::bridge::archive::PreviewArchiveSource>,
+        gmod_dir: Option<std::path::PathBuf>,
+        pakfile: gmpublished_domain::scene::map::MapPakFile,
+        policy: &TextureResourcePolicy,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        let resolver = MaterialResolver::with_pakfile_source_policy_cancellable(
+            archive,
+            gmod_dir,
+            pakfile,
+            policy.archive_index_limits,
+            Arc::clone(&policy.archive_index_working_budget),
+            policy.source_discovery_limits,
+            cancellation,
+        )?;
+        Ok(Self::new(&resolver, policy))
+    }
+
     pub fn new(resolver: &MaterialResolver, policy: &TextureResourcePolicy) -> Self {
         let encoded_budget = Arc::new(EncodedTextureBudget::new(policy.source_encoded_bytes));
         let texture_budget = Arc::new(DecodedTextureBudget::with_image_limit(
@@ -105,12 +138,25 @@ mod tests {
             &first.source_working_budget,
             &second.source_working_budget
         ));
+        assert!(Arc::ptr_eq(
+            &first.archive_index_working_budget,
+            &second.archive_index_working_budget
+        ));
         assert!(!Arc::ptr_eq(
             &first.working_budget,
             &first.source_working_budget
         ));
         assert_eq!(first.working_budget.capacity(), DEFAULT_BYTES);
         assert_eq!(first.source_working_budget.capacity(), DEFAULT_BYTES);
+        assert!(!Arc::ptr_eq(
+            &first.archive_index_working_budget,
+            &first.source_working_budget
+        ));
+        assert!(!Arc::ptr_eq(
+            &first.archive_index_working_budget,
+            &first.working_budget
+        ));
+        assert_eq!(first.archive_index_working_budget.capacity(), DEFAULT_BYTES);
     }
 
     #[test]

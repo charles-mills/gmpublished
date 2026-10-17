@@ -2,7 +2,6 @@
 @group(1) @binding(0) var sky_texture: texture_2d<f32>;
 @group(1) @binding(1) var sky_sampler: sampler;
 @group(1) @binding(2) var<uniform> sky: SkyMaterial;
-@group(1) @binding(3) var stars_sampler: sampler;
 
 struct SkyMaterial {
     kind: vec4<u32>,
@@ -89,14 +88,14 @@ fn painted_sky(direction: vec3<f32>) -> vec3<f32> {
     if d.z > 0.0 && sky.kind.y > 0u {
         let phase = sky.stars.w+sky.stars.z*uniforms.water_time_sky_tint.x;
         var uv = vec2<f32>(painted_asin(d.x)+sin(d.x)*(1.0-h)+phase,painted_asin(d.y)+sin(d.y)*(1.0-h));
-        var stars = textureSample(sky_texture,stars_sampler,uv*sky.stars.x).rgb;
+        var stars = textureSample(sky_texture,sky_sampler,uv*sky.stars.x).rgb;
         if sky.kind.y > 1u {
             uv.x -= phase*0.01+1.0;
-            stars += textureSample(sky_texture,stars_sampler,uv*sky.stars.x).rgb*0.5;
+            stars += textureSample(sky_texture,sky_sampler,uv*sky.stars.x).rgb*0.5;
         }
         if sky.kind.y > 2u {
             uv.x -= phase*0.02+1.0;
-            stars += textureSample(sky_texture,stars_sampler,uv*sky.stars.x).rgb*0.75;
+            stars += textureSample(sky_texture,sky_sampler,uv*sky.stars.x).rgb*0.75;
         }
         color += stars*pow(h,1.0/sky.stars.y);
     }

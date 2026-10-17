@@ -22,7 +22,7 @@ impl MaterialShader {
             if let Some(dimensions) = base.mapping_dimensions() {
                 return Some(dimensions);
             }
-            if base.load_outcome() == super::TextureLoadOutcome::SourceBudgetRejected {
+            if base.load_outcome().is_unavailable() {
                 return None;
             }
         }

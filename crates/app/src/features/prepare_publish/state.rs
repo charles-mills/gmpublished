@@ -811,6 +811,7 @@ impl State {
         let source = self.preview_source.as_ref()?;
         let entry = source.entry(entry_path).ok()?;
         Some(PreviewRequest {
+            cancellation: Default::default(),
             request_id: Generation::INITIAL,
             archive: Arc::clone(source),
             entry_path: entry_path.to_owned(),
@@ -822,6 +823,7 @@ impl State {
             size_bytes: entry.size,
             crc32: entry.crc32,
             bypass_size_limits: false,
+            map_texture_quality: Default::default(),
         })
     }
 

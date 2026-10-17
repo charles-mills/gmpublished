@@ -9,10 +9,11 @@ use gmpublished_domain::scene::map::LightmapAtlas;
 pub struct Frame {
     texture: UploadedTexture,
     uploader: SharedUploader,
-    pub view: wgpu::TextureView,
+    pub view: super::texture_upload::UploadedView,
     /// Water filters encoded lightmap bytes; diffuse uses sRGB.
-    pub raw_view: wgpu::TextureView,
+    pub raw_view: super::texture_upload::UploadedView,
     values: [f32; 256],
+    used_styles: super::model_lighting::UsedStyles<256>,
 }
 impl Frame {
     pub(super) fn new(uploader: &SharedUploader, atlas: Option<&LightmapAtlas>) -> Self {
@@ -60,12 +61,18 @@ impl Frame {
             view,
             raw_view,
             values: atlas.map_or([1.0; 256], |a| a.style_values(0.0)),
+            used_styles: super::model_lighting::UsedStyles::new(
+                atlas
+                    .into_iter()
+                    .flat_map(LightmapAtlas::active_styles)
+                    .map(usize::from),
+            ),
         }
     }
     pub fn update(&mut self, atlas: Option<&LightmapAtlas>, time: f32) {
         let Some(atlas) = atlas else { return };
         let next = atlas.style_values(time);
-        if self.values == next {
+        if !self.used_styles.changed(&self.values, &next) {
             return;
         }
         let mut uploader = self.uploader.lock().expect("texture uploader lock");

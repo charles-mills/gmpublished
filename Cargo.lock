@@ -1527,6 +1527,7 @@ dependencies = [
  "iced",
  "iced_runtime",
  "iced_test",
+ "iced_wgpu",
  "image",
  "jiff",
  "log",
@@ -1566,6 +1567,7 @@ dependencies = [
  "dunce",
  "gmpublished-backend",
  "image",
+ "keyvalues-parser",
  "log",
  "lzma-rust2",
  "nucleo-matcher",
@@ -5314,8 +5316,6 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "27.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27a75de515543b1897b26119f93731b385a19aea165a1ec5f0e3acecc229cae7"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -5373,8 +5373,6 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "27.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b21cb61c57ee198bc4aff71aeadff4cbb80b927beb912506af9c780d64313ce"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -5422,8 +5420,6 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "27.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afdcf84c395990db737f2dd91628706cb31e86d72e53482320d368e52b5da5eb"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",

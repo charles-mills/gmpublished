@@ -351,18 +351,29 @@ fn detail_sprite_fast_eligible(prop: &vformats::bsp::DetailProp) -> bool {
         && prop.sway_amount == 0
 }
 
+pub(super) struct DetailSpritePlacements {
+    pub world: Vec<MapDetailSprite>,
+    pub skybox: Vec<MapDetailSprite>,
+    pub invalid_leaves: u32,
+}
+
 pub(super) fn partitioned_detail_sprite_placements(
     bsp: &MapBsp,
     partition: &SkyboxPartition,
-) -> (Vec<MapDetailSprite>, Vec<MapDetailSprite>) {
+) -> DetailSpritePlacements {
     let sprites = bsp.detail_sprites();
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
+    let mut invalid_leaves = 0_u32;
     let cluster_count = bsp.cluster_count();
     for prop in bsp.detail_props_iter() {
         if prop.prop_type != DETAIL_PROP_TYPE_SPRITE {
             continue;
         }
+        let Some(leaf) = bsp.leaves.get(usize::from(prop.leaf)) else {
+            invalid_leaves = invalid_leaves.saturating_add(1);
+            continue;
+        };
         if prop.orientation > 2 {
             log::warn!("unsupported detail sprite orientation {}", prop.orientation);
             continue;
@@ -380,10 +391,7 @@ pub(super) fn partitioned_detail_sprite_placements(
             orientation: prop.orientation,
             fast_eligible: detail_sprite_fast_eligible(prop),
             leaf_index: prop.leaf,
-            underwater_leaf: bsp
-                .leaves
-                .get(usize::from(prop.leaf))
-                .is_some_and(|leaf| leaf.leaf_water_data >= 0),
+            underwater_leaf: leaf.leaf_water_data >= 0,
             upper_left: sprite
                 .upper_left
                 .map(|value| value * detail_sprite_scale(prop.scale)),
@@ -392,14 +400,18 @@ pub(super) fn partitioned_detail_sprite_placements(
                 .map(|value| value * detail_sprite_scale(prop.scale)),
             tex_upper_left: sprite.tex_upper_left,
             tex_lower_right: sprite.tex_lower_right,
-            visibility: point_visibility_bucket(bsp, Vec3::from(prop.origin), cluster_count),
+            visibility: super::visibility::visibility_bucket(leaf.cluster, cluster_count),
         };
-        match partition.point_partition(bsp, placement.origin) {
+        match partition.cluster_partition(leaf.cluster) {
             GeometryPartition::Visible => visible.push(placement),
             GeometryPartition::Skybox => skybox.push(placement),
         }
     }
-    (visible, skybox)
+    DetailSpritePlacements {
+        world: visible,
+        skybox,
+        invalid_leaves,
+    }
 }
 
 #[cfg(test)]

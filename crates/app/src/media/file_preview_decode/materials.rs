@@ -2,7 +2,7 @@ use super::map_preview::{MaterialTable, parallel_collect};
 use super::{
     Arc, DetailSprite, HashMap, HashSet, MAP_DETAIL_SPRITE_PLACEMENT_CAP, MapDetailSprite,
     MapOverlay, MaterialResolution, MaterialResolver, MaterialSlot, OverlayPrimitive, RenderMode,
-    ResolvedMaterialTextures, SKYBOX_FACE_DIMENSION_CAP, Skybox, SkyboxFace,
+    ResolvedMaterialTextures, Skybox, SkyboxFace,
 };
 use gmpublished_domain::scene::map::{
     MapDecal, MapReceiverMesh, MapSurfaceMarkSource, MapSurfaceProjector,
@@ -15,15 +15,30 @@ pub(super) fn resolve_texture_jobs<T: Sync + Send, R: Send>(
 ) -> Vec<R> {
     let mut requests = crate::bridge::materials::TextureRequestPlan::default();
     for job in jobs {
+        if resolver.check_cancelled().is_err() {
+            return Vec::new();
+        }
         let (_, plan) = resolver.plan_texture_requests(|planning| resolve(job, planning));
         requests.append(plan);
+    }
+    if resolver.check_cancelled().is_err() {
+        return Vec::new();
     }
     let cost = requests.cost();
     let admissions = resolver.admit_texture_requests(requests);
     debug_assert_eq!(cost, admissions.cost());
     log::debug!("texture request plan: {cost:?}");
     let admitted = resolver.with_texture_admissions(admissions);
-    parallel_collect(jobs, |job| resolve(job, &admitted))
+    parallel_collect(jobs, |job| {
+        if admitted.check_cancelled().is_err() {
+            None
+        } else {
+            Some(resolve(job, &admitted))
+        }
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub(super) fn resolve_map_material_slots_parallel(
@@ -465,18 +480,6 @@ pub(super) fn resolve_skybox(
         let Some(texture) = material.texture else {
             continue;
         };
-        if texture.width() > SKYBOX_FACE_DIMENSION_CAP
-            || texture.height() > SKYBOX_FACE_DIMENSION_CAP
-        {
-            log::debug!(
-                "map skybox {skyname}: dropped {} face {}x{} over {} cap",
-                face.suffix(),
-                texture.width(),
-                texture.height(),
-                SKYBOX_FACE_DIMENSION_CAP
-            );
-            continue;
-        }
         faces[face.index()] = Some(texture);
     }
 

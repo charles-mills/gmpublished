@@ -1,15 +1,10 @@
-//! Minimal ZIP reading for BSP pakfile lumps — the crate's own
-//! rather than a dependency on (a fork of) the `zip` crate.
-//! Central directory driven; STORE entries are zero-copy
-//! borrows, DEFLATE entries inflate via this crate's own decoder,
-//! and LZMA entries decompress behind the `lzma` feature.
-
 use std::borrow::Cow;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use super::inflate::{self, inflate};
-use crate::Limits;
+use crate::{ArchiveIndexCost, ArchiveIndexLimit, ArchiveIndexLimits, Limits};
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
@@ -23,16 +18,117 @@ const METHOD_DEFLATE: u16 = 8;
 #[cfg(feature = "lzma")]
 const METHOD_LZMA: u16 = 14;
 
-/// Monotonic source for [`ZipReader`] identity tokens (see
-/// [`ZipReader::entry_bytes`]).
-static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A ZIP archive view over borrowed bytes (central-directory driven).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ZipReader<'a> {
-    entries: Vec<ZipEntry>,
+    directory: Arc<ZipDirectory>,
     bytes: &'a [u8],
+}
+
+impl fmt::Debug for ZipReader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZipReader")
+            .field("byte_len", &self.bytes.len())
+            .field("entry_count", &self.directory.entries.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ZipDirectory {
+    entries: Vec<ZipEntry>,
     id: u64,
+}
+
+/// Shared archive bytes with one lazily parsed directory.
+#[derive(Clone)]
+pub struct ZipArchive {
+    inner: Arc<ArchiveData>,
+}
+
+struct ArchiveData {
+    bytes: Arc<[u8]>,
+    preflight: OnceLock<Result<DirectorySummary, ZipError>>,
+    directory: OnceLock<Result<Arc<ZipDirectory>, ZipError>>,
+    #[cfg(test)]
+    parses: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    preflight_runs: std::sync::atomic::AtomicUsize,
+}
+
+#[allow(missing_docs)]
+impl ZipArchive {
+    /// Retain immutable archive bytes without parsing.
+    pub fn new(bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self {
+            inner: Arc::new(ArchiveData {
+                bytes: bytes.into(),
+                preflight: OnceLock::new(),
+                directory: OnceLock::new(),
+                #[cfg(test)]
+                parses: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                preflight_runs: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    pub fn index_cost(&self) -> Result<ArchiveIndexCost, ZipError> {
+        self.summary().map(|summary| summary.cost)
+    }
+
+    fn summary(&self) -> Result<&DirectorySummary, ZipError> {
+        self.inner
+            .preflight
+            .get_or_init(|| {
+                #[cfg(test)]
+                self.inner.preflight_runs.fetch_add(1, Ordering::Relaxed);
+                ZipDirectory::preflight(&self.inner.bytes)
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    pub fn reader(&self) -> Result<ZipReader<'_>, ZipError> {
+        self.reader_with_index_limits(ArchiveIndexLimits::default())
+    }
+
+    pub fn reader_with_index_limits(
+        &self,
+        limits: ArchiveIndexLimits,
+    ) -> Result<ZipReader<'_>, ZipError> {
+        let summary = self.summary()?;
+        limits.check(summary.cost).map_err(ZipError::IndexLimit)?;
+        let directory = self.inner.directory.get_or_init(|| {
+            #[cfg(test)]
+            self.inner.parses.fetch_add(1, Ordering::Relaxed);
+            ZipDirectory::materialize(&self.inner.bytes, summary).map(Arc::new)
+        });
+        match directory {
+            Ok(directory) => Ok(ZipReader {
+                bytes: &self.inner.bytes,
+                directory: Arc::clone(directory),
+            }),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+impl PartialEq for ZipArchive {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.bytes == other.inner.bytes
+    }
+}
+impl Eq for ZipArchive {}
+
+impl fmt::Debug for ZipArchive {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZipArchive")
+            .field("byte_len", &self.inner.bytes.len())
+            .finish()
+    }
 }
 
 /// One archive entry.
@@ -49,19 +145,11 @@ pub struct ZipEntry {
     method: u16,
     compressed_size: usize,
     local_offset: usize,
-    /// Identity of the [`ZipReader`] that produced this entry; checked
-    /// by [`ZipReader::entry_bytes`] so an entry from one archive can't
-    /// be used to read bytes out of a different one.
-    reader_id: u64,
+    directory_id: u64,
 }
 
 impl ZipEntry {
-    /// Whether extracting this entry to disk under [`path`](Self::path)
-    /// could escape the extraction root (traversal, absolute paths,
-    /// backslashes — see [`crate::is_unsafe_entry_path`]). Unlike the
-    /// GMA and VPK parsers, the pakfile reader does not reject such
-    /// entries at parse: third-party map packers write nonconforming
-    /// paths, and lookup-by-path use is harmless. Extractors MUST check.
+    /// Whether the path escapes an extraction root; check before writing files.
     #[must_use]
     pub fn path_is_unsafe(&self) -> bool {
         crate::is_unsafe_entry_path(&self.path)
@@ -72,6 +160,8 @@ impl ZipEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ZipError {
+    #[allow(missing_docs)]
+    IndexLimit(ArchiveIndexLimit),
     /// No end-of-central-directory record found.
     MissingDirectory,
     /// A directory or local record is malformed or out of bounds.
@@ -96,14 +186,14 @@ pub enum ZipError {
     /// A compressed entry's stream is invalid or disagrees with the
     /// declared uncompressed size.
     Decode,
-    /// The entry was produced by a different [`ZipReader`], so its
-    /// offsets are meaningless against this one's bytes.
+    /// The entry belongs to another archive directory.
     ForeignEntry,
 }
 
 impl fmt::Display for ZipError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::IndexLimit(error) => error.fmt(f),
             Self::MissingDirectory => write!(f, "zip end-of-central-directory not found"),
             Self::Corrupt => write!(f, "zip directory or entry record is malformed"),
             Self::UnsupportedCompression { method } => {
@@ -116,7 +206,7 @@ impl fmt::Display for ZipError {
                 write!(f, "ZIP decoder requires {required} bytes; limit {max}")
             }
             Self::Decode => write!(f, "zip entry stream is invalid"),
-            Self::ForeignEntry => write!(f, "zip entry belongs to a different reader"),
+            Self::ForeignEntry => write!(f, "zip entry belongs to another archive directory"),
         }
     }
 }
@@ -131,25 +221,27 @@ fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-impl<'a> ZipReader<'a> {
-    /// Parse an archive's central directory. An empty input yields an
-    /// empty reader (maps without embedded content have empty pakfile
-    /// lumps).
-    pub fn parse(bytes: &'a [u8]) -> Result<Self, ZipError> {
-        let id = NEXT_READER_ID.fetch_add(1, Ordering::Relaxed);
+#[derive(Clone, Copy, Debug)]
+struct DirectorySummary {
+    cost: ArchiveIndexCost,
+    offset: usize,
+    end: usize,
+}
+
+impl ZipDirectory {
+    fn preflight(bytes: &[u8]) -> Result<DirectorySummary, ZipError> {
         if bytes.is_empty() {
-            return Ok(Self {
-                entries: Vec::new(),
-                bytes,
-                id,
+            return Ok(DirectorySummary {
+                cost: ArchiveIndexCost::default(),
+                offset: 0,
+                end: 0,
             });
         }
-        // EOCD: scan backwards over the (bounded, u16) trailing comment.
-        let mut eocd = None;
         let earliest = bytes
             .len()
             .saturating_sub(EOCD_BYTES + usize::from(u16::MAX));
         let mut candidate = bytes.len().checked_sub(EOCD_BYTES);
+        let mut eocd = None;
         while let Some(at) = candidate {
             if read_u32(bytes, at) == Some(EOCD_SIGNATURE) {
                 eocd = Some(at);
@@ -161,17 +253,66 @@ impl<'a> ZipReader<'a> {
             candidate = at.checked_sub(1);
         }
         let eocd = eocd.ok_or(ZipError::MissingDirectory)?;
-        let entry_count = usize::from(read_u16(bytes, eocd + 10).ok_or(ZipError::Corrupt)?);
-        let directory_offset =
-            usize::try_from(read_u32(bytes, eocd + 16).ok_or(ZipError::Corrupt)?)
-                .map_err(|_| ZipError::Corrupt)?;
-
-        let mut entries = Vec::with_capacity(entry_count);
-        let mut at = directory_offset;
-        for _ in 0..entry_count {
+        let entries = usize::from(read_u16(bytes, eocd + 10).ok_or(ZipError::Corrupt)?);
+        if read_u16(bytes, eocd + 4) != Some(0)
+            || read_u16(bytes, eocd + 6) != Some(0)
+            || read_u16(bytes, eocd + 8) != Some(entries as u16)
+        {
+            return Err(ZipError::Corrupt);
+        }
+        let directory_bytes = u64::from(read_u32(bytes, eocd + 12).ok_or(ZipError::Corrupt)?);
+        let offset = usize::try_from(read_u32(bytes, eocd + 16).ok_or(ZipError::Corrupt)?)
+            .map_err(|_| ZipError::Corrupt)?;
+        let end = offset
+            .checked_add(usize::try_from(directory_bytes).map_err(|_| ZipError::Corrupt)?)
+            .filter(|end| *end <= eocd)
+            .ok_or(ZipError::Corrupt)?;
+        if entries
+            .checked_mul(CENTRAL_BYTES)
+            .is_none_or(|minimum| minimum > end - offset)
+        {
+            return Err(ZipError::Corrupt);
+        }
+        let mut cost = ArchiveIndexCost {
+            directory_bytes,
+            entries,
+            record_bytes: (entries as u64)
+                .checked_mul(std::mem::size_of::<ZipEntry>() as u64)
+                .ok_or(ZipError::Corrupt)?,
+            ..ArchiveIndexCost::default()
+        };
+        let mut at = offset;
+        for _ in 0..entries {
             if read_u32(bytes, at) != Some(CENTRAL_SIGNATURE) {
                 return Err(ZipError::Corrupt);
             }
+            let name_len = usize::from(read_u16(bytes, at + 28).ok_or(ZipError::Corrupt)?);
+            let extra_len = usize::from(read_u16(bytes, at + 30).ok_or(ZipError::Corrupt)?);
+            let comment_len = usize::from(read_u16(bytes, at + 32).ok_or(ZipError::Corrupt)?);
+            let name_start = at.checked_add(CENTRAL_BYTES).ok_or(ZipError::Corrupt)?;
+            let name_end = name_start.checked_add(name_len).ok_or(ZipError::Corrupt)?;
+            let next = name_end
+                .checked_add(extra_len)
+                .and_then(|end| end.checked_add(comment_len))
+                .filter(|next| *next <= end)
+                .ok_or(ZipError::Corrupt)?;
+            let name = bytes.get(name_start..name_end).ok_or(ZipError::Corrupt)?;
+            cost.string_bytes = cost
+                .string_bytes
+                .checked_add(
+                    crate::archive_index::lossy_utf8_len(name).ok_or(ZipError::Corrupt)? as u64,
+                )
+                .ok_or(ZipError::Corrupt)?;
+            at = next;
+        }
+        Ok(DirectorySummary { cost, offset, end })
+    }
+
+    fn materialize(bytes: &[u8], summary: &DirectorySummary) -> Result<Self, ZipError> {
+        let id = NEXT_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+        let mut entries = Vec::with_capacity(summary.cost.entries);
+        let mut at = summary.offset;
+        for _ in 0..summary.cost.entries {
             let method = read_u16(bytes, at + 10).ok_or(ZipError::Corrupt)?;
             let crc32 = read_u32(bytes, at + 16).ok_or(ZipError::Corrupt)?;
             let compressed_size =
@@ -193,30 +334,52 @@ impl<'a> ZipReader<'a> {
                 method,
                 compressed_size,
                 local_offset,
-                reader_id: id,
+                directory_id: id,
             });
             at = at
                 .checked_add(CENTRAL_BYTES + name_len + extra_len + comment_len)
+                .filter(|at| *at <= summary.end)
                 .ok_or(ZipError::Corrupt)?;
         }
+        Ok(Self { entries, id })
+    }
+}
 
-        Ok(Self { entries, bytes, id })
+#[allow(missing_docs)]
+impl<'a> ZipReader<'a> {
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, ZipError> {
+        Self::parse_with_index_limits(bytes, ArchiveIndexLimits::default())
+    }
+
+    pub fn parse_with_index_limits(
+        bytes: &'a [u8],
+        limits: ArchiveIndexLimits,
+    ) -> Result<Self, ZipError> {
+        let summary = ZipDirectory::preflight(bytes)?;
+        limits.check(summary.cost).map_err(ZipError::IndexLimit)?;
+        Ok(Self {
+            directory: Arc::new(ZipDirectory::materialize(bytes, &summary)?),
+            bytes,
+        })
     }
 
     /// All entries, directory order.
     #[must_use]
     pub fn entries(&self) -> &[ZipEntry] {
-        &self.entries
+        &self.directory.entries
     }
 
     /// Look up one entry by exact path.
     #[must_use]
     pub fn get(&self, path: &str) -> Option<&ZipEntry> {
-        self.entries.iter().find(|entry| entry.path == path)
+        self.directory
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
     }
 
     fn entry_data(&self, entry: &ZipEntry) -> Result<&'a [u8], ZipError> {
-        if entry.reader_id != self.id {
+        if entry.directory_id != self.directory.id {
             return Err(ZipError::ForeignEntry);
         }
         let local = entry.local_offset;
@@ -380,3 +543,6 @@ fn decompress_zip_lzma(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests;

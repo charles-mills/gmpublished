@@ -15,7 +15,7 @@ use vformats::{
     bsp::{
         self, Brush, BrushSide, BspModel, ColorRgbExp, DetailProp, DetailProps, DispInfo, DispVert,
         Face, Leaf, LeafAmbientIndex, LeafAmbientSample, Node, Overlay, Plane, StaticProp,
-        StaticProps, TexData, TexInfo, Visibility, ZipReader, contents_flags, texture_flags,
+        StaticProps, TexData, TexInfo, Visibility, ZipArchive, contents_flags, texture_flags,
     },
     keyvalues::KvValue,
 };
@@ -141,8 +141,9 @@ use visibility::{
     point_visibility_bucket,
 };
 pub use visibility::{
-    MapBrushModelRendering, MapBrushSurfaceGroup, MapDecalProjection, MapDisplacementRendering,
-    MapVisibility, MapWorldMaterialGroup, MapWorldSurfaceGroup, MapWorldSurfaceRendering,
+    MapBoundsCullMask, MapBoundsCulling, MapBrushModelRendering, MapBrushSurfaceGroup,
+    MapDecalProjection, MapDisplacementRendering, MapVisibility, MapWorldMaterialGroup,
+    MapWorldSurfaceGroup, MapWorldSurfaceRendering,
 };
 use walk::{
     BoundsBuilder, MapLeafLocator, SKYBOX_COMPLETION_AABB_EXPANSION,
@@ -234,6 +235,7 @@ fn prepare_map(
         cluster_count: bsp.cluster_count(),
         version,
         lightmap: MapLightmapStats::default(),
+        invalid_detail_leaves: 0,
     };
     let player_start = info_player_start(&bsp.entities);
     let sky_camera = map_sky_camera(&bsp.entities);
@@ -366,8 +368,10 @@ fn prepare_map(
     static_props.append(&mut entity_props);
     skybox_static_props.append(&mut skybox_entity_props);
     let detail_material_name = worldspawn_detail_material_name(&bsp.entities);
-    let (detail_sprites, skybox_detail_sprites) =
-        partitioned_detail_sprite_placements(&bsp, &skybox_partition);
+    let details = partitioned_detail_sprite_placements(&bsp, &skybox_partition);
+    stats.invalid_detail_leaves = details.invalid_leaves;
+    let detail_sprites = details.world;
+    let skybox_detail_sprites = details.skybox;
     let ambient = map_ambient_lighting(&bsp);
     let world_lighting = map_world_lighting(&bsp, lightmap_source, ambient.source());
     let environment_lighting = map_environment_lighting(&bsp.entities);

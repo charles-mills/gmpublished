@@ -225,21 +225,25 @@ fn rejects_bad_magic_version_format_and_volume() {
 }
 
 #[test]
-fn face_count_follows_the_vtflib_spheremap_rule() {
-    let mut envmap = Fixture::new(4, 4, RGBA8888, 1);
-    envmap.flags = texture_flags::ENVMAP;
-    envmap.first_frame = 0xFFFF;
-    envmap.payload = vec![0; 4 * 4 * 4 * 6];
-    assert_eq!(parse(&envmap.bytes(), &limits()).unwrap().face_count(), 6);
-
-    envmap.first_frame = 0; // pre-7.5 with a spheremap
-    envmap.payload = vec![0; 4 * 4 * 4 * 7];
-    assert_eq!(parse(&envmap.bytes(), &limits()).unwrap().face_count(), 7);
-
-    envmap.minor = 5;
-    envmap.payload = vec![0; 4 * 4 * 4 * 6];
-    assert_eq!(parse(&envmap.bytes(), &limits()).unwrap().face_count(), 6);
-
+fn stored_face_count_follows_source_version_and_preserves_first_frame() {
+    for minor in 0..=5 {
+        for first_frame in [0, u16::MAX] {
+            let mut envmap = Fixture::new(4, 4, RGBA8888, 1);
+            envmap.minor = minor;
+            envmap.flags = texture_flags::ENVMAP;
+            envmap.first_frame = first_frame;
+            let expected = match minor {
+                1..=4 => 7,
+                _ => 6,
+            };
+            envmap.payload = vec![0; 4 * 4 * 4 * expected];
+            let bytes = envmap.bytes();
+            let parsed = parse(&bytes, &limits()).unwrap();
+            assert_eq!(parsed.face_count(), expected as u32);
+            assert_eq!(parsed.first_frame(), first_frame);
+            assert!(inspect_header(&bytes, bytes.len() as u64, &limits()).is_ok());
+        }
+    }
     let plain = Fixture::new(4, 4, RGBA8888, 1);
     assert_eq!(parse(&plain.bytes(), &limits()).unwrap().face_count(), 1);
 }
@@ -279,6 +283,7 @@ fn frame_and_mip_addressing_matches_the_wire_layout() {
 fn cubemap_faces_address_independently() {
     let mut fx = Fixture::new(1, 1, RGBA8888, 1);
     fx.flags = texture_flags::ENVMAP;
+    fx.minor = 5;
     fx.first_frame = 0xFFFF;
     fx.payload = (0..6u8).flat_map(|f| [f, f, f, 255]).collect();
     let bytes = fx.bytes();
@@ -614,13 +619,13 @@ fn full_mip_chain_matches_the_vtf_crate_frame_size_walk() {
 #[test]
 fn checked_descriptors_preserve_versions_frames_faces_and_authored_levels() {
     for minor in 0..=5 {
-        for legacy_sphere in [false, true] {
+        for sentinel in [false, true] {
             let mut fixture = Fixture::new(4, 2, RGBA8888, 3);
             fixture.minor = minor;
             fixture.frames = 2;
             fixture.flags = texture_flags::ENVMAP;
-            fixture.first_frame = if legacy_sphere { 0 } else { u16::MAX };
-            let faces = if minor < 5 && legacy_sphere { 7 } else { 6 };
+            fixture.first_frame = if sentinel { u16::MAX } else { 0 };
+            let faces = if (1..=4).contains(&minor) { 7 } else { 6 };
             for mip in (0..3).rev() {
                 for frame in 0..2 {
                     for face in 0..faces {
@@ -766,6 +771,7 @@ fn header_inspection_preserves_hdr_and_legacy_cube_layout_and_resource_offsets()
     let mut fixture = Fixture::new(1, 1, 24, 1);
     fixture.minor = 4;
     fixture.flags = texture_flags::ENVMAP;
+    fixture.first_frame = u16::MAX;
     fixture.payload = vec![0; 8 * 7];
     let bytes = fixture.bytes();
     let header = inspect_header(&bytes[..80], bytes.len() as u64, &limits()).unwrap();
@@ -833,4 +839,64 @@ fn region_decode_validates_all_ranges_before_writing() {
         );
         assert_eq!(output, [191; 16]);
     }
+}
+
+#[test]
+fn source_legacy_sentinel_cubemap_requires_the_seventh_face_at_every_mip() {
+    let mut fixture = Fixture::new(32, 32, RGBA8888, 6);
+    fixture.flags = texture_flags::ENVMAP;
+    fixture.first_frame = u16::MAX;
+    for mip in (0..6_u8).rev() {
+        for face in 0..6_u8 {
+            fixture
+                .payload
+                .extend([mip, 0, face, 255].repeat((32_usize >> mip).pow(2)));
+        }
+    }
+    let six = fixture.bytes();
+    assert_eq!(six.len(), 32_840);
+    assert_eq!(
+        inspect_header(&six[..80], six.len() as u64, &limits()),
+        Err(VtfError::Truncated {
+            needed: 38_300,
+            available: 32_840
+        })
+    );
+    fixture.payload.clear();
+    fixture.frames = 2;
+    for mip in (0..6_u8).rev() {
+        for frame in 0..2_u8 {
+            for face in 0..7_u8 {
+                fixture
+                    .payload
+                    .extend([mip, frame, face, 255].repeat((32_usize >> mip).pow(2)));
+            }
+        }
+    }
+    let seven = fixture.bytes();
+    let parsed = parse(&seven, &limits()).unwrap();
+    assert_eq!(
+        inspect_header(&seven[..80], seven.len() as u64, &limits())
+            .unwrap()
+            .faces,
+        7
+    );
+    for frame in 0..2 {
+        for face in 0..7 {
+            for image in parsed.stored_mip_chain(frame, face, 0).unwrap() {
+                assert_eq!(
+                    &seven[image.byte_range][..4],
+                    &[image.source_mip, frame as u8, face as u8, 255]
+                );
+            }
+        }
+    }
+    assert_eq!(
+        parsed.stored_image(0, 0, 0).unwrap().byte_range.start,
+        19_176
+    );
+    assert_eq!(
+        parsed.stored_image(1, 5, 0).unwrap().byte_range.start,
+        68_328
+    );
 }

@@ -384,6 +384,14 @@ fn validate_center(
 }
 
 impl ModelLightingSeed {
+    pub(crate) fn used_styles(&self) -> impl Iterator<Item = usize> + '_ {
+        self.candidates.iter().filter_map(|candidate| {
+            usize::try_from(candidate.light.style)
+                .ok()
+                .filter(|&style| style < 128)
+        })
+    }
+
     pub fn evaluate(
         &self,
         styles: &[f32; 128],
@@ -563,6 +571,36 @@ impl ModelLightingSeed {
             candidates: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    pub(crate) fn set_fixture_style(&mut self, style: i32) {
+        let light = MapWorldLight {
+            original_index: 0,
+            origin: [0.0, 0.0, 64.0],
+            intensity: [2048.0; 3],
+            normal: [0.0; 3],
+            cluster: 0,
+            kind: WorldLightKind::Point,
+            style,
+            stopdot: 0.0,
+            stopdot2: 0.0,
+            exponent: 0.0,
+            radius: 512.0,
+            constant_attenuation: 0.0,
+            linear_attenuation: 0.0,
+            quadratic_attenuation: 1.0,
+            flags: 0,
+            texinfo: -1,
+            owner: -1,
+        };
+        let mut seed = Self::ambient_fixture(AmbientCube {
+            colors: [Vec3::ZERO; 6],
+        });
+        seed.candidates.push(SpatialLight {
+            light,
+            response: compiled_response(light, Vec3::ZERO, 1.0).expect("valid styled fixture"),
+        });
+        *self = seed;
     }
 }
 

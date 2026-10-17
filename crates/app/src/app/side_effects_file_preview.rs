@@ -89,6 +89,9 @@ impl App {
                     gmod_dir,
                     app.cpu_executor(),
                     &mut |stage| {
+                        if request.cancellation.is_cancelled() {
+                            return;
+                        }
                         let _ = send_root_message(
                             &mut stage_output,
                             RootMessage::FilePreview(file_preview::Message::LoadStageChanged(
@@ -97,6 +100,9 @@ impl App {
                         );
                     },
                 );
+                if request.cancellation.is_cancelled() {
+                    return;
+                }
                 let _ = send_root_message(
                     &mut output,
                     RootMessage::FilePreview(file_preview::Message::Loaded(

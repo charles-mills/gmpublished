@@ -432,7 +432,7 @@ fn discover_game_vpks_is_depth_limited_and_sorted() {
     fs::write(too_deep.join("too_deep_dir.vpk"), []).unwrap();
 
     assert_eq!(
-        discover_game_vpks(dir.path()),
+        discover_game_vpks(dir.path()).unwrap(),
         vec![
             garrysmod.join("garrysmod_dir.vpk"),
             sourceengine.join("content_cstrike_dir.vpk"),
@@ -447,19 +447,19 @@ fn discover_game_vpks_is_depth_limited_and_sorted() {
 #[test]
 fn prefix_len_is_refused_when_the_file_cannot_hold_it() {
     assert_eq!(
-        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, u32::MAX, 12),
+        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, u32::MAX, 12, u64::MAX),
         Err(VpkError::FormatError)
     );
     assert_eq!(
-        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 19),
+        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 19, u64::MAX),
         Err(VpkError::FormatError)
     );
     assert_eq!(
-        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 20),
+        validated_prefix_len(VPK_VERSION_1_HEADER_SIZE, 8, 20, u64::MAX),
         Ok(20)
     );
     assert_eq!(
-        validated_prefix_len(VPK_VERSION_2_HEADER_SIZE, 8, 4096),
+        validated_prefix_len(VPK_VERSION_2_HEADER_SIZE, 8, 4096, u64::MAX),
         Ok(36)
     );
 }
@@ -524,7 +524,7 @@ fn symlinked_content_directories_and_indexes_preserve_priority_and_payloads() {
         mirror_gmod.join("broken_dir.vpk"),
     )
     .unwrap();
-    let paths = discover_game_vpks(mirror.path());
+    let paths = discover_game_vpks(mirror.path()).expect("source discovery");
     assert_eq!(
         paths,
         vec![
@@ -545,4 +545,115 @@ fn symlinked_content_directories_and_indexes_preserve_priority_and_payloads() {
             bytes
         );
     }
+}
+
+#[test]
+fn sparse_payload_does_not_expand_directory_allocation() {
+    let dir = TempDir::new().unwrap();
+    let path = write_vpk_fixture(
+        &dir.path().join("pak01_dir.vpk"),
+        1,
+        vec![FixtureEntrySpec::embedded(
+            "materials/a.vmt",
+            b"UnlitGeneric {}",
+        )],
+    );
+    let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(768 * 1024 * 1024).unwrap();
+    file.flush().unwrap();
+    let source = VpkIndexSource::open(&path, vformats::ArchiveIndexLimits::default()).unwrap();
+    assert!(source.prefix_bytes() < 256);
+    let prepared = source.read().unwrap();
+    assert_eq!(prepared.index_cost().unwrap().entries, 1);
+    assert_eq!(
+        prepared
+            .materialize()
+            .unwrap()
+            .read_entry_bytes("materials/a.vmt")
+            .unwrap(),
+        b"UnlitGeneric {}"
+    );
+}
+
+#[test]
+fn oversized_declared_tree_is_rejected_before_prefix_read() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("pak01_dir.vpk");
+    let mut file = File::create(&path).unwrap();
+    file.write_all(&VPK_SIGNATURE.to_le_bytes()).unwrap();
+    file.write_all(&1u32.to_le_bytes()).unwrap();
+    file.write_all(&1_000_000u32.to_le_bytes()).unwrap();
+    file.set_len(1_000_012).unwrap();
+    let limits = vformats::ArchiveIndexLimits {
+        directory_bytes: 64,
+        ..Default::default()
+    };
+    assert!(matches!(
+        VpkIndexSource::open(&path, limits),
+        Err(VpkError::IndexLimit(vformats::ArchiveIndexLimit {
+            kind: vformats::ArchiveIndexLimitKind::DirectoryBytes,
+            required: 1_000_012,
+            limit: 64
+        }))
+    ));
+}
+
+#[test]
+fn preflight_cost_rejection_leaves_a_wider_retry_usable() {
+    let dir = TempDir::new().unwrap();
+    let path = write_vpk_fixture(
+        &dir.path().join("pak01_dir.vpk"),
+        1,
+        vec![FixtureEntrySpec::embedded(
+            "materials/a.vmt",
+            b"UnlitGeneric {}",
+        )],
+    );
+    let prepared = VpkIndexSource::open(&path, vformats::ArchiveIndexLimits::default())
+        .unwrap()
+        .read()
+        .unwrap();
+    let cost = prepared.index_cost().unwrap();
+    let limits = vformats::ArchiveIndexLimits {
+        retained_bytes: cost.retained_bytes().unwrap() - 1,
+        ..Default::default()
+    };
+    assert!(matches!(
+        VpkFile::open_with_index_limits(&path, limits),
+        Err(VpkError::IndexLimit(_))
+    ));
+    assert!(matches!(
+        VpkFile::open_with_index_limits(
+            &path,
+            vformats::ArchiveIndexLimits {
+                entries: 0,
+                ..Default::default()
+            }
+        ),
+        Err(VpkError::IndexLimit(vformats::ArchiveIndexLimit {
+            kind: vformats::ArchiveIndexLimitKind::Entries,
+            ..
+        }))
+    ));
+    assert_eq!(VpkFile::open(&path).unwrap().entries().len(), 1);
+}
+
+#[test]
+fn duplicate_mounts_do_not_spend_unique_source_admission_twice() {
+    use crate::source_discovery::{SourceDiscoveryBudget, SourceDiscoveryLimits};
+    let root = TempDir::new().unwrap();
+    let game = root.path().join("game");
+    fs::create_dir_all(&game).unwrap();
+    let path = game.join("only_dir.vpk");
+    fs::write(&path, []).unwrap();
+    let limits = SourceDiscoveryLimits {
+        sources: 1,
+        ..Default::default()
+    };
+    let mut budget = SourceDiscoveryBudget::new(limits, limits.metadata_bytes);
+    let paths =
+        discover_game_vpks_checked(&game, std::slice::from_ref(&game), &mut budget, &|| false)
+            .unwrap();
+    assert_eq!(paths, [path]);
+    assert_eq!(budget.stats().planned_source_records, 1);
 }

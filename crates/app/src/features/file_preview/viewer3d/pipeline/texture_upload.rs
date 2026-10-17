@@ -7,21 +7,87 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 pub(super) type SharedUploader = Arc<Mutex<TextureUploader>>;
 
 const PRESSURE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub(in crate::features::file_preview::viewer3d) const RETIREMENT_TIMEOUT: Duration =
+    PRESSURE_WAIT_TIMEOUT;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::features::file_preview::viewer3d) struct RetirementState {
+    pub epoch: u64,
+    pub pending: u64,
+    pub started: Option<Instant>,
+}
+
+#[derive(Debug)]
+pub(in crate::features::file_preview::viewer3d) struct RetirementSignal {
+    id: u64,
+    sender: watch::Sender<RetirementState>,
+}
+impl Default for RetirementSignal {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            id: NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("retirement signal identity exhausted"),
+            sender: watch::channel(RetirementState::default()).0,
+        }
+    }
+}
+impl RetirementSignal {
+    pub fn begin(&self) {
+        self.sender.send_modify(|state| {
+            if state.pending == 0 {
+                state.started = Some(Instant::now());
+            }
+            state.pending = state.pending.checked_add(1).expect("retiring image count");
+        });
+    }
+    pub fn complete(&self) {
+        self.sender.send_modify(|state| {
+            state.pending = state.pending.checked_sub(1).expect("retiring image count");
+            state.epoch = state.epoch.checked_add(1).expect("image retirement epoch");
+            if state.pending == 0 {
+                state.started = None;
+            }
+        });
+    }
+    pub fn subscribe(&self) -> RetirementSubscription {
+        RetirementSubscription {
+            id: self.id,
+            receiver: self.sender.subscribe(),
+        }
+    }
+    pub fn state(&self) -> RetirementState {
+        *self.sender.borrow()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::features::file_preview::viewer3d) struct RetirementSubscription {
+    pub(in crate::features::file_preview::viewer3d) id: u64,
+    pub(in crate::features::file_preview::viewer3d) receiver: watch::Receiver<RetirementState>,
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(in crate::features::file_preview::viewer3d) struct UploadPolicy {
     pub aggregate_staging_bytes: u64,
     pub batch_bytes: u64,
+    pub material_image_bytes: u64,
+    pub material_image_allocations: u64,
 }
 impl Default for UploadPolicy {
     fn default() -> Self {
         Self {
             aggregate_staging_bytes: 64 * 1024 * 1024,
             batch_bytes: 8 * 1024 * 1024,
+            material_image_bytes: 2 * 1024 * 1024 * 1024,
+            material_image_allocations: 65_536,
         }
     }
 }
@@ -36,11 +102,30 @@ pub(in crate::features::file_preview::viewer3d) fn configured_policy() -> Upload
                 Err(std::env::VarError::NotPresent) => None,
                 Err(std::env::VarError::NotUnicode(_)) => panic!("{name} must be UTF-8"),
             };
-            capture_policy(
+            let mut policy = capture_policy(
                 read("GMPUBLISHED_MAP_CAPTURE_UPLOAD_STAGING_BYTES").as_deref(),
                 read("GMPUBLISHED_MAP_CAPTURE_UPLOAD_BATCH_BYTES").as_deref(),
             )
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+            for (name, target) in [
+                (
+                    "GMPUBLISHED_MAP_CAPTURE_GPU_IMAGE_BYTES",
+                    &mut policy.material_image_bytes,
+                ),
+                (
+                    "GMPUBLISHED_MAP_CAPTURE_GPU_IMAGE_ALLOCATIONS",
+                    &mut policy.material_image_allocations,
+                ),
+            ] {
+                if let Some(value) = read(name) {
+                    *target = value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .unwrap_or_else(|| panic!("{name} must be a positive integer"));
+                }
+            }
+            policy
         })
     }
     #[cfg(not(feature = "map-capture"))]
@@ -78,6 +163,8 @@ pub(super) enum UploadError {
     UnsupportedFormat,
     #[error("texture upload metadata allocation failed")]
     HostAllocation,
+    #[error("material image residency exceeds {bytes} bytes or {allocations} allocations")]
+    ImageBudget { bytes: u64, allocations: u64 },
     #[error("texture upload completion failed: {0}")]
     Poll(wgpu::PollError),
     #[error("texture upload completion exceeded {0:?}")]
@@ -105,11 +192,54 @@ struct Ledger {
     copied_bytes: AtomicU64,
     owned_images: AtomicU64,
     owned_texel_bytes: AtomicU64,
+    material_images: Mutex<ImageAdmission>,
+    retirements: RetirementSignal,
 }
+
+#[derive(Debug, Default)]
+struct ImageAdmission {
+    bytes: u64,
+    allocations: u64,
+    peak_bytes: u64,
+    peak_allocations: u64,
+    rejections: u64,
+}
+impl ImageAdmission {
+    fn reserve(&mut self, policy: UploadPolicy, bytes: u64) -> Result<(), UploadError> {
+        let total = self.bytes.checked_add(bytes).ok_or(UploadError::Overflow)?;
+        let allocations = self
+            .allocations
+            .checked_add(1)
+            .ok_or(UploadError::Overflow)?;
+        if total > policy.material_image_bytes || allocations > policy.material_image_allocations {
+            self.rejections = self.rejections.saturating_add(1);
+            return Err(UploadError::ImageBudget {
+                bytes: policy.material_image_bytes,
+                allocations: policy.material_image_allocations,
+            });
+        }
+        self.bytes = total;
+        self.allocations = allocations;
+        self.peak_bytes = self.peak_bytes.max(total);
+        self.peak_allocations = self.peak_allocations.max(allocations);
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: u64) {
+        self.bytes = self.bytes.checked_sub(bytes).expect("admitted image bytes");
+        self.allocations = self
+            .allocations
+            .checked_sub(1)
+            .expect("admitted image count");
+    }
+}
+
 #[cfg(any(test, feature = "map-capture"))]
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(super) struct UploadStats {
     pub policy: UploadPolicy,
+    pub material_image_scope: &'static str,
+    pub image_byte_measurement: &'static str,
     pub applied_batch_bytes: u64,
     pub pressure_wait_timeout_ms: u64,
     pub staging_bytes: u64,
@@ -120,6 +250,11 @@ pub(super) struct UploadStats {
     pub copied_bytes: u64,
     pub owned_image_allocations: u64,
     pub owned_image_texel_bytes: u64,
+    pub material_image_bytes: u64,
+    pub material_image_allocations: u64,
+    pub peak_material_image_bytes: u64,
+    pub peak_material_image_allocations: u64,
+    pub material_image_rejections: u64,
 }
 
 #[derive(Debug)]
@@ -146,17 +281,31 @@ impl Drop for StagingPermit {
 struct ImagePermit {
     ledger: Arc<Ledger>,
     bytes: u64,
+    queue: wgpu::Queue,
+    material: bool,
 }
 impl Drop for ImagePermit {
     fn drop(&mut self) {
-        self.ledger.owned_images.fetch_sub(1, Ordering::AcqRel);
-        self.ledger
-            .owned_texel_bytes
-            .fetch_sub(self.bytes, Ordering::AcqRel);
+        let ledger = Arc::clone(&self.ledger);
+        let bytes = self.bytes;
+        let material = self.material;
+        if material {
+            ledger.retirements.begin();
+        }
+        self.queue.on_submitted_work_done(move || {
+            ledger.owned_images.fetch_sub(1, Ordering::AcqRel);
+            ledger.owned_texel_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            if material {
+                let mut admission = ledger.material_images.lock().expect("image admission lock");
+                admission.release(bytes);
+                drop(admission);
+                ledger.retirements.complete();
+            }
+        });
     }
 }
 #[derive(Clone, Debug)]
-pub(super) struct UploadedTexture {
+pub(in crate::features::file_preview::viewer3d) struct UploadedTexture {
     texture: wgpu::Texture,
     _permit: Arc<ImagePermit>,
 }
@@ -166,6 +315,33 @@ impl Deref for UploadedTexture {
         &self.texture
     }
 }
+
+impl UploadedTexture {
+    pub(super) fn create_view(&self, desc: &wgpu::TextureViewDescriptor<'_>) -> UploadedView {
+        UploadedView {
+            view: self.texture.create_view(desc),
+            _texture: self.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::features::file_preview::viewer3d) struct UploadedView {
+    view: wgpu::TextureView,
+    _texture: UploadedTexture,
+}
+impl Deref for UploadedView {
+    type Target = wgpu::TextureView;
+    fn deref(&self) -> &Self::Target {
+        &self.view
+    }
+}
+impl PartialEq for UploadedView {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view
+    }
+}
+impl Eq for UploadedView {}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Input<'a> {
@@ -334,6 +510,31 @@ pub(super) struct TextureUploader {
     pending: Option<Batch>,
     in_flight: VecDeque<Submission>,
 }
+fn image_texel_bytes(
+    format: wgpu::TextureFormat,
+    dimensions: [u32; 2],
+    mips: u32,
+    layers: u32,
+) -> Result<u64, UploadError> {
+    if dimensions.contains(&0)
+        || layers == 0
+        || mips == 0
+        || mips > u32::BITS - dimensions[0].max(dimensions[1]).leading_zeros()
+    {
+        return Err(UploadError::InvalidLayout);
+    }
+    let storage = storage(format)?;
+    (0..mips)
+        .try_fold(0_u64, |sum, mip| {
+            sum.checked_add(byte_len(
+                storage,
+                dimensions.map(|side| (side >> mip).max(1)),
+            )?)
+        })
+        .and_then(|bytes| bytes.checked_mul(u64::from(layers)))
+        .ok_or(UploadError::Overflow)
+}
+
 fn batch_capacity(policy: UploadPolicy, device_max: u64) -> Result<u64, UploadError> {
     let bytes = policy
         .batch_bytes
@@ -367,8 +568,15 @@ impl TextureUploader {
     }
     #[cfg(any(test, feature = "map-capture"))]
     pub(super) fn stats(&self) -> UploadStats {
+        let images = self
+            .ledger
+            .material_images
+            .lock()
+            .expect("image admission lock");
         UploadStats {
             policy: self.policy,
+            material_image_scope: "shared renderer pool material images; excludes lightmaps, generated fallbacks and render targets",
+            image_byte_measurement: "descriptor texel payload estimate; excludes driver, alignment and view overhead",
             applied_batch_bytes: self.batch_bytes,
             pressure_wait_timeout_ms: PRESSURE_WAIT_TIMEOUT.as_millis() as u64,
             staging_bytes: self.ledger.staging.load(Ordering::Acquire),
@@ -379,6 +587,11 @@ impl TextureUploader {
             copied_bytes: self.ledger.copied_bytes.load(Ordering::Relaxed),
             owned_image_allocations: self.ledger.owned_images.load(Ordering::Relaxed),
             owned_image_texel_bytes: self.ledger.owned_texel_bytes.load(Ordering::Relaxed),
+            material_image_bytes: images.bytes,
+            material_image_allocations: images.allocations,
+            peak_material_image_bytes: images.peak_bytes,
+            peak_material_image_allocations: images.peak_allocations,
+            material_image_rejections: images.rejections,
         }
     }
     pub(super) fn plan(
@@ -391,6 +604,19 @@ impl TextureUploader {
     pub(super) fn allocate(
         &self,
         desc: &wgpu::TextureDescriptor<'_>,
+    ) -> Result<UploadedTexture, UploadError> {
+        self.allocate_image(desc, false)
+    }
+    pub(super) fn allocate_material(
+        &self,
+        desc: &wgpu::TextureDescriptor<'_>,
+    ) -> Result<UploadedTexture, UploadError> {
+        self.allocate_image(desc, true)
+    }
+    fn allocate_image(
+        &self,
+        desc: &wgpu::TextureDescriptor<'_>,
+        material: bool,
     ) -> Result<UploadedTexture, UploadError> {
         let limits = self.device.limits();
         if desc.dimension != wgpu::TextureDimension::D2
@@ -418,18 +644,12 @@ impl TextureUploader {
         {
             return Err(UploadError::DeviceLimit);
         }
-        let bytes = (0..desc.mip_level_count)
-            .try_fold(0_u64, |sum, mip| {
-                sum.checked_add(byte_len(
-                    image_storage,
-                    [
-                        (desc.size.width >> mip).max(1),
-                        (desc.size.height >> mip).max(1),
-                    ],
-                )?)
-            })
-            .and_then(|sum| sum.checked_mul(u64::from(desc.size.depth_or_array_layers)))
-            .ok_or(UploadError::Overflow)?;
+        let bytes = image_texel_bytes(
+            desc.format,
+            [desc.size.width, desc.size.height],
+            desc.mip_level_count,
+            desc.size.depth_or_array_layers,
+        )?;
         self.ledger
             .owned_images
             .load(Ordering::Acquire)
@@ -440,17 +660,29 @@ impl TextureUploader {
             .load(Ordering::Acquire)
             .checked_add(bytes)
             .ok_or(UploadError::Overflow)?;
-        let texture = self.device.create_texture(desc);
+        if material {
+            self.device.poll(wgpu::PollType::Poll)?;
+            let mut admission = self
+                .ledger
+                .material_images
+                .lock()
+                .expect("image admission lock");
+            admission.reserve(self.policy, bytes)?;
+        }
         self.ledger.owned_images.fetch_add(1, Ordering::AcqRel);
         self.ledger
             .owned_texel_bytes
             .fetch_add(bytes, Ordering::AcqRel);
+        let permit = Arc::new(ImagePermit {
+            ledger: Arc::clone(&self.ledger),
+            bytes,
+            queue: self.queue.clone(),
+            material,
+        });
+        let texture = self.device.create_texture(desc);
         Ok(UploadedTexture {
             texture,
-            _permit: Arc::new(ImagePermit {
-                ledger: Arc::clone(&self.ledger),
-                bytes,
-            }),
+            _permit: permit,
         })
     }
     fn start_batch(&mut self) -> Result<(), UploadError> {
@@ -629,6 +861,21 @@ impl TextureUploader {
         }
         Ok(())
     }
+    pub(super) fn retirement_state(&self) -> RetirementState {
+        self.ledger.retirements.state()
+    }
+
+    pub(super) fn retirement_subscription(&self) -> RetirementSubscription {
+        self.ledger.retirements.subscribe()
+    }
+
+    pub(super) fn poll_retirements(&self) -> Result<(), UploadError> {
+        if self.ledger.retirements.state().pending != 0 {
+            self.device.poll(wgpu::PollType::Poll)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn flush(&mut self) {
         let Some(batch) = self.pending.take() else {
             return;

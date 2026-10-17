@@ -8,10 +8,12 @@ const MODEL_EXPONENT_MAP: u32 = 4;
 const MODEL_HALF_LAMBERT: u32 = 8;
 const MODEL_BASE_ALPHA_MASK: u32 = 16;
 const MODEL_INVERT_MASK: u32 = 32;
+mod dependencies;
 mod state;
 use crate::media::preview_model::{
     ModelLightKind, ModelLightingContext, ModelLightingHistory, ModelLocalLight,
 };
+pub(super) use dependencies::UsedStyles;
 pub(super) use state::State;
 
 #[repr(C)]
@@ -221,31 +223,45 @@ pub(super) fn encode_into(
         let history = histories
             .as_deref_mut()
             .filter(|_| active_contexts.is_none_or(|active| active[index]));
-        let evaluated = context.source.runtime_seed().map(|_| {
-            history.map_or_else(
-                || context.evaluate(styles),
-                |histories| context.evaluate_with_history(styles, time, &mut histories[index]),
-            )
-        });
-        let snapshot = match &evaluated {
-            Some(Ok(snapshot)) => snapshot,
-            Some(Err(error)) => {
-                log::error!(
-                    "model lighting evaluation {:?}: {error:?}; using diagnosed fallback",
-                    context.model_path
-                );
-                context.source.fallback_snapshot()
-            }
-            None => context.source.fallback_snapshot(),
-        };
-        let compiled_vertex = context
-            .evaluate_compiled_supplement(styles)
-            .map(|snapshot| encode_snapshot(context, &snapshot))
-            .unwrap_or_default();
-        data.push(GpuModelContext {
-            full: encode_snapshot(context, snapshot),
-            compiled_vertex,
-        });
+        data.push(encode_context(
+            context,
+            styles,
+            time,
+            history.map(|histories| &mut histories[index]),
+        ));
+    }
+}
+
+fn encode_context(
+    context: &ModelLightingContext,
+    styles: &[f32; 128],
+    time: f64,
+    history: Option<&mut ModelLightingHistory>,
+) -> GpuModelContext {
+    let evaluated = context.source.runtime_seed().map(|_| {
+        history.map_or_else(
+            || context.evaluate(styles),
+            |history| context.evaluate_with_history(styles, time, history),
+        )
+    });
+    let snapshot = match &evaluated {
+        Some(Ok(snapshot)) => snapshot,
+        Some(Err(error)) => {
+            log::error!(
+                "model lighting evaluation {:?}: {error:?}; using diagnosed fallback",
+                context.model_path
+            );
+            context.source.fallback_snapshot()
+        }
+        None => context.source.fallback_snapshot(),
+    };
+    let compiled_vertex = context
+        .evaluate_compiled_supplement(styles)
+        .map(|snapshot| encode_snapshot(context, &snapshot))
+        .unwrap_or_default();
+    GpuModelContext {
+        full: encode_snapshot(context, snapshot),
+        compiled_vertex,
     }
 }
 

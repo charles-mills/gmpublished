@@ -22,6 +22,7 @@ fn archive() -> Arc<PreviewArchiveSource> {
 
 fn request(path: &str) -> PreviewRequest {
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: archive(),
         entry_path: path.to_owned(),
@@ -29,6 +30,7 @@ fn request(path: &str) -> PreviewRequest {
         size_bytes: 12,
         crc32: 0xABCD_EF01,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -390,6 +392,7 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 1,
                 skybox_prop_count: 0,
@@ -438,6 +441,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -499,6 +503,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,

@@ -10,10 +10,16 @@ exclude = [
     "crates/vendor/iced_runtime",
     "crates/vendor/iced_winit",
     "crates/vendor/vformats",
+    "crates/vendor/wgpu_types",
+    "crates/vendor/wgpu_core",
+    "crates/vendor/wgpu_hal",
 ]
 resolver = "3"
 
 [patch.crates-io]
+wgpu-types = { path = "crates/vendor/wgpu_types" }
+wgpu-core = { path = "crates/vendor/wgpu_core" }
+wgpu-hal = { path = "crates/vendor/wgpu_hal" }
 # Expose native cursor capture and relative mouse motion for the map viewer.
 iced_core = { path = "crates/vendor/iced_core" }
 iced_runtime = { path = "crates/vendor/iced_runtime" }
@@ -116,6 +122,12 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 opt-level = "s"
+
+[profile.release.package.gmpublished]
+opt-level = 3
+
+[profile.release.package.gmpublished-domain]
+opt-level = 3
 
 [profile.profiling]
 inherits = "release"

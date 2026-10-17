@@ -7,8 +7,8 @@ use super::{
 };
 
 use super::images::{ImageLease, ImageView};
-use super::samplers::{QualityProfile, SamplerDiagnostic, TextureKind};
-use crate::bridge::materials::{TextureLoadOutcome, TextureReadTransfer, TextureRole};
+use super::samplers::{SamplerDiagnostic, TextureKind};
+use crate::bridge::materials::{TextureReadTransfer, TextureRole};
 
 #[cfg(feature = "map-capture")]
 pub(in crate::features::file_preview::viewer3d) fn capture_bc_upload() -> &'static str {
@@ -65,12 +65,12 @@ fn mip_layout_is_valid(
 
 #[derive(Clone, Copy)]
 pub struct SampledTexture<'a> {
-    pub view: &'a wgpu::TextureView,
+    pub view: &'a super::texture_upload::UploadedView,
     pub flags: Option<u32>,
 }
 
 pub struct BoundTexture {
-    pub view: wgpu::TextureView,
+    pub view: super::texture_upload::UploadedView,
     pub flags: Option<u32>,
 }
 impl BoundTexture {
@@ -149,7 +149,10 @@ impl RenderResources {
         uploader: &super::texture_upload::SharedUploader,
         frames: &[Vec<crate::bridge::materials::ResolvedTextureMip>],
         format: wgpu::TextureFormat,
-    ) -> (wgpu::TextureView, super::texture_upload::UploadedTexture) {
+    ) -> (
+        super::texture_upload::UploadedView,
+        super::texture_upload::UploadedTexture,
+    ) {
         let limits = device.limits();
         let valid = frames
             .first()
@@ -248,12 +251,7 @@ impl RenderResources {
             };
             return BoundTexture { view, flags: None };
         };
-        if matches!(
-            texture.load_outcome(),
-            TextureLoadOutcome::QualityRejected
-                | TextureLoadOutcome::SourceBudgetRejected
-                | TextureLoadOutcome::Unsupported
-        ) {
+        if texture.load_outcome().is_unavailable() {
             images.reject(
                 &slot.name,
                 if second { "base2" } else { "base" },
@@ -292,7 +290,7 @@ impl RenderResources {
                 flags: texture.flags(),
             },
             Err(error) => {
-                images.reject(&slot.name, if second { "base2" } else { "base" }, error);
+                images.reject_upload(&slot.name, if second { "base2" } else { "base" }, &error);
                 BoundTexture {
                     view: self.error_texture.clone(),
                     flags: None,
@@ -308,13 +306,8 @@ impl RenderResources {
         role: TextureRole,
         images: &mut ImageLease<'_>,
         material_name: &str,
-    ) -> Option<wgpu::TextureView> {
-        if matches!(
-            source.load_outcome(),
-            TextureLoadOutcome::QualityRejected
-                | TextureLoadOutcome::SourceBudgetRejected
-                | TextureLoadOutcome::Unsupported
-        ) {
+    ) -> Option<super::texture_upload::UploadedView> {
+        if source.load_outcome().is_unavailable() {
             images.reject(
                 material_name,
                 &format!("{role:?}"),
@@ -331,7 +324,7 @@ impl RenderResources {
         ) {
             Ok(view) => Some(view),
             Err(error) => {
-                images.reject(material_name, &format!("{role:?}"), error);
+                images.reject_upload(material_name, &format!("{role:?}"), &error);
                 None
             }
         }
@@ -343,7 +336,10 @@ impl RenderResources {
         label: &'static str,
         levels: &[TextureUploadLevel<'_>],
         format: wgpu::TextureFormat,
-    ) -> (wgpu::TextureView, super::texture_upload::UploadedTexture) {
+    ) -> (
+        super::texture_upload::UploadedView,
+        super::texture_upload::UploadedTexture,
+    ) {
         let fallback_level = TextureUploadLevel {
             rgba: WHITE_RGBA.as_slice(),
             width: 1,
@@ -529,12 +525,7 @@ impl RenderResources {
             TextureRole::PhongWarp,
         );
         let cube_view = cube_source.and_then(|cube| {
-            if matches!(
-                cube.load_outcome(),
-                TextureLoadOutcome::QualityRejected
-                    | TextureLoadOutcome::SourceBudgetRejected
-                    | TextureLoadOutcome::Unsupported
-            ) {
+            if cube.load_outcome().is_unavailable() {
                 images.reject(
                     material_name,
                     "environment",
@@ -553,13 +544,13 @@ impl RenderResources {
             ) {
                 Ok(view) => Some(view),
                 Err(error) => {
-                    images.reject(material_name, "environment", error);
+                    images.reject_upload(material_name, "environment", &error);
                     None
                 }
             }
         });
         let role_flags =
-            |view: &Option<wgpu::TextureView>,
+            |view: &Option<super::texture_upload::UploadedView>,
              source: Option<&crate::bridge::materials::DecodedTextureFrames>| {
                 view.as_ref().and_then(|_| {
                     source.and_then(|source| {
@@ -631,7 +622,7 @@ impl RenderResources {
                     .and_then(|cube| cube.source_metadata().and_then(|metadata| metadata.flags))
             }),
             TextureKind::Cubemap,
-            QualityProfile::SKY,
+            self.sampler_quality,
         );
         let envmask_sampler = sampler(
             "environment_mask",
@@ -806,7 +797,7 @@ impl RenderResources {
     pub fn create_sky_material(
         &self,
         device: &wgpu::Device,
-        view: &wgpu::TextureView,
+        view: &super::texture_upload::UploadedView,
         state: super::sky::SkyUniform,
         texture_flags: u32,
         diagnostics: &mut Vec<SamplerDiagnostic>,
@@ -819,10 +810,10 @@ impl RenderResources {
         });
         let sampler = self.samplers.texture(
             "<sky>",
-            "stars",
+            "sky",
             Some(texture_flags),
             TextureKind::Texture2d,
-            QualityProfile::SKY,
+            self.sampler_quality,
             diagnostics,
         );
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -835,15 +826,11 @@ impl RenderResources {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.lightmap_sampler),
+                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
         })

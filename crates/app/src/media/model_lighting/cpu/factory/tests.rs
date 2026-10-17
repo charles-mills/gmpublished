@@ -784,3 +784,27 @@ fn compiled_supplement_survives_independent_full_ambient_preparation_failure() {
         Err(ModelLightingFailure::InvalidPosition)
     );
 }
+
+#[test]
+fn style_dependencies_include_candidates_even_when_the_light_slot_budget_folds_them() {
+    let mut seed = ModelLightingSeed::ambient_fixture(AmbientCube {
+        colors: [Vec3::ZERO; 6],
+    });
+    for style in [0, 2, 32] {
+        let mut light = point(style as usize, Vec3::new(0.0, 0.0, 64.0));
+        light.style = style;
+        seed.candidates.push(SpatialLight {
+            light,
+            response: compiled_response(light, Vec3::ZERO, 1.0).unwrap(),
+        });
+    }
+    let evaluated = seed.evaluate(&[1.0; 128], 0, 0.0).unwrap();
+    assert!(evaluated.selected.is_empty());
+    assert_eq!(seed.used_styles().collect::<Vec<_>>(), vec![0, 2, 32]);
+    let mut styles = [1.0; 128];
+    styles[32] = 0.0;
+    assert_ne!(
+        evaluated.ambient_cube,
+        seed.evaluate(&styles, 0, 0.0).unwrap().ambient_cube
+    );
+}

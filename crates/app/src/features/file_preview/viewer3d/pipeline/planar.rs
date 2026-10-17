@@ -62,7 +62,7 @@ pub(super) fn prepare(
             plans
                 .map_skybox
                 .as_ref()
-                .map(|plan| (plan, true, WorldDrawGroups::ALL)),
+                .map(|plan| (plan.as_ref(), true, WorldDrawGroups::ALL)),
         )
     {
         let visibility = if skybox {

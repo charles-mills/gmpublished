@@ -149,11 +149,16 @@ impl<'a> SourceRef<'a> {
         self,
         path: &ContentPath,
     ) -> Result<Option<SourceEntryDescriptor<'a>>, SourceError> {
+        if let Some(error) = self.index_error(Some(path)) {
+            return Err(SourceError::IndexLimit(error));
+        }
         let origin = super::texture_asset::TextureOrigin {
             path: path.clone(),
             tier: self.tier(),
         };
         let (size, reader) = match self {
+            Self::SourceUnavailable(_, error) => return Err(SourceError::Discovery(error.clone())),
+            Self::IndexUnavailable(_, error) => return Err(SourceError::IndexLimit(error)),
             Self::Pakfile(source) => {
                 let Some(&(index, size)) = source.entries.get(path.as_str()) else {
                     return Ok(None);
@@ -335,7 +340,7 @@ impl SourceEntryDescriptor<'_> {
                 usize::try_from(decoder_limit).unwrap_or(usize::MAX),
             )?,
             EntryReader::Vpk { source, path } => if full {
-                source.entry_bytes(path.as_str())
+                source.texture_entry_bytes(path.as_str(), count)
             } else {
                 source.entry_prefix(
                     path.as_str(),

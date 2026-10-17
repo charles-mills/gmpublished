@@ -1,4 +1,4 @@
-use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection, prepare_draw_plans};
+use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 use super::reflections::{PlanarView, SceneView};
 use super::targets::RenderTargets;
 use super::uniforms::FogUniform;
@@ -145,7 +145,7 @@ impl PlanarView {
                 ]),
             );
         }
-        let plans = prepare_draw_plans(
+        let plans = view.plan_cache.prepare(
             upload,
             DrawPlanRequest {
                 world_view: Some(&uniforms),
@@ -162,6 +162,8 @@ impl PlanarView {
                 map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
                 visibility_plan: view.visibility.plan.as_ref(),
             },
+            view.visibility.revision,
+            super::view_preparation::Entities::All,
         );
         view.plans = Some(plans);
         super::transparency::prepare(

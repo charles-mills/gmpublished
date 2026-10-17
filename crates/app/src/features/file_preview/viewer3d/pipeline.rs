@@ -12,11 +12,11 @@ use super::{
     Rectangle, RenderMode, RenderScene, ResolvedTexture, SHADER_SOURCE, SKY_SHADER_SOURCE,
     SKYBOX_FACE_COUNT, SOURCE_UP, Skybox, SkyboxFace, TextureUploadLevel, Viewport,
     WATER_SHADER_SOURCE, WorldVisibilityPlan, half_extent, initial_door_swing, look_at, mat_mul,
-    mid, perspective, prepare_draw_plans, scene_sample_count, shader, skybox_eye,
-    transform_door_vertices, wgpu,
+    mid, perspective, scene_sample_count, shader, skybox_eye, transform_door_vertices, wgpu,
 };
 use gmpublished_domain::math::Vec3;
 
+mod bounds_query;
 mod clipping;
 mod cubemap;
 mod draw;
@@ -48,6 +48,7 @@ mod transparency;
 mod uniforms;
 mod upload;
 pub(super) mod view_camera;
+mod view_preparation;
 mod visibility;
 mod water_clip;
 
@@ -57,6 +58,10 @@ pub(super) use crate::media::preview_model::ShadingMode;
 pub(super) use materials::capture_bc_upload;
 #[cfg(feature = "map-capture")]
 pub(super) use texture_upload::configured_policy as capture_texture_upload_policy;
+#[cfg(feature = "map-capture")]
+pub(super) fn capture_sampler_quality() -> serde_json::Value {
+    serde_json::to_value(samplers::quality_profile()).expect("serialize sampler quality")
+}
 pub use uniforms::Uniforms;
 #[cfg(feature = "map-capture")]
 pub(super) use uniforms::{Diagnostic, DiagnosticMode};
@@ -68,6 +73,7 @@ use resources::RenderResources;
 use std::sync::atomic::Ordering;
 use targets::{RenderTargets, WaterBindingInputs, WaterBindings};
 use upload::UploadCache;
+pub(super) use upload::{UploadedMapRenderable, UploadedMesh, UploadedModel, UploadedReceiver};
 
 #[derive(Clone, Debug)]
 pub(super) enum PreviewScene {
@@ -110,6 +116,7 @@ impl PreviewScene {
     reason = "three independent render toggles plus the camera's water state"
 )]
 pub struct ModelPrimitive {
+    pub(super) render_feedback: Option<Arc<super::feedback::RenderFeedback>>,
     pub(super) model_lighting_time: f64,
     pub(super) view_id: ViewId,
     pub(super) clear_color: Option<[f32; 3]>,
@@ -119,7 +126,7 @@ pub struct ModelPrimitive {
     #[cfg(feature = "map-capture")]
     pub(super) refraction_target: bool,
     #[cfg(feature = "map-capture")]
-    pub(super) capture_diagnostics: Option<Arc<std::sync::Mutex<serde_json::Value>>>,
+    pub(super) capture_diagnostics: Option<super::capture::CaptureDiagnostics>,
     #[cfg(feature = "map-capture")]
     pub(super) capture_lighting_timeline: Option<Arc<super::capture::ModelLightingTimeline>>,
     #[cfg(feature = "map-capture")]
@@ -150,6 +157,7 @@ pub struct PreparedFrame {
     marks: marks::Frame,
     pub screen_overlay: Option<screen_refraction::Frame>,
     pub main: SceneView,
+    lighting_contexts: Vec<bool>,
     water_intersection: Option<intersection::IntersectionView>,
     pub planar_views: Vec<PlanarView>,
     pub content_id: u64,
@@ -160,8 +168,9 @@ pub struct PreparedFrame {
 #[cfg(feature = "map-capture")]
 fn preparation_diagnostics(view: &SceneView) -> serde_json::Value {
     serde_json::json!({
-        "world":view.plans.as_ref().map(|plans|&plans.world.world_preparation_issues),
-        "skybox":view.plans.as_ref().and_then(|plans|plans.map_skybox.as_ref()).map(|plan|&plan.world_preparation_issues),
+        "semantic_world_cache":view.plan_cache.world_cache_diagnostics(),
+        "world":view.plans.as_ref().map(|plans|&plans.world.world_opaque.issues),
+        "skybox":view.plans.as_ref().and_then(|plans|plans.map_skybox.as_ref()).map(|plan|&plan.world_opaque.issues),
         "transparency":view.transparency_diagnostics,
         "skybox_transparency":view.skybox_transparency_diagnostics,
     })
@@ -205,9 +214,42 @@ impl shader::Primitive for ModelPrimitive {
         bounds: &Rectangle,
         viewport: &Viewport,
     ) {
+        #[cfg(feature = "map-capture")]
+        let _prepare_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::Prepare));
+        if self.render_feedback.as_ref().is_some_and(|feedback| {
+            feedback.reject_expired_retirement(std::time::Instant::now())
+                || matches!(
+                    feedback.snapshot(),
+                    super::feedback::RenderStatus::RetirementTimedOut
+                )
+        }) {
+            return;
+        }
         let scene = self.preview.render_scene();
         let map = self.preview.map();
         let scene_key = self.preview.key();
+        #[cfg(feature = "map-capture")]
+        let upload_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::Upload));
+        if let Err(error) = pipeline
+            .resources
+            .texture_uploader
+            .lock()
+            .expect("texture uploader lock")
+            .poll_retirements()
+        {
+            if let Some(feedback) = &self.render_feedback {
+                feedback.set(super::feedback::RenderStatus::Rejected {
+                    reason: error.to_string(),
+                });
+            }
+            return;
+        }
         if let Err(error) = pipeline.uploads.ensure_upload(
             device,
             queue,
@@ -215,8 +257,17 @@ impl shader::Primitive for ModelPrimitive {
             scene_key,
             &self.preview,
         ) {
+            if let Some(feedback) = &self.render_feedback {
+                feedback.set(super::feedback::RenderStatus::Rejected {
+                    reason: error.to_string(),
+                });
+            }
             #[cfg(feature = "map-capture")]
-            if let Some(diagnostics) = &self.capture_diagnostics {
+            if let Some(diagnostics) = self
+                .capture_diagnostics
+                .as_ref()
+                .filter(|observer| observer.recording())
+            {
                 *diagnostics.lock().expect("capture diagnostics lock") = serde_json::json!({
                     "upload_error": error.capture_json(),
                 });
@@ -226,6 +277,28 @@ impl shader::Primitive for ModelPrimitive {
             return;
         }
         pipeline.uploads.touch(scene_key);
+        #[cfg(feature = "map-capture")]
+        drop(upload_span);
+
+        if let Some(feedback) = &self.render_feedback {
+            let upload = pipeline.uploads.get(scene_key).expect("uploaded scene");
+            let uploader = pipeline
+                .resources
+                .texture_uploader
+                .lock()
+                .expect("texture uploader lock");
+            let capacity = upload.has_capacity_issues();
+            let subscription = capacity.then(|| uploader.retirement_subscription());
+            let retirement = uploader.retirement_state();
+            drop(uploader);
+            feedback.bind_retirement(subscription);
+            let unavailable_images = upload.image_upload_issues.len();
+            feedback.set(if capacity && retirement.pending != 0 {
+                super::feedback::RenderStatus::Retiring { unavailable_images }
+            } else {
+                super::feedback::RenderStatus::Ready { unavailable_images }
+            });
+        }
         let slot = unclaimed_viewer_frame_slot(
             pipeline
                 .frames
@@ -247,6 +320,7 @@ impl shader::Primitive for ModelPrimitive {
                 main: SceneView::new(device, &pipeline.resources, &lighting, &marks.buffer),
                 marks,
                 lighting,
+                lighting_contexts: Vec::new(),
                 planar_views: Vec::new(),
                 water_intersection: None,
                 content_id: self.content_id,
@@ -274,6 +348,14 @@ impl shader::Primitive for ModelPrimitive {
                 &frame.marks.buffer,
             );
         }
+        if !Arc::ptr_eq(
+            &frame.scene.assets,
+            pipeline.uploads.get(scene_key).expect("uploaded scene"),
+        ) {
+            frame.scene.refresh_assets(Arc::clone(
+                pipeline.uploads.get(scene_key).expect("uploaded scene"),
+            ));
+        }
         #[cfg(feature = "map-capture")]
         frame
             .lighting
@@ -294,6 +376,10 @@ impl shader::Primitive for ModelPrimitive {
                 frame.bounds.height.ceil().max(1.0) as u32,
             ),
         );
+        #[cfg(feature = "map-capture")]
+        if let Some(observer) = &self.capture_diagnostics {
+            observer.observe_extent(size);
+        }
         if self.phy_debug_visible {
             frame
                 .scene
@@ -303,6 +389,11 @@ impl shader::Primitive for ModelPrimitive {
         frame.scene.update_doors(device, queue, &self.door_poses);
         frame.marks.update(queue, &frame.scene, &self.door_poses);
         let upload = &frame.scene;
+        #[cfg(feature = "map-capture")]
+        let visibility_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::WorldVisibility));
         if let Some(map) = map {
             frame.main.visibility.ensure_world_visibility(
                 device,
@@ -316,6 +407,22 @@ impl shader::Primitive for ModelPrimitive {
                     self.uniforms.camera_position[2],
                 ]),
             );
+        }
+        #[cfg(feature = "map-capture")]
+        drop(visibility_span);
+        #[cfg(feature = "map-capture")]
+        if let Some(observer) = &self.capture_diagnostics {
+            use super::capture::VisibilityMode;
+            observer.observe_visibility(match frame.main.visibility.tracker.state {
+                visibility::VisibilityClusterState::Disabled => VisibilityMode::Disabled,
+                visibility::VisibilityClusterState::StandDown => VisibilityMode::OutsideCluster,
+                visibility::VisibilityClusterState::Cluster(_)
+                    if frame.main.visibility.plan.is_some() =>
+                {
+                    VisibilityMode::ClusterPvs
+                }
+                visibility::VisibilityClusterState::Cluster(_) => VisibilityMode::ClusterWithoutPvs,
+            });
         }
         let with_time = |mut uniforms: Uniforms| {
             uniforms.lightmap_mode = self.uniforms.lightmap_mode;
@@ -333,7 +440,12 @@ impl shader::Primitive for ModelPrimitive {
         if let Some(skybox) = skybox_uniforms {
             frame.main.skybox.write(queue, &skybox);
         }
-        let plans = prepare_draw_plans(
+        #[cfg(feature = "map-capture")]
+        let main_plan_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::MainPlan));
+        let plans = frame.main.plan_cache.prepare(
             upload,
             DrawPlanRequest {
                 world_view: Some(&main_uniforms),
@@ -351,7 +463,16 @@ impl shader::Primitive for ModelPrimitive {
                     .map(|uniforms| uniforms.camera_position),
                 visibility_plan: frame.main.visibility.plan.as_ref(),
             },
+            frame.main.visibility.revision,
+            view_preparation::Entities::All,
         );
+        #[cfg(feature = "map-capture")]
+        drop(main_plan_span);
+        #[cfg(feature = "map-capture")]
+        let selection_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::PlanarSelection));
         let needs_water = !plans.world.planar.is_empty()
             && pipeline.resources.refractive_water_pipeline.is_some();
         RenderTargets::ensure(
@@ -480,6 +601,13 @@ impl shader::Primitive for ModelPrimitive {
                 view.surface_indices = indices;
             }
         }
+        #[cfg(feature = "map-capture")]
+        drop(selection_span);
+        #[cfg(feature = "map-capture")]
+        let optical_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::OpticalPrepare));
         for surface in &mut frame.planar_views {
             surface.prepare_optics(
                 device,
@@ -525,7 +653,15 @@ impl shader::Primitive for ModelPrimitive {
             upload,
             self,
         );
+        #[cfg(feature = "map-capture")]
+        drop(optical_span);
         frame.main.plans = Some(plans);
+        #[cfg(feature = "map-capture")]
+        let intersection_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::Intersection));
+
         let mut water_views = frame.planar_views.iter().filter(|view| {
             scene.materials[upload.assets.reflectors[view.surface_index].material_slot]
                 .shader
@@ -548,6 +684,8 @@ impl shader::Primitive for ModelPrimitive {
                 -plane.distance,
             ];
         }
+        #[cfg(feature = "map-capture")]
+        drop(intersection_span);
         main_uniforms = main_uniforms.with_clip_camera(self.view_camera);
         frame.main.world.write(queue, &main_uniforms);
         let upload = &frame.scene;
@@ -571,14 +709,26 @@ impl shader::Primitive for ModelPrimitive {
             surface.surface_uniforms.write(queue, &uniforms);
         }
         let upload = &frame.scene;
-        let mut lighting_contexts = vec![false; map.map_or(0, |map| map.model_lighting.len())];
-        model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, &frame.main);
+        #[cfg(feature = "map-capture")]
+        let lighting_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::Lighting));
+        let lighting_contexts = &mut frame.lighting_contexts;
+        lighting_contexts.resize(map.map_or(0, |map| map.model_lighting.len()), false);
+        lighting_contexts.fill(false);
+        #[cfg(feature = "map-capture")]
+        let lighting_visibility_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::LightingVisibility));
+        model_lighting_visibility::gather(lighting_contexts, scene, map, upload, &frame.main);
         for planar in &frame.planar_views {
             if let Some(view) = &planar.reflection {
-                model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, view);
+                model_lighting_visibility::gather(lighting_contexts, scene, map, upload, view);
             }
             if let Some(view) = &planar.refraction {
-                model_lighting_visibility::gather(&mut lighting_contexts, scene, map, upload, view);
+                model_lighting_visibility::gather(lighting_contexts, scene, map, upload, view);
             }
         }
         if let Some(view) = frame
@@ -586,17 +736,25 @@ impl shader::Primitive for ModelPrimitive {
             .as_ref()
             .filter(|view| view.selection.is_some())
         {
-            model_lighting_visibility::gather(
-                &mut lighting_contexts,
-                scene,
-                map,
-                upload,
-                &view.view,
-            );
+            model_lighting_visibility::gather(lighting_contexts, scene, map, upload, &view.view);
         }
-        frame
-            .lighting
-            .update(queue, map, self.model_lighting_time, &lighting_contexts);
+        #[cfg(feature = "map-capture")]
+        drop(lighting_visibility_span);
+        frame.lighting.update(
+            queue,
+            map,
+            self.model_lighting_time,
+            lighting_contexts,
+            #[cfg(feature = "map-capture")]
+            self.capture_diagnostics.as_ref(),
+        );
+        #[cfg(feature = "map-capture")]
+        drop(lighting_span);
+        #[cfg(feature = "map-capture")]
+        let transparency_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::Transparency));
         transparency::prepare(
             &mut frame.main,
             upload,
@@ -607,7 +765,15 @@ impl shader::Primitive for ModelPrimitive {
         );
         planar::prepare(&mut frame.main, upload, scene, device, queue, None);
         #[cfg(feature = "map-capture")]
-        if let Some(diagnostics) = &self.capture_diagnostics {
+        drop(transparency_span);
+
+        #[cfg(feature = "map-capture")]
+        if let Some(diagnostics) = self
+            .capture_diagnostics
+            .as_ref()
+            .filter(|observer| observer.recording())
+        {
+            let _observer_span = diagnostics.span(super::capture::Phase::Diagnostics);
             let records = |refracted: bool| {
                 frame.planar_views.iter().filter_map(|surface_view| {
                 let view=if refracted {surface_view.refraction.as_ref()?} else {
@@ -676,6 +842,11 @@ impl shader::Primitive for ModelPrimitive {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
+        #[cfg(feature = "map-capture")]
+        let _encode_span = self
+            .capture_diagnostics
+            .as_ref()
+            .and_then(|observer| observer.span(super::capture::Phase::Encode));
         let Some(frame) = pipeline
             .frames
             .get(self.prepared_frame.load(Ordering::Relaxed))
@@ -829,3 +1000,6 @@ mod frame_identity_tests {
         assert_eq!(frames[second].sun_visibility, 0.0);
     }
 }
+
+#[cfg(all(test, feature = "map-capture"))]
+mod lifecycle_tests;

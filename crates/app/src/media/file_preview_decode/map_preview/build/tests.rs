@@ -19,10 +19,9 @@ fn resolver() -> MaterialResolver {
 }
 
 fn model() -> LoadedPropModel {
-    let asset = test_prop_asset(1, vec![0, 1]);
+    let asset = test_prop_asset(vec![0, 1]);
     LoadedPropModel {
         model: asset.model,
-        default_triangle_count: 1,
         physics: LoadedPropPhysics::Parsed(Arc::new(LoadedPhy {
             ledges: Vec::new(),
             stats: Default::default(),
@@ -67,6 +66,15 @@ fn one_raw_model_and_failed_load_are_shared_across_role_admission_views() {
     assert!(doors["missing.mdl"].is_none());
     assert!(!sky.contains_key("world.mdl"));
     assert!(!doors.contains_key("sky.mdl"));
+    let shared_geometry = shared_model_geometry([&world, &sky, &doors]).unwrap();
+    assert_eq!(shared_geometry.model_count, 3);
+    assert_eq!(
+        (
+            shared_geometry.counts.vertices,
+            shared_geometry.counts.indices
+        ),
+        (9, 9)
+    );
     let (_, census) = enrich_walk_collision_with_prop_collision(None, &[], &world);
     assert_eq!(census.parsed_models, 2);
 }
@@ -149,6 +157,7 @@ fn shared_loading_keeps_world_sky_and_door_placement_state_separate() {
         cluster_count: 0,
         version: 20,
         lightmap: Default::default(),
+        invalid_detail_leaves: 0,
     };
     let result = build_props(
         &mut world,
@@ -172,6 +181,9 @@ fn shared_loading_keeps_world_sky_and_door_placement_state_separate() {
         },
     );
     assert_eq!(calls.into_inner().unwrap(), 1);
+    let shared = result.geometry.shared_models.as_ref().unwrap();
+    assert_eq!(shared.model_count, 1);
+    assert_eq!((shared.counts.vertices, shared.counts.indices), (3, 3));
     assert_eq!(result.geometry.world.admitted.vertices, 3);
     assert_eq!(result.geometry.skybox.admitted.vertices, 3);
     assert_eq!(result.geometry.doors.admitted.vertices, 3);

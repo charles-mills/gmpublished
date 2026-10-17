@@ -214,7 +214,7 @@ mod tests {
     use std::sync::Arc;
 
     fn fixture_model() -> ModelData {
-        let mut model = (*test_prop_asset(1, vec![0]).model).clone();
+        let mut model = (*test_prop_asset(vec![0]).model).clone();
         model.lighting = Some(Arc::new(ModelLightingData {
             checksum: 123,
             compatible: true,

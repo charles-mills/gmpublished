@@ -23,6 +23,7 @@ fn request_for(entry_path: &str) -> crate::media::preview_model::PreviewRequest 
     .expect("fixture archive should load");
 
     crate::media::preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: entry_path.to_owned(),
@@ -34,6 +35,7 @@ fn request_for(entry_path: &str) -> crate::media::preview_model::PreviewRequest 
         size_bytes: 3,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -52,6 +54,7 @@ fn request_from_archive(
     crc32: u32,
 ) -> crate::media::preview_model::PreviewRequest {
     crate::media::preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(archive),
         entry_path: entry_path.to_owned(),
@@ -63,6 +66,7 @@ fn request_from_archive(
         size_bytes,
         crc32,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -571,6 +575,7 @@ fn loaded_map_state() -> State {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -583,6 +588,87 @@ fn loaded_map_state() -> State {
     );
     assert!(state.apply_loaded(request.request_id, Ok(data)));
     state
+}
+
+#[test]
+fn texture_quality_reload_preserves_map_view_and_rejects_stale_completion() {
+    use crate::features::file_preview::state::{FlyPose, MovementMode};
+    use crate::media::preview_model::MapTextureQuality;
+    let mut state = loaded_map_state();
+    let old_request = state.request().unwrap().clone();
+    let old_data = state.current().unwrap().clone();
+    let pose = FlyPose {
+        position: Vec3::new(12.0, 24.0, 36.0),
+        yaw: 0.4,
+        pitch: -0.2,
+        speed: 2.0,
+    };
+    state.set_fly_camera(pose, MovementMode::Fly);
+    state.set_map_fog_enabled(false);
+    let effects = update(&mut state, Message::MapReducedTextureDetailToggled(true));
+    let [Effect::LoadRequested(request)] = effects.as_slice() else {
+        panic!("expected one reload")
+    };
+    assert_eq!(request.map_texture_quality, MapTextureQuality::Reduced);
+    assert_ne!(request.request_id, old_request.request_id);
+    assert_eq!(request.archive, old_request.archive);
+    assert_eq!(state.fly_pose(), Some(pose));
+    assert!(!state.map_fog_enabled());
+    assert!(!state.apply_loaded(old_request.request_id, Ok(old_data.clone())));
+    assert!(state.apply_loaded(request.request_id, Ok(old_data)));
+    assert!(update(&mut state, Message::MapReducedTextureDetailToggled(true)).is_empty());
+    assert!(
+        matches!(update(&mut state, Message::MapReducedTextureDetailToggled(false)).as_slice(),
+        [Effect::LoadRequested(request)] if request.map_texture_quality == MapTextureQuality::Native)
+    );
+    assert_eq!(state.fly_pose(), Some(pose));
+}
+
+#[test]
+fn render_feedback_notifications_are_generation_scoped_across_reload() {
+    use crate::features::file_preview::viewer3d::feedback::RenderStatus;
+    let mut state = loaded_map_state();
+    assert!(state.render_feedback().is_some());
+    let old_feedback = Arc::clone(state.render_feedback().unwrap());
+    old_feedback.set(RenderStatus::Ready {
+        unavailable_images: 3,
+    });
+    update(
+        &mut state,
+        Message::AnimationTick(std::time::Instant::now()),
+    );
+    assert!(state.render_feedback().is_some());
+    assert_eq!(
+        state.render_status(),
+        Some(RenderStatus::Ready {
+            unavailable_images: 3
+        })
+    );
+    let effects = update(&mut state, Message::MapReducedTextureDetailToggled(true));
+    let [Effect::LoadRequested(request)] = effects.as_slice() else {
+        panic!("expected reload")
+    };
+    let data = loaded_map_state().current().unwrap().clone();
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    assert!(state.accepts_render_feedback(request.request_id));
+    assert!(!state.accepts_render_feedback(Generation::INITIAL));
+    old_feedback.set(RenderStatus::Rejected {
+        reason: "old scene".to_owned(),
+    });
+    update(
+        &mut state,
+        Message::AnimationTick(std::time::Instant::now()),
+    );
+    assert_eq!(state.render_status(), Some(RenderStatus::Pending));
+    assert!(state.render_feedback().is_some());
+    state.render_feedback().unwrap().set(RenderStatus::Ready {
+        unavailable_images: 0,
+    });
+    update(
+        &mut state,
+        Message::AnimationTick(std::time::Instant::now()),
+    );
+    assert!(state.render_feedback().is_some());
 }
 
 #[test]
@@ -653,4 +739,41 @@ fn mouse_capture_failure_releases_input_and_stale_failures_are_ignored() {
             ..
         }]
     ));
+}
+
+#[test]
+fn replaced_and_closed_preview_requests_cancel_work_without_cancelling_clones_on_drop() {
+    let mut state = State::default();
+    let first = state.begin_open(model_request());
+    let temporary = first.clone();
+    drop(temporary);
+    assert!(!first.cancellation.is_cancelled());
+    let second = state.begin_open(request_for("particles/test.pcf"));
+    assert!(first.cancellation.is_cancelled());
+    assert!(!second.cancellation.is_cancelled());
+    state.close();
+    assert!(second.cancellation.is_cancelled());
+}
+
+#[test]
+fn dropping_preview_state_cancels_its_active_preparation() {
+    let mut state = State::default();
+    let active = state.begin_open(model_request());
+    drop(state);
+    assert!(active.cancellation.is_cancelled());
+}
+
+#[test]
+fn quality_reload_cancels_old_preparation_and_uses_an_independent_lifetime() {
+    let mut state = loaded_map_state();
+    let previous = state.request().unwrap().clone();
+    let effects = update(&mut state, Message::MapReducedTextureDetailToggled(true));
+    let [Effect::LoadRequested(next)] = effects.as_slice() else {
+        panic!("reload");
+    };
+    assert!(previous.cancellation.is_cancelled());
+    assert!(!next.cancellation.is_cancelled());
+    assert_ne!(previous.cancellation, next.cancellation);
+    state.close();
+    assert!(next.cancellation.is_cancelled());
 }

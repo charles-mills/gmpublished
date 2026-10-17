@@ -268,6 +268,7 @@ pub struct MapStatsRaw {
     pub cluster_count: u32,
     pub version: u32,
     pub lightmap: MapLightmapStats,
+    pub invalid_detail_leaves: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

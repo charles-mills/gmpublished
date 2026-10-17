@@ -36,6 +36,29 @@ pub struct MapBrushSurfaceGroup {
     pub faces: Vec<u32>,
 }
 
+/// Active culling tests; clear a test only when the complete bounds satisfy it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapBoundsCullMask(u8);
+
+impl MapBoundsCullMask {
+    pub const ALL: Self = Self(u8::MAX);
+    pub const NONE: Self = Self(0);
+
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MapBoundsCulling {
+    Outside,
+    Visible(MapBoundsCullMask),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapWorldSurfaceGroup {
     pub leaf_index: u32,
@@ -200,6 +223,22 @@ impl MapVisibility {
             eye,
             visible,
             bounds_visible,
+            cluster_visible,
+        )
+    }
+
+    pub fn world_surface_groups_with_culling(
+        &self,
+        eye: Vec3,
+        visible: impl Fn(u32) -> bool,
+        culling: impl Fn(MapBounds, MapBoundsCullMask) -> MapBoundsCulling,
+        cluster_visible: impl Fn(i16) -> bool,
+    ) -> Vec<MapWorldSurfaceGroup> {
+        self.ordering.world_surface_groups_with_culling(
+            &self.locator,
+            eye,
+            visible,
+            culling,
             cluster_visible,
         )
     }

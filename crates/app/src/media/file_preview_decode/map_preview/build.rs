@@ -47,6 +47,31 @@ fn load_role_models(
     })
 }
 
+fn shared_model_geometry(
+    roles: [&PropModelCache; 3],
+) -> Result<
+    crate::media::preview_model::SharedModelGeometry,
+    crate::media::preview_model::GeometryError,
+> {
+    use crate::media::preview_model::{GeometryCounts, SharedModelGeometry};
+    let mut seen = std::collections::HashSet::new();
+    let mut summary = SharedModelGeometry::default();
+    for loaded in roles.into_iter().flat_map(HashMap::values).flatten() {
+        if !seen.insert(Arc::as_ptr(&loaded.model)) {
+            continue;
+        }
+        for mesh in &loaded.model.meshes {
+            summary.counts = summary.counts.checked_add(GeometryCounts::checked(
+                mesh.vertices.len(),
+                mesh.indices.len(),
+                1,
+            )?)?;
+        }
+        summary.model_count += 1;
+    }
+    Ok(summary)
+}
+
 pub(super) struct PropBuildPhase {
     pub(super) geometry: crate::media::preview_model::PropGeometrySummary,
     pub(super) loaded_models: HashMap<String, Option<Arc<LoadedPropModel>>>,
@@ -88,6 +113,8 @@ pub(super) fn build_props(
     ];
     let [loaded_models, skybox_loaded_models, door_loaded_models] =
         load_role_models(roles, resolver, load_model);
+    let shared_models =
+        shared_model_geometry([&loaded_models, &skybox_loaded_models, &door_loaded_models]);
     refresh_entity_prop_aabb_visibility(
         static_props,
         usize::try_from(raw_stats.world_static_prop_count)
@@ -161,6 +188,7 @@ pub(super) fn build_props(
 
     PropBuildPhase {
         geometry: crate::media::preview_model::PropGeometrySummary {
+            shared_models,
             world: world.geometry.clone(),
             skybox: skybox.geometry.clone(),
             doors: doors.geometry.clone(),

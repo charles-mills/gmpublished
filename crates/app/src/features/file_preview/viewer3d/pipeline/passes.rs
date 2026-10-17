@@ -272,7 +272,7 @@ fn render_world_batches(
     view: DrawView<'_>,
     groups: super::transparency::WorldDrawGroups,
 ) {
-    for batch in &plan.world_batches {
+    for batch in &plan.world_opaque.batches {
         if groups.allows(batch.material_group) {
             render_opaque_surfaces(encoder, targets, resources, upload, &batch.surfaces, view);
         }
@@ -379,6 +379,15 @@ fn render_scene(
     clear: wgpu::Color,
     sky: bool,
 ) {
+    #[cfg(feature = "gui-benchmark")]
+    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(
+        encoder,
+        match kind {
+            ViewKind::Reflection => "reflection",
+            ViewKind::Refraction => "refraction",
+            ViewKind::Main => "main",
+        },
+    );
     render_opaque(view, resources, upload, encoder, kind, clear, sky);
     let sun = &resources.reflection_sun;
     let resources = resources.for_view(kind);
@@ -400,6 +409,8 @@ fn render_scene(
         view.sun.query(encoder, sun, false);
         view.sun.draw(encoder, sun, upload, targets);
     }
+    #[cfg(feature = "gui-benchmark")]
+    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
 }
 
 pub fn render_frame(
@@ -455,6 +466,8 @@ pub fn render_frame(
     } else {
         wgpu::Color::TRANSPARENT
     };
+    #[cfg(feature = "gui-benchmark")]
+    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(encoder, "main_opaque");
     render_opaque(
         &frame.main,
         resources,
@@ -464,6 +477,10 @@ pub fn render_frame(
         clear,
         !primitive.submerged,
     );
+    #[cfg(feature = "gui-benchmark")]
+    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
+    #[cfg(feature = "gui-benchmark")]
+    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(encoder, "water_and_transparency");
     let view = &frame.main;
     let targets = view.targets.as_ref().unwrap();
     let plans = view.plans.as_ref().unwrap();
@@ -563,6 +580,10 @@ pub fn render_frame(
             transparency: &view.transparency,
         },
     );
+    #[cfg(feature = "gui-benchmark")]
+    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
+    #[cfg(feature = "gui-benchmark")]
+    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(encoder, "intersection_sun_debug");
     if let Some(intersection) = frame
         .water_intersection
         .as_ref()
@@ -602,6 +623,8 @@ pub fn render_frame(
         pass.set_bind_group(0, &view.world.bind_group, &[]);
         draw::draw_phy_debug_meshes(&mut pass, resources, upload);
     }
+    #[cfg(feature = "gui-benchmark")]
+    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
     #[cfg(feature = "map-capture")]
     let targets = if primitive.refraction_target {
         frame

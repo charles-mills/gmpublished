@@ -3,7 +3,10 @@ use super::wgpu;
 pub(super) fn create_black_view(
     _device: &wgpu::Device,
     uploader: &super::texture_upload::SharedUploader,
-) -> (wgpu::TextureView, super::texture_upload::UploadedTexture) {
+) -> (
+    super::texture_upload::UploadedView,
+    super::texture_upload::UploadedTexture,
+) {
     let mut uploader = uploader.lock().expect("texture uploader lock");
     let texture = uploader
         .allocate(&wgpu::TextureDescriptor {

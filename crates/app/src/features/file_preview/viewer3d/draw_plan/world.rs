@@ -1,12 +1,14 @@
 use super::{
     DrawPlan, IndexedDrawItem, PartitionFilter, ReceiverPlanSource, ReceiverQueueOrder,
-    SurfaceBatch, ViewerScene, order_batched_marks,
+    ReceiverVisibility, SurfaceBatch, ViewerScene, order_batched_marks,
 };
 use crate::media::preview_model::MapDisplacementBatch;
+use std::sync::Arc;
+mod cache;
+pub(in super::super) use cache::Cache;
 use gmpublished_domain::scene::map::{
     MapSurfaceOwnerId, MapWorldMaterialGroup, MapWorldSurfaceRendering,
 };
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub(in super::super) struct WorldBatch {
@@ -16,6 +18,7 @@ pub(in super::super) struct WorldBatch {
 
 struct WorldSurface {
     receiver: ReceiverPlanSource,
+    encounter_rank: usize,
     rendering: MapWorldSurfaceRendering,
     displacement_batch: Option<MapDisplacementBatch>,
     draw: IndexedDrawItem,
@@ -23,6 +26,7 @@ struct WorldSurface {
 
 struct Epoch {
     material_group: MapWorldMaterialGroup,
+    displacement: bool,
     surfaces: Vec<usize>,
     receivers: Vec<ReceiverPlanSource>,
 }
@@ -45,64 +49,94 @@ pub(in super::super) fn validate_rendering(
     Ok(rendering)
 }
 
+#[derive(Clone, Debug, Default)]
+pub(in super::super) struct WorldOpaquePlan {
+    pub(in super::super) batches: Vec<WorldBatch>,
+    pub(in super::super) issues: Vec<WorldPreparationIssue>,
+    claims: Claims,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Claims {
+    meshes: Vec<bool>,
+    marks: Vec<bool>,
+}
+
+fn apply(output: Arc<WorldOpaquePlan>, plan: &mut DrawPlan) {
+    plan.opaque.retain(|item| {
+        !output
+            .claims
+            .meshes
+            .get(item.mesh_index)
+            .copied()
+            .unwrap_or(false)
+    });
+    plan.surface_marks.retain(|mark| {
+        !output
+            .claims
+            .marks
+            .get(mark.overlay_index)
+            .copied()
+            .unwrap_or(false)
+    });
+    plan.world_opaque = output;
+}
+
 pub(super) fn attach(
     plan: &mut DrawPlan,
     upload: &ViewerScene,
-    visible: Option<&HashSet<(usize, u32)>>,
+    visible: Option<&ReceiverVisibility>,
     partition: PartitionFilter,
-    encounters: &[ReceiverPlanSource],
+    cache: &mut Cache,
+    world_only: bool,
 ) {
-    let Some(map) = upload.assets.map() else {
-        return;
+    cache.attach(plan, upload, visible, partition, world_only);
+}
+
+fn build(upload: &ViewerScene, input: &cache::Input) -> WorldOpaquePlan {
+    let map = upload.assets.map().expect("prepared world input has map");
+    let topology = map
+        .visibility
+        .as_ref()
+        .expect("prepared world input has topology");
+    let index = &upload.assets.receiver_faces;
+    let mut items = vec![None; upload.meshes.len()];
+    for &item in &input.meshes {
+        items[item.mesh_index] = Some(item);
+    }
+    let world_meshes = &input.mesh_claims;
+    let mut output = WorldOpaquePlan {
+        claims: Claims {
+            meshes: world_meshes.clone(),
+            marks: vec![false; upload.overlays.len()],
+        },
+        ..WorldOpaquePlan::default()
     };
-    let Some(topology) = map.visibility.as_ref() else {
-        return;
-    };
-    let items = plan
-        .opaque
-        .iter()
-        .map(|&item| (item.mesh_index, item))
-        .collect::<HashMap<_, _>>();
-    let mut world_meshes = HashSet::new();
+    for mark in &input.marks {
+        output.claims.marks[mark.overlay_index] = true;
+    }
+    for &(mesh, issue) in index.issues() {
+        if world_meshes[mesh] {
+            output.issues.push(issue);
+        }
+    }
+    let ranks = input.encounter_ranks(index.source_count());
     let mut surfaces = Vec::new();
-    for (source_index, source) in map.surface_receivers.iter().enumerate() {
-        if source.owner.id() != MapSurfaceOwnerId::World {
-            continue;
-        }
-        let Some(receiver) = upload
-            .assets
-            .receiver_faces
-            .get(&source.range.face)
-            .and_then(|receivers| {
-                receivers
-                    .iter()
-                    .find(|receiver| receiver.source_index == source_index)
-            })
-        else {
-            continue;
-        };
-        let Some(&item) = items.get(&receiver.mesh_index) else {
-            continue;
-        };
-        if !partition.accepts(upload.meshes[item.mesh_index].map_skybox) {
-            continue;
-        }
-        world_meshes.insert(item.mesh_index);
+    for selected in &input.sources {
+        let source_index = selected.source;
+        let source = &map.surface_receivers[source_index];
+        let receiver = index
+            .for_source(source_index)
+            .expect("selected world receiver");
+        let item = items[receiver.mesh_index].unwrap();
         let displacement_batch = map.displacement_batches.get(&source.range.face).copied();
-        let rendering = match validate_rendering(
+        let Ok(rendering) = validate_rendering(
             source.range.face,
             topology.surface_rendering(source.range.face),
             displacement_batch.is_some(),
-        ) {
-            Ok(rendering) => rendering,
-            Err(issue) => {
-                plan.world_preparation_issues.push(issue);
-                continue;
-            }
-        };
-        if visible.is_some_and(|visible| !visible.contains(&(item.mesh_index, source.range.face))) {
+        ) else {
             continue;
-        }
+        };
         surfaces.push(WorldSurface {
             receiver: ReceiverPlanSource {
                 receiver_mesh_index: Some(item.mesh_index),
@@ -110,6 +144,7 @@ pub(super) fn attach(
                 material_group: receiver.material_group,
                 lightmap_page: receiver.lightmap_page,
             },
+            encounter_rank: ranks[selected.first_source],
             rendering,
             displacement_batch,
             draw: IndexedDrawItem {
@@ -119,21 +154,32 @@ pub(super) fn attach(
         });
     }
     let mut batches = Vec::new();
-    for epoch in epochs(&surfaces, encounters) {
-        let faces = epoch
-            .receivers
-            .iter()
-            .map(receiver_id)
-            .collect::<HashSet<_>>();
-        let marks = plan
-            .surface_marks
-            .iter()
-            .copied()
-            .filter(|mark| {
-                upload.overlays[mark.overlay_index].owner.id() == MapSurfaceOwnerId::World
-                    && faces.contains(&(mark.receiver_mesh_index, mark.receiver_range.face))
-            })
-            .collect::<Vec<_>>();
+    for epoch in epochs(&surfaces) {
+        let marks = if input.marks.is_empty() {
+            Vec::new()
+        } else {
+            input
+                .marks
+                .iter()
+                .copied()
+                .filter(|mark| {
+                    upload.overlays[mark.overlay_index].owner.id() == MapSurfaceOwnerId::World
+                        && mark
+                            .receiver_mesh_index
+                            .is_some_and(|mesh| world_meshes.get(mesh).copied().unwrap_or(false))
+                        && validate_rendering(
+                            mark.receiver_range.face,
+                            topology.surface_rendering(mark.receiver_range.face),
+                            map.displacement_batches
+                                .contains_key(&mark.receiver_range.face),
+                        )
+                        .is_ok_and(|rendering| {
+                            rendering.material_group == epoch.material_group
+                                && rendering.displacement.is_some() == epoch.displacement
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
         let mut batch = SurfaceBatch::default();
         for index in epoch.surfaces {
             batch.push_mesh(surfaces[index].draw.clone());
@@ -149,25 +195,17 @@ pub(super) fn attach(
             surfaces: batch,
         });
     }
-    plan.opaque
-        .retain(|item| !world_meshes.contains(&item.mesh_index));
-    plan.surface_marks.retain(|mark| {
-        upload.overlays[mark.overlay_index].owner.id() != MapSurfaceOwnerId::World
-            || mark
-                .receiver_mesh_index
-                .is_none_or(|mesh| !world_meshes.contains(&mesh))
-    });
-    plan.world_batches = batches;
+    output.batches = batches;
+    output
 }
 
-fn receiver_id(receiver: &ReceiverPlanSource) -> (Option<usize>, u32) {
-    (receiver.receiver_mesh_index, receiver.face)
-}
-
-fn epochs(surfaces: &[WorldSurface], encounters: &[ReceiverPlanSource]) -> Vec<Epoch> {
-    let mut ranks = HashMap::new();
-    for (index, receiver) in encounters.iter().enumerate() {
-        ranks.entry(receiver_id(receiver)).or_insert(index);
+fn epochs(surfaces: &[WorldSurface]) -> Vec<Epoch> {
+    let mut buckets: [[Vec<usize>; 2]; 4] =
+        std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
+    for (index, surface) in surfaces.iter().enumerate() {
+        buckets[surface.rendering.material_group.index()]
+            [usize::from(surface.rendering.displacement.is_none())]
+        .push(index);
     }
     let mut epochs = Vec::new();
     for material_group in [
@@ -176,27 +214,18 @@ fn epochs(surfaces: &[WorldSurface], encounters: &[ReceiverPlanSource]) -> Vec<E
         MapWorldMaterialGroup::Underwater,
         MapWorldMaterialGroup::AboveWater,
     ] {
-        for displacement in [true, false] {
-            let mut indices = surfaces
-                .iter()
-                .enumerate()
-                .filter_map(|(index, surface)| {
-                    (surface.rendering.material_group == material_group
-                        && surface.rendering.displacement.is_some() == displacement)
-                        .then_some(index)
-                })
-                .collect::<Vec<_>>();
+        for (mut indices, displacement) in std::mem::take(&mut buckets[material_group.index()])
+            .into_iter()
+            .zip([true, false])
+        {
             if indices.is_empty() {
                 continue;
             }
-            indices.sort_by_key(|&index| {
-                ranks
-                    .get(&receiver_id(&surfaces[index].receiver))
-                    .copied()
-                    .unwrap_or(usize::MAX)
-            });
+            if !indices.is_sorted_by_key(|&index| surfaces[index].encounter_rank) {
+                indices.sort_by_key(|&index| surfaces[index].encounter_rank);
+            }
             if displacement {
-                let mut groups = HashMap::new();
+                let mut groups = std::collections::HashMap::new();
                 let mut buckets = Vec::<Vec<usize>>::new();
                 for index in indices {
                     let receiver = surfaces[index].receiver;
@@ -229,6 +258,7 @@ fn epochs(surfaces: &[WorldSurface], encounters: &[ReceiverPlanSource]) -> Vec<E
             }
             epochs.push(Epoch {
                 material_group,
+                displacement,
                 surfaces: indices,
                 receivers,
             });
@@ -257,6 +287,7 @@ mod tests {
                 material_group: material,
                 lightmap_page: SourceLightmapPage::Physical(page),
             },
+            encounter_rank: face as usize,
             rendering: MapWorldSurfaceRendering {
                 material_group: group,
                 displacement: batch.map(|_| MapDisplacementRendering {
@@ -273,11 +304,67 @@ mod tests {
                 item: DrawItem {
                     mesh_index: face as usize,
                     material_slot: material,
-                    distance_squared: 0.0,
                 },
                 indices: face * 3..face * 3 + 3,
             },
         }
+    }
+
+    #[test]
+    fn invalid_geometry_still_applies_world_claims_and_retains_other_owners() {
+        let mut plan = DrawPlan {
+            opaque: vec![
+                super::super::DrawItem {
+                    mesh_index: 0,
+                    material_slot: 2,
+                },
+                super::super::DrawItem {
+                    mesh_index: 1,
+                    material_slot: 2,
+                },
+            ],
+            ..DrawPlan::default()
+        };
+        let mark = |overlay_index| super::super::OverlayDrawItem {
+            blend: crate::bridge::materials::RenderMode::Opaque,
+            receiver_mesh_index: Some(0),
+            receiver_range: gmpublished_domain::scene::map::MapMeshIndexRange {
+                face: 7,
+                start: 0,
+                count: 3,
+            },
+            overlay_index,
+            material_slot: 2,
+        };
+        plan.surface_marks = vec![mark(0), mark(1)];
+        let output = Arc::new(WorldOpaquePlan {
+            batches: Vec::new(),
+            issues: vec![WorldPreparationIssue::MissingSurfaceRendering { face: 7 }],
+            claims: Claims {
+                meshes: vec![true, false],
+                marks: vec![true, false],
+            },
+        });
+        apply(Arc::clone(&output), &mut plan);
+        assert_eq!(
+            plan.opaque
+                .iter()
+                .map(|item| item.mesh_index)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(
+            plan.surface_marks
+                .iter()
+                .map(|mark| mark.overlay_index)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert!(Arc::ptr_eq(&output, &plan.world_opaque));
+        assert_eq!(
+            plan.world_opaque.issues,
+            [WorldPreparationIssue::MissingSurfaceRendering { face: 7 }]
+        );
     }
 
     #[test]
@@ -311,11 +398,7 @@ mod tests {
             surface(4, IntersectsWater, 0, 0, None),
             surface(5, AboveWater, 0, 0, Some((0, 0))),
         ];
-        let encounters = surfaces
-            .iter()
-            .map(|surface| surface.receiver)
-            .collect::<Vec<_>>();
-        let phases = epochs(&surfaces, &encounters);
+        let phases = epochs(&surfaces);
         assert_eq!(
             phases
                 .iter()
@@ -346,12 +429,7 @@ mod tests {
             surface(3, AboveWater, 2, 0, Some((1, 0))),
             surface(1, AboveWater, 1, 0, Some((0, 0))),
         ];
-        let mut encounters = surfaces
-            .iter()
-            .map(|surface| surface.receiver)
-            .collect::<Vec<_>>();
-        encounters.sort_by_key(|receiver| receiver.face);
-        let phase = epochs(&surfaces, &encounters).pop().unwrap();
+        let phase = epochs(&surfaces).pop().unwrap();
         assert_eq!(
             phase
                 .receivers
@@ -371,6 +449,36 @@ mod tests {
     }
 
     #[test]
+    fn opaque_displacement_live_encounters_are_independent_of_face_ordinals() {
+        use MapWorldMaterialGroup::AboveWater;
+        let mut surfaces = [
+            surface(0, AboveWater, 0, 0, Some((0, 0))),
+            surface(1, AboveWater, 1, 0, Some((1, 0))),
+            surface(2, AboveWater, 0, 0, Some((0, 0))),
+        ];
+        surfaces[0].encounter_rank = 2;
+        surfaces[1].encounter_rank = 0;
+        surfaces[2].encounter_rank = 1;
+        let phase = epochs(&surfaces).pop().unwrap();
+        assert_eq!(
+            phase
+                .receivers
+                .iter()
+                .map(|receiver| receiver.face)
+                .collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        assert_eq!(
+            phase
+                .surfaces
+                .iter()
+                .map(|&index| surfaces[index].receiver.face)
+                .collect::<Vec<_>>(),
+            [2, 0, 1]
+        );
+    }
+
+    #[test]
     fn opaque_displacement_first_touch_buckets_include_the_logical_lightmap_page() {
         use MapWorldMaterialGroup::AboveWater;
         let surfaces = [
@@ -379,11 +487,7 @@ mod tests {
             surface(2, AboveWater, 0, 1, Some((2, 0))),
             surface(3, AboveWater, 0, 0, Some((0, 0))),
         ];
-        let encounters = surfaces
-            .iter()
-            .map(|surface| surface.receiver)
-            .collect::<Vec<_>>();
-        let phase = epochs(&surfaces, &encounters).pop().unwrap();
+        let phase = epochs(&surfaces).pop().unwrap();
         assert_eq!(
             phase
                 .receivers

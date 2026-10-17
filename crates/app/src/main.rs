@@ -82,6 +82,7 @@ mod platform_chrome;
 mod platform_menu;
 #[cfg(target_os = "macos")]
 mod platform_open;
+mod preparation;
 mod spinner_clock;
 #[cfg(test)]
 mod test_support;
@@ -122,6 +123,9 @@ enum RunError {
     Iced(#[from] iced::Error),
     #[error(transparent)]
     Cli(#[from] cli::CliError),
+    #[cfg(feature = "gui-benchmark")]
+    #[error(transparent)]
+    GuiBenchmark(#[from] app::gui_benchmark::Error),
 }
 
 fn run() -> Result<(), RunError> {
@@ -142,7 +146,13 @@ fn run() -> Result<(), RunError> {
         return Ok(());
     }
 
-    if let Some(outcome) = cli::run() {
+    #[cfg(feature = "gui-benchmark")]
+    let benchmark_config = app::gui_benchmark::Config::from_args()?;
+    #[cfg(feature = "gui-benchmark")]
+    let run_cli = benchmark_config.is_none();
+    #[cfg(not(feature = "gui-benchmark"))]
+    let run_cli = true;
+    if run_cli && let Some(outcome) = cli::run() {
         return Ok(outcome?);
     }
 
@@ -162,13 +172,32 @@ fn run() -> Result<(), RunError> {
     let chrome_strategy =
         features::shell::ChromeStrategy::resolve(startup_settings.backend.titlebar);
 
-    let application = iced::application(move || App::new(ctx.clone()), App::update, App::view);
+    let window_settings = window_settings(chrome_strategy);
+    #[cfg(feature = "gui-benchmark")]
+    let window_settings = if let Some(config) = &benchmark_config {
+        iced::window::Settings {
+            size: iced::Size::new(config.width as f32, config.height as f32),
+            ..window_settings
+        }
+    } else {
+        window_settings
+    };
+    let application = iced::application(
+        move || {
+            let (app, task) = App::new(ctx.clone());
+            #[cfg(feature = "gui-benchmark")]
+            let (app, task) = app.with_gui_benchmark(benchmark_config.clone(), task);
+            (app, task)
+        },
+        App::update,
+        App::view,
+    );
     let application = assets::fonts::bundled_fonts()
         .into_iter()
         .fold(application, iced::Application::font);
 
     application
-        .window(window_settings(chrome_strategy))
+        .window(window_settings)
         .default_font(assets::fonts::default_font())
         .theme(App::theme)
         .subscription(App::subscription)

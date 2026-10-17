@@ -9,7 +9,7 @@ pub struct Resources {
 
 #[derive(Debug)]
 pub struct Texture {
-    pub view: wgpu::TextureView,
+    pub view: super::texture_upload::UploadedView,
     pub sampler: wgpu::Sampler,
 }
 

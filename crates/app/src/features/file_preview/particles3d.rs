@@ -23,9 +23,7 @@ use crate::media::preview_model::ParticlePreview;
 
 const SHADER_SOURCE: &str = include_str!("particles.wgsl");
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
-/// Fallback frame delta when a drag needs a velocity hint.
 const DRAG_DT_HINT: f32 = 1.0 / 60.0;
-/// Gizmo colors cycle for control points 1..; CP0 is pinned and undrawn.
 const GIZMO_COLORS: [Vec3; 7] = [
     Vec3::new(1.0, 0.62, 0.11),
     Vec3::new(0.20, 0.78, 1.0),
@@ -83,7 +81,6 @@ impl SimState {
             self.engine = ParticleEngine::new(
                 &viewer.preview.file,
                 viewer.system_index,
-                // Content-derived seed keeps replays identical per file.
                 viewer.content_id ^ (viewer.system_index as u64).wrapping_mul(0x9E37),
             );
             self.orbit =
@@ -105,7 +102,6 @@ impl SimState {
             }
             self.last_frame = None;
         }
-        // Sync control points from feature state, except the point currently being dragged.
         let dragging = match self.drag {
             Some(Drag::Gizmo { index }) => Some(index),
             _ => None,
@@ -162,7 +158,6 @@ fn camera_frame(state: &SimState, bounds: Rectangle) -> CameraFrame {
         center[1] + distance * state.orbit.pitch().cos() * state.orbit.yaw().cos(),
         center[2] + distance * state.orbit.pitch().sin(),
     ];
-    // Source is Z-up.
     let forward = (center - Vec3::from(eye)).normalize_or_zero();
     let right = forward.cross(SOURCE_UP).normalize_or_zero();
     let up = right.cross(forward);
@@ -203,7 +198,6 @@ fn gizmo_pick_radius(frame: &CameraFrame, position: Vec3) -> f32 {
 }
 
 impl ParticleViewer {
-    /// CP0 stays pinned at the origin. Show gizmos for the other referenced control points.
     fn gizmo_indices(&self, state: &SimState) -> impl Iterator<Item = ControlPointIndex> {
         let highest = state
             .engine
@@ -312,7 +306,6 @@ impl shader::Program<Message> for ParticleViewer {
                     }
                 }
                 state.last_frame = Some(*now);
-                // Playing requests the next redraw. Pausing stops the chain.
                 Some(Action::request_redraw())
             }
             _ => None,
@@ -345,8 +338,6 @@ impl shader::Program<Message> for ParticleViewer {
                 let sheet = slot.and_then(|slot| self.preview.materials[slot].sheet.as_deref());
                 let mut list = build_instances(system, particles, &frame, sheet);
                 if !is_additive {
-                    // Painter's order: no depth buffer, so translucents sort
-                    // back-to-front along the view direction.
                     list.sort_by(|a, b| {
                         let da = (a.position() - frame.eye).dot(frame.forward);
                         let db = (b.position() - frame.eye).dot(frame.forward);
@@ -590,7 +581,7 @@ fn sheet_uv_rect(
 
 #[derive(Clone, Debug)]
 struct DrawBatch {
-    /// Index into [`ParticlePreview::materials`]; `None` = white fallback.
+    /// None selects the white fallback.
     texture_slot: Option<usize>,
     additive: bool,
     range: std::ops::Range<u32>,
@@ -752,27 +743,48 @@ impl ParticlePipeline {
     }
 }
 
-/// Uploads the RGBA mip chain of a resolved texture. BC payloads never reach
-/// here: the particle loader resolves with BC disabled.
+fn particle_texture_levels(
+    texture: &ResolvedTexture,
+    max_dimension: u32,
+) -> Option<Vec<crate::bridge::materials::ResolvedTextureMipRef<'_>>> {
+    if texture.load_outcome().is_unavailable() {
+        return None;
+    }
+    let levels = texture.mip_chain().collect::<Vec<_>>();
+    let first = levels.first()?;
+    if first.width == 0
+        || first.height == 0
+        || first.width > max_dimension
+        || first.height > max_dimension
+    {
+        return None;
+    }
+    let max_levels = first.width.max(first.height).ilog2() as usize + 1;
+    if levels.len() > max_levels {
+        return None;
+    }
+    let mut dimensions = [first.width, first.height];
+    for level in &levels {
+        let bytes = (level.width as usize)
+            .checked_mul(level.height as usize)?
+            .checked_mul(4)?;
+        level.width.checked_mul(4)?;
+        if [level.width, level.height] != dimensions || level.rgba.len() != bytes {
+            return None;
+        }
+        dimensions = dimensions.map(|dimension| (dimension / 2).max(1));
+    }
+    Some(levels)
+}
+
 fn create_rgba_texture_view(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &ResolvedTexture,
 ) -> Option<wgpu::TextureView> {
-    let levels: Vec<_> = texture.mip_chain().collect();
+    let levels = particle_texture_levels(texture, device.limits().max_texture_dimension_2d)?;
     let first = levels.first()?;
-    if first.width == 0 || first.height == 0 {
-        return None;
-    }
-    let valid_levels = levels
-        .iter()
-        .take_while(|level| {
-            level.width > 0
-                && level.height > 0
-                && level.rgba.len() == (level.width * level.height * 4) as usize
-        })
-        .count()
-        .max(1);
+    let mip_level_count = u32::try_from(levels.len()).ok()?;
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("particle preview sprite"),
         size: wgpu::Extent3d {
@@ -780,14 +792,14 @@ fn create_rgba_texture_view(
             height: first.height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: valid_levels as u32,
+        mip_level_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (level, mip) in levels.iter().take(valid_levels).enumerate() {
+    for (level, mip) in levels.iter().enumerate() {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &gpu_texture,
@@ -903,8 +915,6 @@ impl shader::Pipeline for ParticlePipeline {
             })
         };
 
-        // Source sprite blending: translucent = classic alpha, additive =
-        // src_alpha additive (`$additive 1`).
         let translucent = create_pipeline(
             "particle preview translucent",
             wgpu::BlendState::ALPHA_BLENDING,
@@ -1028,5 +1038,68 @@ impl shader::Pipeline for ParticlePipeline {
         let live = std::mem::take(&mut self.live);
         self.textures
             .retain(|(content_id, _), _| live.contains(content_id));
+    }
+}
+
+#[cfg(test)]
+mod texture_tests {
+    use super::particle_texture_levels;
+    use crate::bridge::materials::{MaterialResolver, TextureLoadOutcome};
+    use crate::test_support::fixture_vtf_bytes;
+    use vformats::vtf::VtfFormat;
+
+    #[test]
+    fn particle_upload_checks_availability_and_device_extent_before_allocation() {
+        let resolver = MaterialResolver::prop_lighting_fixture(
+            vec![
+                (
+                    "materials/particle/base.vmt",
+                    br#"UnlitGeneric { "$basetexture" "particle/image" }"#.to_vec(),
+                ),
+                (
+                    "materials/particle/image.vtf",
+                    fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[64; 4], &[64; 16]]),
+                ),
+            ],
+            Vec::new(),
+        );
+        let accepted = resolver
+            .resolve_primary(&[], "particle/base")
+            .into_material()
+            .unwrap()
+            .texture;
+        assert_eq!(particle_texture_levels(&accepted, 2).unwrap().len(), 2);
+        assert!(particle_texture_levels(&accepted, 1).is_none());
+        let rejected = resolver
+            .with_encoded_texture_budget(std::sync::Arc::new(
+                crate::bridge::materials::EncodedTextureBudget::new(0),
+            ))
+            .resolve_primary(&[], "particle/base")
+            .into_material()
+            .unwrap()
+            .texture;
+        assert_eq!(
+            rejected.load_outcome(),
+            TextureLoadOutcome::SourceBudgetRejected
+        );
+        assert!(particle_texture_levels(&rejected, 32).is_none());
+    }
+
+    #[test]
+    fn particle_upload_accepts_the_native_error_image() {
+        let resolver = MaterialResolver::prop_lighting_fixture(
+            vec![(
+                "materials/particle/error.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/absent" }"#.to_vec(),
+            )],
+            Vec::new(),
+        );
+        let texture = resolver
+            .resolve_primary(&[], "particle/error")
+            .into_material()
+            .unwrap()
+            .texture;
+        assert_eq!(texture.load_outcome(), TextureLoadOutcome::MissingSource);
+        assert_eq!(particle_texture_levels(&texture, 32).unwrap().len(), 1);
     }
 }

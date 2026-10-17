@@ -10,7 +10,8 @@ fn declared_batch_is_lowered_only_by_aggregate_device_and_host_limits() {
         batch_capacity(
             UploadPolicy {
                 aggregate_staging_bytes: 513,
-                batch_bytes: 8192
+                batch_bytes: 8192,
+                ..Default::default()
             },
             4096
         )
@@ -22,7 +23,8 @@ fn declared_batch_is_lowered_only_by_aggregate_device_and_host_limits() {
         batch_capacity(
             UploadPolicy {
                 aggregate_staging_bytes: 0,
-                batch_bytes: 8192
+                batch_bytes: 8192,
+                ..Default::default()
             },
             4096
         )
@@ -234,6 +236,7 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
             UploadPolicy {
                 aggregate_staging_bytes: 512,
                 batch_bytes: 256,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -254,7 +257,7 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
         let texture = uploader
             .lock()
             .unwrap()
-            .allocate(&wgpu::TextureDescriptor {
+            .allocate_material(&wgpu::TextureDescriptor {
                 label: Some("bounded fallback fixture"),
                 size: wgpu::Extent3d {
                     width: 8,
@@ -442,8 +445,15 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
                 .sum::<u64>()
                 * 12
         );
+        assert_eq!(stats.material_image_bytes, stats.owned_image_texel_bytes);
         drop(texture);
-        assert_eq!(uploader.lock().unwrap().stats().owned_image_allocations, 0);
+        assert_eq!(uploader.lock().unwrap().stats().owned_image_allocations, 1);
+        drop(_array);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        device.poll(wgpu::PollType::Poll).unwrap();
+        let retired = uploader.lock().unwrap().stats();
+        assert_eq!(retired.owned_image_allocations, 0);
+        assert_eq!(retired.material_image_bytes, 0);
     }
 }
 
@@ -468,6 +478,7 @@ fn gpu_cancel_unsubmitted_batch_releases_staging_and_texture_ownership() {
         UploadPolicy {
             aggregate_staging_bytes: 512,
             batch_bytes: 256,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -508,6 +519,7 @@ fn gpu_cancel_unsubmitted_batch_releases_staging_and_texture_ownership() {
     assert_eq!(ledger.owned_images.load(Ordering::Acquire), 1);
     assert_eq!(ledger.staging.load(Ordering::Acquire), 256);
     drop(uploader);
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     assert_eq!(ledger.owned_images.load(Ordering::Acquire), 0);
     assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
     assert_eq!(ledger.submissions.load(Ordering::Acquire), 0);
@@ -563,4 +575,63 @@ fn capture_policy_rejects_unusable_or_malformed_budgets() {
     }
     let policy = capture_policy(Some("256"), Some("256")).unwrap();
     assert_eq!(batch_capacity(policy, 256).unwrap(), 256);
+}
+
+#[test]
+fn image_cost_counts_actual_storage_all_mips_and_layers() {
+    assert_eq!(
+        image_texel_bytes(wgpu::TextureFormat::Rgba8Unorm, [8, 8], 4, 12).unwrap(),
+        4080
+    );
+    assert_eq!(
+        image_texel_bytes(wgpu::TextureFormat::Rgba8UnormSrgb, [8, 8], 4, 12).unwrap(),
+        4080
+    );
+    assert_eq!(
+        image_texel_bytes(wgpu::TextureFormat::Bc1RgbaUnorm, [8, 8], 4, 12).unwrap(),
+        672
+    );
+    assert_eq!(
+        image_texel_bytes(wgpu::TextureFormat::Bc3RgbaUnormSrgb, [8, 8], 4, 12).unwrap(),
+        1344
+    );
+    assert!(matches!(
+        image_texel_bytes(wgpu::TextureFormat::Rgba8Unorm, [u32::MAX; 2], 1, u32::MAX),
+        Err(UploadError::Overflow)
+    ));
+    assert!(matches!(
+        image_texel_bytes(wgpu::TextureFormat::Rgba8Unorm, [1, 1], 2, 1),
+        Err(UploadError::InvalidLayout)
+    ));
+}
+
+#[test]
+fn material_admission_is_transactional_and_releases_only_owned_allocations() {
+    let policy = UploadPolicy {
+        material_image_bytes: 100,
+        material_image_allocations: 2,
+        ..Default::default()
+    };
+    let mut admission = ImageAdmission::default();
+    admission.reserve(policy, 60).unwrap();
+    assert!(matches!(
+        admission.reserve(policy, 41),
+        Err(UploadError::ImageBudget { .. })
+    ));
+    assert_eq!((admission.bytes, admission.allocations), (60, 1));
+    admission.reserve(policy, 40).unwrap();
+    assert!(matches!(
+        admission.reserve(policy, 0),
+        Err(UploadError::ImageBudget { .. })
+    ));
+    assert_eq!(
+        (admission.bytes, admission.allocations, admission.rejections),
+        (100, 2, 2)
+    );
+    admission.release(60);
+    admission.reserve(policy, 60).unwrap();
+    admission.release(40);
+    admission.release(60);
+    assert_eq!((admission.bytes, admission.allocations), (0, 0));
+    assert_eq!((admission.peak_bytes, admission.peak_allocations), (100, 2));
 }
