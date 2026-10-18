@@ -141,6 +141,7 @@ pub(super) fn resolve(
 
 /// Merge raw KeyValues before profile selection. Preserve blocks and duplicate
 /// source entries, replacing only the first matching key just as FindKey does.
+/// Source insert overwrites existing keys too; replace only forbids new keys.
 pub(super) fn merge(base: &mut KvDocument<'static>, patch: &KvDocument<'_>, insert: bool) {
     for pair in &patch.pairs {
         if let Some(existing) = base
@@ -150,8 +151,7 @@ pub(super) fn merge(base: &mut KvDocument<'static>, patch: &KvDocument<'_>, inse
         {
             match (&mut existing.value, &pair.value) {
                 (KvValue::Block(base), KvValue::Block(patch)) => merge(base, patch, insert),
-                _ if !insert => existing.value = owned_value(&pair.value),
-                _ => {}
+                _ => existing.value = owned_value(&pair.value),
             }
         } else if insert {
             base.pairs.push(KvPair {
@@ -275,13 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_preserves_existing_values_and_adds_missing_nested_values() {
+    fn insert_overrides_existing_values_and_adds_missing_nested_values() {
         let source = material(r#"LightmappedGeneric { dx9 { "$color" "selected" } }"#);
         let mut source = owned(&source.kv);
-        let patch = material(r#"Patch { insert { dx9 { "$color" "ignored" "$alpha" ".7" } } }"#);
+        let patch = material(r#"Patch { insert { dx9 { "$color" "patched" "$alpha" ".7" } } }"#);
         merge(&mut source, patch.kv.blocks("insert").next().unwrap(), true);
         let values = resolve(&source, "LightmappedGeneric", HardwareProfile::LDR).0;
-        assert_eq!(values["$color"], "selected");
+        assert_eq!(values["$color"], "patched");
         assert_eq!(values["$alpha"], ".7");
     }
     #[test]

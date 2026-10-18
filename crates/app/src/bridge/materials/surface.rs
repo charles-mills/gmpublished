@@ -2,9 +2,11 @@ use super::parameters::{scalar, texture_transform};
 use super::{Arc, BTreeMap, DecodedTextureFrames, EffectiveMaterial, MaterialResolver};
 
 mod animation;
+mod scroll;
 #[cfg(test)]
 pub use animation::AnimationWrap;
 pub use animation::{AnimatedTexture, AnimationClock, AnimationError, FrameChannel};
+pub use scroll::TextureScroll;
 
 pub type TextureTransform = [[f32; 4]; 2];
 
@@ -216,6 +218,7 @@ pub struct SurfaceMaterial {
     pub no_cull: bool,
     pub ignore_z: bool,
     pub animated_textures: Vec<AnimatedTexture>,
+    pub texture_scrolls: Vec<TextureScroll>,
     pub unsupported_proxies: Vec<String>,
 }
 
@@ -230,6 +233,28 @@ impl SurfaceMaterial {
         self.animated_textures
             .iter()
             .any(|proxy| proxy.frame_rate != 0.0)
+            || self
+                .texture_scrolls
+                .iter()
+                .enumerate()
+                .any(|(index, proxy)| {
+                    proxy.rate != 0.0
+                        && !self.texture_scrolls[index + 1..]
+                            .iter()
+                            .any(|later| later.parameter == proxy.parameter)
+                })
+    }
+
+    pub(crate) fn texture_transform(
+        &self,
+        parameter: &str,
+        authored: TextureTransform,
+    ) -> (TextureTransform, [f32; 4]) {
+        self.texture_scrolls
+            .iter()
+            .rev()
+            .find(|proxy| proxy.parameter == parameter)
+            .map_or((authored, [0.0; 4]), TextureScroll::transform)
     }
 
     pub(crate) fn uses_blend_modulation(&self, base_has_alpha: bool) -> bool {
@@ -626,6 +651,7 @@ impl Default for SurfaceMaterial {
             no_cull: false,
             ignore_z: false,
             animated_textures: Vec::new(),
+            texture_scrolls: Vec::new(),
             unsupported_proxies: Vec::new(),
         }
     }
@@ -756,6 +782,7 @@ impl MaterialResolver {
             no_cull: super::vmt_bool(get("$nocull")),
             ignore_z: super::vmt_bool(get("$ignorez")),
             animated_textures: Vec::new(),
+            texture_scrolls: Vec::new(),
             unsupported_proxies: Vec::new(),
         };
         for proxy in &material.proxies {
@@ -773,6 +800,8 @@ impl MaterialResolver {
                 } else {
                     surface.animated_textures.push(animation);
                 }
+            } else if let Some(scroll) = TextureScroll::parse(proxy) {
+                surface.texture_scrolls.push(scroll);
             } else {
                 surface.unsupported_proxies.push(proxy.name.clone());
             }

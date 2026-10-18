@@ -57,6 +57,11 @@ pub struct SurfaceUniform {
     pub env_mask_s: [f32; 4],
     pub env_mask_t: [f32; 4],
     pub alpha_state: [u32; 4],
+    pub base_scroll: [f32; 4],
+    pub normal_scroll: [f32; 4],
+    pub detail_scroll: [f32; 4],
+    pub blend_scroll: [f32; 4],
+    pub env_mask_scroll: [f32; 4],
 }
 
 fn model_gamma(value: f32) -> f32 {
@@ -117,6 +122,11 @@ impl SurfaceUniform {
             env_mask_s: identity[0],
             env_mask_t: identity[1],
             alpha_state: [1, 1, 0, 0],
+            base_scroll: [0.0; 4],
+            normal_scroll: [0.0; 4],
+            detail_scroll: [0.0; 4],
+            blend_scroll: [0.0; 4],
+            env_mask_scroll: [0.0; 4],
         };
         let Some(surface) = surface else {
             return result;
@@ -143,19 +153,31 @@ impl SurfaceUniform {
             surface.color2[2],
             surface.alpha,
         ];
-        result.base_s = surface.base_transform[0];
-        result.base_t = surface.base_transform[1];
+        let (base_transform, base_scroll) =
+            surface.texture_transform("$basetexturetransform", surface.base_transform);
+        result.base_s = base_transform[0];
+        result.base_t = base_transform[1];
+        result.base_scroll = base_scroll;
+        result.normal_scroll = surface
+            .texture_transform("$bumptransform", surface.transform)
+            .1;
         if let Some(detail) = &surface.detail {
             result.flags[1] = surface.effective_detail_mode().map_or(0, |mode| mode + 1);
             let model = matches!(
                 surface.family,
                 SurfaceFamily::VertexLit | SurfaceFamily::Unlit
             );
-            let mut transform = if model {
-                detail.transform.unwrap_or(surface.base_transform)
+            let (mut transform, mut scroll) = if model {
+                surface.texture_transform(
+                    "$detailtexturetransform",
+                    detail.transform.unwrap_or(base_transform),
+                )
             } else {
-                surface.base_transform
+                (base_transform, base_scroll)
             };
+            if model && detail.transform.is_none() && scroll == [0.0; 4] {
+                scroll = base_scroll;
+            }
             // Detail scale also scales authored translation.
             for row in &mut transform {
                 row[0] *= detail.scale[0];
@@ -163,8 +185,11 @@ impl SurfaceUniform {
             }
             transform[0][3] *= detail.scale[0];
             transform[1][3] *= detail.scale[1];
+            scroll[2] *= detail.scale[0];
+            scroll[3] *= detail.scale[1];
             result.detail_s = transform[0];
             result.detail_t = transform[1];
+            result.detail_scroll = scroll;
             result.detail = [
                 if surface.family == SurfaceFamily::Unlit {
                     1.0
@@ -203,8 +228,11 @@ impl SurfaceUniform {
             modulation: u32::from(surface.uses_blend_modulation(base_has_alpha)),
             padding: 0,
         };
-        result.blend_s = surface.blend_mask_transform[0];
-        result.blend_t = surface.blend_mask_transform[1];
+        let (blend_transform, blend_scroll) =
+            surface.texture_transform("$blendmasktransform", surface.blend_mask_transform);
+        result.blend_s = blend_transform[0];
+        result.blend_t = blend_transform[1];
+        result.blend_scroll = blend_scroll;
         if let Some(envmap) = &surface.envmap {
             use crate::bridge::materials::{EnvironmentMapMask, EnvironmentMapSource};
             result.env_flags[0] =
@@ -271,8 +299,11 @@ impl SurfaceUniform {
             {
                 result.env_flags[0] = 0;
             }
-            result.env_mask_s = envmap.mask_transform[0];
-            result.env_mask_t = envmap.mask_transform[1];
+            let (transform, scroll) =
+                surface.texture_transform("$envmapmasktransform", envmap.mask_transform);
+            result.env_mask_s = transform[0];
+            result.env_mask_t = transform[1];
+            result.env_mask_scroll = scroll;
         }
         let alpha_mask = surface.base_alpha_is_mask(base_has_alpha);
         result.state[0] = u32::from(surface.alpha_test && !alpha_mask);

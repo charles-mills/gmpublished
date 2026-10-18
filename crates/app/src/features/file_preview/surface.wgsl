@@ -51,6 +51,11 @@ struct Surface {
     env_mask_s:vec4<f32>,
     env_mask_t:vec4<f32>,
     alpha_state:vec4<u32>,
+    base_scroll:vec4<f32>,
+    normal_scroll:vec4<f32>,
+    detail_scroll:vec4<f32>,
+    blend_scroll:vec4<f32>,
+    env_mask_scroll:vec4<f32>,
 }
 @group(1) @binding(8) var<uniform> surface:Surface;
 @group(1) @binding(9) var surface_detail_texture:texture_2d_array<f32>;
@@ -67,6 +72,13 @@ struct Surface {
 fn surface_uv(uv:vec2<f32>,s:vec4<f32>,t:vec4<f32>)->vec2<f32> {
     let value=vec4<f32>(uv,0.0,1.0);
     return vec2<f32>(dot(value,s),dot(value,t));
+}
+
+fn surface_scroll_uv(uv:vec2<f32>,s:vec4<f32>,t:vec4<f32>,scroll:vec4<f32>)->vec2<f32> {
+    // Wrap the translation, including negative scroll rates, before applying
+    // detail scale. The clock belongs to this view, not the cached material.
+    let offset=fract(uniforms.water_time_sky_tint.x*scroll.xy)*scroll.zw;
+    return surface_uv(uv,s,t)+offset;
 }
 
 fn surface_gamma(color:vec3<f32>)->vec3<f32> {
@@ -98,7 +110,7 @@ fn surface_uses_blend_modulation(height_fog:bool)->bool {
 fn surface_weight(uv:vec2<f32>,blend:f32,height_fog:bool)->f32 {
     let weight=select(clamp(blend,0.0,1.0),0.5,surface.blend.masked!=0u);
     if !surface_uses_blend_modulation(height_fog) {return weight;}
-    let mask=textureSample(surface_blend_texture,surface_blend_sampler,surface_uv(uv,surface.blend_s,surface.blend_t),0);
+    let mask=textureSample(surface_blend_texture,surface_blend_sampler,surface_scroll_uv(uv,surface.blend_s,surface.blend_t,surface.blend_scroll),0);
     if surface.blend.masked!=0u {return mask.g;}
     let low=clamp(mask.g-mask.r,0.0,1.0);
     let high=clamp(mask.g+mask.r,0.0,1.0);
@@ -109,7 +121,7 @@ fn surface_weight(uv:vec2<f32>,blend:f32,height_fog:bool)->f32 {
 fn surface_detail(uv:vec2<f32>)->vec4<f32> {
     if surface.flags.y==0u {return vec4<f32>(1.0);}
     let layer=i32(u32(max(surface.detail.y,0.0))%max(textureNumLayers(surface_detail_texture),1u));
-    let sample=textureSample(surface_detail_texture,surface_detail_sampler,surface_uv(uv,surface.detail_s,surface.detail_t),layer);
+    let sample=textureSample(surface_detail_texture,surface_detail_sampler,surface_scroll_uv(uv,surface.detail_s,surface.detail_t,surface.detail_scroll),layer);
     return vec4<f32>(sample.rgb*surface.detail_tint.rgb,sample.a);
 }
 
@@ -156,7 +168,7 @@ fn surface_emission(lit:vec3<f32>,albedo:vec3<f32>,alpha:f32,uv:vec2<f32>,vertex
     }
     if surface.flags.z==EMISSION_ENVIRONMENT_MASK {
         let layer=i32(surface.env_flags.z%max(textureNumLayers(surface_envmask),1u));
-        let glow=8.0*textureSample(surface_envmask,surface_envmask_sampler,surface_uv(uv,surface.env_mask_s,surface.env_mask_t),layer).a;
+        let glow=8.0*textureSample(surface_envmask,surface_envmask_sampler,surface_scroll_uv(uv,surface.env_mask_s,surface.env_mask_t,surface.env_mask_scroll),layer).a;
         return max(0.0,1.0-glow)*lit+glow*albedo*surface.emission.rgb;
     }
     return mix(lit,albedo*surface.emission.rgb,mask);

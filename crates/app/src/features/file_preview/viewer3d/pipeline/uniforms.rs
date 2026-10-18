@@ -197,8 +197,9 @@ impl MaterialUniform {
         } else {
             BumpMode::None
         } as u32;
-        self.normal_s = surface.transform[0];
-        self.normal_t = surface.transform[1];
+        let (transform, _) = surface.texture_transform("$bumptransform", surface.transform);
+        self.normal_s = transform[0];
+        self.normal_t = transform[1];
 
         self
     }
@@ -504,7 +505,7 @@ impl Uniforms {
                 ]
             }),
             fog: FogUniform::for_map(fog, fog_scale),
-            water_time_sky_tint: [0.0; 4],
+            water_time_sky_tint: [camera.water_time, 0.0, 0.0, 0.0],
             water_depth_params: [view_camera.near, view_camera.far, 0.0, 0.0],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],
@@ -543,7 +544,7 @@ impl Uniforms {
             camera_position: [eye[0], eye[1], eye[2], 0.0],
             fog_color: [0.0; 4],
             fog: FogUniform::DISABLED,
-            water_time_sky_tint: [0.0; 4],
+            water_time_sky_tint: [camera.animation_clock.time_seconds, 0.0, 0.0, 0.0],
             water_depth_params: [0.0; 4],
             clip_plane: [0.0; 4],
             medium_plane: [0.0; 4],

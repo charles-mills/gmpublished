@@ -1941,7 +1941,7 @@ fn water_patch_preserves_normal_animation_and_shader_with_a_base_texture() {
         "water base alpha controls reflectivity"
     );
     assert_eq!(water.fog_start, 20.0);
-    assert_eq!(water.fog_end, 1024.0);
+    assert_eq!(water.fog_end, 999.0);
     assert_eq!(water.parameters["$waterdepth"], "800");
     assert_eq!(water.parameters["$envmap"], "maps/example/cubemap");
     assert_eq!(water.below_material.as_deref(), Some("water/below"));
@@ -2334,9 +2334,9 @@ fn unlit_patch_inherits_identity_and_overrides_vertex_flags() {
         .resolve_with_base2(&[], "unlit/inherited")
         .into_material()
         .unwrap();
-    assert_eq!(inherited.render_mode, RenderMode::Translucent);
+    assert_eq!(inherited.render_mode, RenderMode::Opaque);
     let unlit = inherited.shader.unlit().unwrap();
-    assert!(unlit.vertex_alpha && !unlit.vertex_color);
+    assert!(!unlit.vertex_alpha && unlit.vertex_color);
     assert_eq!(unlit.shader, "uNlItGeNeRiC_DX9");
     let replaced = resolver
         .resolve_with_base2(&[], "unlit/replaced")
@@ -2392,7 +2392,7 @@ fn patched_surface_retains_raw_shader_terms_and_independent_texture_roles() {
     assert_eq!(surface.alpha, 0.4);
     assert_ne!(surface.base_transform, surface.base2_transform.unwrap());
     let detail = surface.detail.as_ref().unwrap();
-    assert_eq!(detail.scale, [0.12; 2]);
+    assert_eq!(detail.scale, [9.0; 2]);
     assert_eq!(detail.factor, 0.75);
     assert_eq!(detail.tint, [2.0, 1.0, 0.5]);
     assert_eq!(

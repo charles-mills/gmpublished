@@ -179,7 +179,7 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     let mark_fade=vertex_surface_mark_fade(input);
     if mark_fade<=0.0 {discard;}
     let weight=surface_weight(input.uv,input.blend_alpha,height_fog);
-    let uv=surface_uv(input.uv,surface.base_s,surface.base_t);
+    let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
     var albedo=textureSample(base_texture,base_sampler,uv);
     let sampled_base=albedo;
     if surface.flags.x==SURFACE_DECAL_MODULATE {
@@ -313,7 +313,7 @@ fn fs_additive(input:VertexOutput) -> @location(0) vec4<f32> {
 }
 
 fn surface_bump_normal(input:VertexOutput,weight:f32)->vec3<f32> {
-    let uv=surface_uv(input.uv,material.normal_s,material.normal_t);
+    let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
     let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
     let first=textureSample(normal_texture,normal_sampler,uv,layer).xyz;
     let second=textureSample(normal_texture2,normal2_sampler,uv,0).xyz;
@@ -367,7 +367,7 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
     }
     var normal_alpha=1.0;
     if (surface.env_flags.w&ENV_BUMP)!=0u {
-        let uv=surface_uv(input.uv,material.normal_s,material.normal_t);
+        let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
         let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
         let first=textureSample(normal_texture,normal_sampler,uv,layer);
         var encoded=first.xyz;
@@ -395,7 +395,7 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
     if surface.env_flags.y==ENV_MASK_NORMAL_ALPHA {mask=vec3<f32>(normal_alpha);}
     if surface.env_flags.y==ENV_MASK_TEXTURE {
         let layer=i32(surface.env_flags.z%max(textureNumLayers(surface_envmask),1u));
-        mask=textureSample(surface_envmask,surface_envmask_sampler,surface_uv(input.uv,surface.env_mask_s,surface.env_mask_t),layer).rgb;
+        mask=textureSample(surface_envmask,surface_envmask_sampler,surface_scroll_uv(input.uv,surface.env_mask_s,surface.env_mask_t,surface.env_mask_scroll),layer).rgb;
     }
     var eye=uniforms.camera_position.xyz-input.world_position_clip.xyz;
     if !world && (surface.env_flags.w&ENV_BUMP)!=0u {eye=input.eye_vertex_unit;}
@@ -407,7 +407,7 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
 }
 
 fn model_sampled_normal(input:VertexOutput,base_alpha:f32)->vec4<f32> {
-    let uv=surface_uv(input.uv,surface.base_s,surface.base_t);
+    let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
     var texel=vec4<f32>(0.5,0.5,1.0,1.0);
     if model_material.normal!=0u {texel=textureSample(normal_texture,normal_sampler,uv,0);}
     let base_mask=model_material.skin!=0u && (model_material.features&MODEL_BASE_ALPHA_MASK)!=0u;
@@ -465,7 +465,7 @@ fn model_specular_lighting(input:VertexOutput,base_linear:vec3<f32>,base_alpha:f
     let normal=sampled.xyz;
     let eye=normalize(input.eye_vertex_unit);
     let fresnel=source_model_phong_fresnel(normal,eye,model_material.fresnel.xyz);
-    let uv=surface_uv(input.uv,surface.base_s,surface.base_t);
+    let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
     let exponent_texel=textureSample(model_exponent,model_exponent_sampler,uv,0);
     let exponent=source_model_phong_exponent(model_material.exponent,exponent_texel.r);
     let warp=(model_material.features&MODEL_SPECULAR_WARP)!=0u;

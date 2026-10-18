@@ -46,7 +46,7 @@ pub struct Camera {
     pub(super) drag_from: Option<Point>,
     animation_started_at: Option<std::time::Instant>,
     animation_last_frame: Option<std::time::Instant>,
-    animation_clock: AnimationClock,
+    pub(super) animation_clock: AnimationClock,
 }
 
 impl Default for Camera {
