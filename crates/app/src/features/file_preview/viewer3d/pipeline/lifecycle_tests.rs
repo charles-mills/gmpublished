@@ -228,6 +228,7 @@ impl iced::widget::shader::Program<crate::features::file_preview::Message> for C
 
 #[derive(Default)]
 struct Harness {
+    cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     cache: user_interface::Cache,
     observers: Vec<super::super::capture::CaptureDiagnostics>,
     bodygroups: Vec<Vec<usize>>,
@@ -282,6 +283,7 @@ impl Harness {
                         .copied()
                         .unwrap_or_default(),
                     viewer: super::super::camera::Viewer3d {
+                        cpu_executor: self.cpu_executor.clone(),
                         model: Arc::clone(model),
                         render_feedback: Arc::clone(feedback),
                         content_id: 1,
@@ -344,15 +346,65 @@ impl Harness {
     fn image_residency(&self, index: usize) -> serde_json::Value {
         self.observers[index].lock().unwrap()["image_resources"].clone()
     }
+
+    fn assert_optical_parallel_preparations(&self) {
+        let parallel_enabled = std::env::var_os("GMPUBLISHED_PARALLEL_OPTICAL_PLANNING").as_deref()
+            != Some(std::ffi::OsStr::new("0"));
+        for observer in &self.observers {
+            let diagnostics = observer.lock().unwrap().clone();
+            for kind in ["reflection_views", "refraction_views"] {
+                let views = diagnostics[kind].as_array().expect("optical diagnostics");
+                assert!(!views.is_empty(), "fixture must prepare {kind}");
+                for view in views {
+                    let count =
+                        view["preparation"]["optical_cpu_planning"]["parallel_preparations"]
+                            .as_u64()
+                            .expect("lifetime optical parallel preparation counter");
+                    if parallel_enabled {
+                        assert!(count > 0, "{kind} did not execute CPU planning on the pool");
+                    } else {
+                        assert_eq!(
+                            count, 0,
+                            "serial control executed parallel optical planning"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
-fn renderer() -> iced::Renderer {
-    iced::futures::executor::block_on(iced::Renderer::new(
+struct TestRenderer {
+    renderer: iced::Renderer,
+    _completion_scope: super::completion::TestDeviceScope,
+}
+impl std::ops::Deref for TestRenderer {
+    type Target = iced::Renderer;
+    fn deref(&self) -> &Self::Target {
+        &self.renderer
+    }
+}
+impl std::ops::DerefMut for TestRenderer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.renderer
+    }
+}
+
+fn renderer() -> TestRenderer {
+    let renderer = iced::futures::executor::block_on(iced::Renderer::new(
         iced::Font::default(),
         iced::Pixels(16.),
         Some("wgpu"),
     ))
-    .expect("native GPU renderer")
+    .expect("native GPU renderer");
+    let iced::Renderer::Primary(primary) = &renderer else {
+        panic!("lifecycle fixture requires the GPU renderer");
+    };
+    let completion_scope = super::completion::TestDeviceScope::new(primary.device());
+    TestRenderer {
+        renderer,
+        _completion_scope: completion_scope,
+    }
 }
 
 fn center(pixels: &[u8], x: usize) -> [u8; 4] {
@@ -1716,6 +1768,7 @@ fn iced_animated_props_use_the_same_pose_in_main_reflection_refraction_and_under
         (model, Arc::default()),
     ];
     let mut harness = Harness {
+        cpu_executor: Some(gmpublished_backend::CpuExecutor::build(4).unwrap()),
         maps: vec![Some(map); 2],
         bodygroups: vec![vec![0, 1]; 2],
         ..Harness::default()
@@ -1733,6 +1786,9 @@ fn iced_animated_props_use_the_same_pose_in_main_reflection_refraction_and_under
             Some(animation_phases(0.5, 0.5)),
         ];
         let different = harness.draw(&mut renderer, &views, &[0., 0.]);
+        if matches!(pass, AnimationCapturePass::Main) {
+            harness.assert_optical_parallel_preparations();
+        }
         capture_animation_pass(pass, "different", &different, &harness);
         ready(&views[0].1, 0);
         ready(&views[1].1, 0);
@@ -1786,12 +1842,14 @@ fn iced_animated_planar_materials_reject_only_selected_unsupported_draws() {
     ];
     let mut renderer = renderer();
     let mut harness = Harness {
+        cpu_executor: Some(gmpublished_backend::CpuExecutor::build(4).unwrap()),
         maps: vec![Some(map); 2],
         bodygroups: vec![vec![0, 1]; 2],
         model_animation_phases: vec![Some(animation_phases(0., 0.)); 2],
         ..Harness::default()
     };
     harness.draw(&mut renderer, &views, &[0., 0.]);
+    harness.assert_optical_parallel_preparations();
     ready(&views[0].1, 0);
     ready(&views[1].1, 0);
     harness.skin_remaps = vec![vec![2, 1, 2], vec![0, 1, 2]];

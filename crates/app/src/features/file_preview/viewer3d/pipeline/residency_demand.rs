@@ -182,6 +182,63 @@ impl ViewDemandCache {
     }
 }
 
+fn sorted_material_slots(
+    slots: Arc<[usize]>,
+    additional: impl IntoIterator<Item = usize>,
+) -> Arc<[usize]> {
+    let mut additions: Vec<_> = additional
+        .into_iter()
+        .filter(|slot| slots.binary_search(slot).is_err())
+        .collect();
+    if additions.is_empty() {
+        return slots;
+    }
+    additions.sort_unstable();
+    additions.dedup();
+    let mut merged = Vec::with_capacity(slots.len() + additions.len());
+    let mut original = slots.iter().copied().peekable();
+    for slot in additions {
+        while original.peek().is_some_and(|&existing| existing < slot) {
+            if let Some(existing) = original.next() {
+                merged.push(existing);
+            }
+        }
+        merged.push(slot);
+    }
+    merged.extend(original);
+    merged.into()
+}
+
+fn complete_material_slots(
+    slots: Arc<[usize]>,
+    additional: impl IntoIterator<Item = usize>,
+    material_count: usize,
+) -> Result<Arc<[usize]>, DemandError> {
+    #[cfg(feature = "map-capture")]
+    let slots = {
+        static SORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *SORTED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_SORTED_MATERIAL_DEMAND").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        }) {
+            sorted_material_slots(slots, additional)
+        } else {
+            let mut original: BTreeSet<_> = slots.iter().copied().collect();
+            original.extend(additional);
+            original.into_iter().collect()
+        }
+    };
+    #[cfg(not(feature = "map-capture"))]
+    let slots = sorted_material_slots(slots, additional);
+    if let Some(&slot) = slots.iter().find(|&&slot| slot >= material_count) {
+        return Err(DemandError::InvalidMaterial {
+            slot,
+            count: material_count,
+        });
+    }
+    Ok(slots)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum ViewKey {
     Main,
@@ -243,36 +300,33 @@ impl FrameDemandCache {
         }
         self.views.retain(|key, _| active.contains(key));
         let mut output = FrameMaterialDemand::default();
-        let mut add = |key, view: &SceneView, sky_background, main| -> Result<(), DemandError> {
-            let mut slots: BTreeSet<_> = self
-                .views
-                .entry(key)
-                .or_default()
-                .collect(view, details, material_count, key != ViewKey::Intersection)?
-                .iter()
-                .copied()
-                .collect();
-            if sky_background {
-                slots.extend(view.sun.material_slots());
-            }
-            if main
-                && primitive.phy_debug_visible
-                && let Some(meshes) = upload.phy_debug_meshes.get()
-            {
-                slots.extend(meshes.iter().map(|mesh| mesh.material_index));
-            }
-            if let Some(&slot) = slots.iter().find(|&&slot| slot >= material_count) {
-                return Err(DemandError::InvalidMaterial {
-                    slot,
-                    count: material_count,
+        let mut add =
+            |key, view: &SceneView, sky_background: bool, main: bool| -> Result<(), DemandError> {
+                let slots = self.views.entry(key).or_default().collect(
+                    view,
+                    details,
+                    material_count,
+                    key != ViewKey::Intersection,
+                )?;
+                let debug_meshes = (main && primitive.phy_debug_visible)
+                    .then(|| upload.phy_debug_meshes.get())
+                    .flatten();
+                let additional = sky_background
+                    .then_some(&view.sun)
+                    .into_iter()
+                    .flat_map(super::sun::gpu::Frame::material_slots)
+                    .chain(
+                        debug_meshes
+                            .into_iter()
+                            .flatten()
+                            .map(|mesh| mesh.material_index),
+                    );
+                output.views.push(ViewMaterialDemand {
+                    materials: complete_material_slots(slots, additional, material_count)?,
+                    sky_background,
                 });
-            }
-            output.views.push(ViewMaterialDemand {
-                materials: slots.into_iter().collect(),
-                sky_background,
-            });
-            Ok(())
-        };
+                Ok(())
+            };
         add(ViewKey::Main, &frame.main, !primitive.submerged, true)?;
         for optical in &frame.planar_views {
             if let Some(view) = &optical.reflection {

@@ -1,4 +1,3 @@
-use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 use super::reflections::{PlanarView, SceneView};
 use super::targets::RenderTargets;
 use super::uniforms::FogUniform;
@@ -39,6 +38,34 @@ impl PlanarView {
             self.refraction = None;
             return;
         }
+        let input =
+            self.prepare_refraction_input(device, queue, resources, primitive, upload, inputs);
+        super::optical_planning::prepare_view(
+            self.refraction.as_mut().expect("initialized refraction"),
+            &input,
+            upload,
+            super::optical_planning::Common::new(primitive, upload),
+            false,
+        );
+        self.finish_refraction(device, queue, resources, primitive, upload, &input);
+    }
+
+    pub(super) fn prepare_refraction_input(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &RenderResources,
+        primitive: &ModelPrimitive,
+        upload: &ViewerScene,
+        inputs: OpticalInputs<'_>,
+    ) -> super::optical_planning::Input {
+        let OpticalInputs {
+            size,
+            lighting,
+            surface_marks,
+        } = inputs;
+        let source = &upload.assets.reflectors[self.surface_index];
+        let shader = &primitive.preview.render_scene().materials[source.material_slot].shader;
         let view = self
             .refraction
             .get_or_insert_with(|| SceneView::new(device, resources, lighting, surface_marks));
@@ -145,50 +172,46 @@ impl PlanarView {
                 ]),
             );
         }
-        let plans = view.plan_cache.prepare(
-            upload,
-            DrawPlanRequest {
-                world_view: Some(&uniforms),
-                skybox_view: skybox.as_ref(),
-                content_id: primitive.content_id,
-                selection: DrawPlanSelection {
-                    skin_remap: &primitive.skin_remap,
-                    bodygroup_choices: &primitive.bodygroup_choices,
-                },
-                camera_position: uniforms.camera_position,
-                map_skybox_visible: primitive.map_skybox_visible
-                    && (shader.water().is_none() || below_water),
-                map_skybox_content_present: upload.assets.has_map_skybox_content(),
-                map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
-                visibility_plan: view.visibility.plan.as_ref(),
-            },
-            view.visibility.revision,
-            super::view_preparation::Entities::All,
-        );
-        view.plans = Some(plans);
-        super::transparency::prepare(
-            view,
-            upload,
-            &uniforms,
-            skybox.as_ref(),
-            shader
+        super::optical_planning::Input {
+            world: uniforms,
+            skybox,
+            skybox_visible: primitive.map_skybox_visible
+                && (shader.water().is_none() || below_water),
+            entities: super::view_preparation::Entities::All,
+            water_side: shader
                 .water()
                 .map(|water| super::transparency::WaterSide::from_submerged(water.above_water)),
-            shader.water().is_none(),
-        );
+            include_water: shader.water().is_none(),
+            kind: super::draw::ViewKind::Refraction,
+            excluded_plane: Some(plane),
+            size,
+        }
+    }
+
+    pub(super) fn finish_refraction(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &RenderResources,
+        primitive: &ModelPrimitive,
+        upload: &ViewerScene,
+        input: &super::optical_planning::Input,
+    ) {
+        let view = self.refraction.as_mut().expect("initialized refraction");
         super::planar::prepare(
             view,
             upload,
             primitive.preview.render_scene(),
             device,
             queue,
-            Some(plane),
+            input.excluded_plane,
         );
+        super::transparent_indirect::prepare(view, upload, device, queue);
         RenderTargets::ensure(
             &mut view.targets,
             device,
-            resources.for_view(super::draw::ViewKind::Refraction),
-            size,
+            resources.for_view(input.kind),
+            input.size,
         );
     }
 }

@@ -9,14 +9,16 @@ use super::images::{Image, ImageCache, ImageUploadIssue, ImageView};
 use super::materials::{
     BaseTextureFrame, MaterialTextureViews, MaterialUploadMode, PreparedMaterial, SampledTexture,
 };
+use super::residency_hash::{Map as ResidencyMap, Set as ResidencySet};
 use super::resources::RenderResources;
 use super::{MaterialSlot, PreviewScene, SceneKey, wgpu};
 use crate::bridge::materials::{
     DecodedTextureFrames, EnvironmentMapSource, PageStatus, PageTicket, ReloadableTextureSource,
     TextureFrameRequest, TexturePageCache, TextureReadTransfer, TextureRole, TextureSourceId,
 };
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct MaterialKey {
@@ -160,8 +162,104 @@ pub(super) enum SampledAllocation {
 
 pub(super) type WorkingSet = super::admission::Cost<SampledAllocation>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageDevicePolicy {
+    supports_bc: bool,
+    max_dimension: u32,
+    max_array_layers: u32,
+}
+impl PageDevicePolicy {
+    fn new(device: &wgpu::Device) -> Self {
+        let limits = device.limits();
+        Self {
+            supports_bc: super::materials::bc_upload_enabled(device),
+            max_dimension: limits.max_texture_dimension_2d,
+            max_array_layers: limits.max_texture_array_layers,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedPage {
+    normalized: TextureFrameRequest,
+    bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PageValidation {
+    cached: Option<(PageDevicePolicy, Result<ValidatedPage, String>)>,
+}
+impl PageValidation {
+    fn get_with(
+        &mut self,
+        policy: PageDevicePolicy,
+        enabled: bool,
+        validate: impl FnOnce() -> Result<ValidatedPage, String>,
+    ) -> Result<Cow<'_, ValidatedPage>, String> {
+        if enabled {
+            self.get_or_init(policy, validate).map(Cow::Borrowed)
+        } else {
+            validate().map(Cow::Owned)
+        }
+    }
+
+    fn get_or_init(
+        &mut self,
+        policy: PageDevicePolicy,
+        validate: impl FnOnce() -> Result<ValidatedPage, String>,
+    ) -> Result<&ValidatedPage, String> {
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != policy)
+        {
+            self.cached = Some((policy, validate()));
+        }
+        self.cached
+            .as_ref()
+            .expect("page validation initialized")
+            .1
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+
+fn page_validation_cache_enabled() -> bool {
+    #[cfg(feature = "map-capture")]
+    {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_PAGE_VALIDATION_CACHE").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        })
+    }
+    #[cfg(not(feature = "map-capture"))]
+    true
+}
+
+fn validate_page(
+    device: &wgpu::Device,
+    key: &PageKey,
+    source: &ReloadableTextureSource,
+    include_allocation_cost: bool,
+) -> Result<ValidatedPage, String> {
+    let normalized = ImageCache::page_request_for_device(device, &key.request, source.metadata());
+    source
+        .validate_page(&normalized)
+        .map_err(|error| error.to_string())?;
+    let bytes = if include_allocation_cost {
+        ImageCache::page_allocation_cost(device, &key.request, source.metadata())
+            .map_err(|error| error.to_string())?
+    } else {
+        0
+    };
+    Ok(ValidatedPage { normalized, bytes })
+}
+
 #[derive(Debug)]
 struct PendingPage {
+    // The owning map keys validation by full request policy, not compatible image identity.
+    validation: PageValidation,
     source: Arc<ReloadableTextureSource>,
     ticket: Option<PageTicket>,
     image: Option<Arc<Image>>,
@@ -198,8 +296,8 @@ struct SceneSources {
 pub(super) struct BindingCache {
     images: ImageCache,
     service: Result<Arc<TexturePageCache>, crate::bridge::materials::PageCacheInitError>,
-    pages: HashMap<PageKey, PendingPage>,
-    materials: HashMap<MaterialKey, Arc<MaterialBinding>>,
+    pages: ResidencyMap<PageKey, PendingPage>,
+    materials: ResidencyMap<MaterialKey, Arc<MaterialBinding>>,
     capacity_blocked: bool,
     external_active: super::lightmaps::MissingCost,
     lightmap_warm: Option<Arc<Mutex<super::lightmaps::WarmPages>>>,
@@ -209,8 +307,8 @@ pub(super) struct BindingCache {
     source_scenes: HashMap<SceneKey, SceneSources>,
     open_sources: HashSet<TextureSourceId>,
     retiring_warm: Vec<Weak<Image>>,
-    staged_keys: HashSet<PageKey>,
-    active_keys: HashSet<PageKey>,
+    staged_keys: ResidencySet<PageKey>,
+    active_keys: ResidencySet<PageKey>,
     staging_sources: bool,
 }
 type WarmPages = warm::WarmImages<AllocationKey, PageKey, ReloadableTextureSource, Image>;
@@ -331,8 +429,8 @@ impl BindingCache {
         Self {
             images: ImageCache::new(capabilities),
             service,
-            pages: HashMap::new(),
-            materials: HashMap::new(),
+            pages: ResidencyMap::default(),
+            materials: ResidencyMap::default(),
             capacity_blocked: false,
             external_active: super::lightmaps::MissingCost::default(),
             lightmap_warm: None,
@@ -342,8 +440,8 @@ impl BindingCache {
             source_scenes: HashMap::new(),
             open_sources: HashSet::new(),
             retiring_warm: Vec::new(),
-            staged_keys: HashSet::new(),
-            active_keys: HashSet::new(),
+            staged_keys: ResidencySet::default(),
+            active_keys: ResidencySet::default(),
             staging_sources: false,
         }
     }
@@ -480,16 +578,42 @@ impl BindingCache {
         key: MaterialKey,
         slot: &MaterialSlot,
     ) -> Result<Option<Arc<MaterialBinding>>, String> {
+        self.material_with_batch(device, queue, resources, key, slot, None)
+    }
+
+    fn material_with_batch(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &RenderResources,
+        key: MaterialKey,
+        slot: &MaterialSlot,
+        batch: Option<&super::texture_upload::UploadLeaseBatch>,
+    ) -> Result<Option<Arc<MaterialBinding>>, String> {
         if let Some(binding) = self.materials.get(&key) {
             return Ok(Some(Arc::clone(binding)));
         }
         super::texture_barriers::validate_material(slot).map_err(|error| error.to_string())?;
         let needs = material_pages(slot, &key.frames);
-        if !self.prepare_pages(device, queue, &resources.texture_uploader, &needs)? {
+        let ready = if batch.is_some() {
+            self.prepare_pages_with_batch(
+                device,
+                queue,
+                &resources.texture_uploader,
+                &needs,
+                batch,
+            )?
+        } else {
+            self.prepare_pages(device, queue, &resources.texture_uploader, &needs)?
+        };
+        if !ready {
             return Ok(None);
         }
         let frames = &key.frames;
-        let mut images = self.images.lease(&resources.texture_uploader);
+        let mut images = match batch {
+            Some(batch) => self.images.lease_batched(batch),
+            None => self.images.lease(&resources.texture_uploader),
+        };
         let flat_normal = &resources.flat_normal;
         let flat_sample = SampledTexture {
             view: flat_normal,
@@ -612,27 +736,40 @@ impl BindingCache {
         uploader: &super::texture_upload::SharedUploader,
         needs: &[(PageKey, Arc<ReloadableTextureSource>)],
     ) -> Result<bool, String> {
+        self.prepare_pages_with_batch(device, queue, uploader, needs, None)
+    }
+
+    fn prepare_pages_with_batch(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uploader: &super::texture_upload::SharedUploader,
+        needs: &[(PageKey, Arc<ReloadableTextureSource>)],
+        batch: Option<&super::texture_upload::UploadLeaseBatch>,
+    ) -> Result<bool, String> {
         if needs.is_empty() {
             return Ok(true);
         }
         let service = self.service.as_ref().map_err(ToString::to_string)?;
+        let cache_enabled = page_validation_cache_enabled();
+        let policy = PageDevicePolicy::new(device);
         let mut ready = true;
         for (key, source) in needs {
-            let normalized =
-                ImageCache::page_request_for_device(device, &key.request, source.metadata());
-            source
-                .validate_page(&normalized)
-                .map_err(|error| error.to_string())?;
             let state = self
                 .pages
                 .entry(key.clone())
                 .or_insert_with(|| PendingPage {
+                    validation: PageValidation::default(),
                     source: Arc::clone(source),
                     ticket: None,
                     image: None,
                     allocation: None,
                     error: None,
                 });
+            let validation = state.validation.get_with(policy, cache_enabled, || {
+                validate_page(device, key, &state.source, cache_enabled)
+            })?;
+            let bytes = validation.bytes;
             if let Some(image) = &state.image {
                 let allocation = allocation_key(&self.images, image, key.transfer);
                 self.retiring_warm
@@ -653,17 +790,21 @@ impl BindingCache {
                 state.ticket = None;
                 continue;
             }
-            let ticket = state
-                .ticket
-                .get_or_insert_with(|| service.request(Arc::clone(&state.source), normalized));
+            let ticket = state.ticket.get_or_insert_with(|| {
+                service.request(Arc::clone(&state.source), validation.normalized.clone())
+            });
             match ticket.status() {
                 PageStatus::Ready(page) => {
-                    let bytes = ImageCache::page_allocation_cost(
-                        device,
-                        &key.request,
-                        state.source.metadata(),
-                    )
-                    .map_err(|error| error.to_string())?;
+                    let bytes = if cache_enabled {
+                        bytes
+                    } else {
+                        ImageCache::page_allocation_cost(
+                            device,
+                            &key.request,
+                            state.source.metadata(),
+                        )
+                        .map_err(|error| error.to_string())?
+                    };
                     let allocation = AllocationKey {
                         resident: ImageCache::allocation_id(device, page.resident()),
                         transfer: (!self.images.compatible_transfer_views())
@@ -699,7 +840,10 @@ impl BindingCache {
                         ready = false;
                         continue;
                     }
-                    let mut lease = self.images.lease(uploader);
+                    let mut lease = match batch {
+                        Some(batch) => self.images.lease_batched(batch),
+                        None => self.images.lease(uploader),
+                    };
                     let dimension = if key.request.faces.len() == 6 {
                         ImageView::Cube(0)
                     } else {
@@ -773,18 +917,21 @@ struct TextureNeed<'a> {
     transfer: TextureReadTransfer,
 }
 
-fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec<TextureNeed<'a>> {
+fn visit_material_textures<'a, E>(
+    slot: &'a MaterialSlot,
+    frames: &MaterialFrames,
+    mut visit: impl FnMut(TextureNeed<'a>) -> Result<(), E>,
+) -> Result<(), E> {
     if !slot.render_mode.draws() {
-        return Vec::new();
+        return Ok(());
     }
-    let mut pages = Vec::new();
     let mut add = |resident, source, frame, transfer| {
-        pages.push(TextureNeed {
+        visit(TextureNeed {
             resident,
             source,
             frame,
             transfer,
-        });
+        })
     };
     let surface = slot.shader.surface();
     let transfer = surface.map_or(
@@ -802,7 +949,7 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
             .and_then(|texture| texture.on_demand()),
         frames.base,
         transfer,
-    );
+    )?;
     add(
         slot.texture2
             .as_ref()
@@ -814,21 +961,23 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
             .and_then(|texture| texture.on_demand()),
         frames.base2,
         transfer,
-    );
+    )?;
     let prepared = PreparedMaterial::from(&slot.shader);
-    let mut data = |source: Option<&'a DecodedTextureFrames>, frame, role: TextureRole| {
-        add(
-            source
-                .filter(|texture| !texture.load_outcome().is_unavailable())
-                .and_then(DecodedTextureFrames::resident)
-                .map(AsRef::as_ref),
-            source.and_then(DecodedTextureFrames::on_demand),
-            frame,
-            role.read_transfer(),
-        );
-    };
-    data(prepared.normal(), frames.normal, TextureRole::Normal);
-    data(prepared.normal2(), frames.normal2, TextureRole::Normal);
+    let mut data =
+        |source: Option<&'a DecodedTextureFrames>, frame, role: TextureRole| -> Result<(), E> {
+            add(
+                source
+                    .filter(|texture| !texture.load_outcome().is_unavailable())
+                    .and_then(DecodedTextureFrames::resident)
+                    .map(AsRef::as_ref),
+                source.and_then(DecodedTextureFrames::on_demand),
+                frame,
+                role.read_transfer(),
+            )?;
+            Ok(())
+        };
+    data(prepared.normal(), frames.normal, TextureRole::Normal)?;
+    data(prepared.normal2(), frames.normal2, TextureRole::Normal)?;
     if let Some(surface) = surface {
         let detail = surface.detail.as_ref();
         data(
@@ -838,12 +987,12 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
                 family: surface.family,
                 mode: surface.effective_detail_mode(),
             },
-        );
+        )?;
         data(
             surface.blend_modulation.as_deref(),
             0,
             TextureRole::BlendModulation,
-        );
+        )?;
         data(
             surface
                 .emission
@@ -851,13 +1000,13 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
                 .and_then(|emission| emission.mask.as_deref()),
             0,
             TextureRole::EmissionMask,
-        );
+        )?;
         if let Some(environment) = surface.envmap.as_ref() {
             data(
                 environment.mask_texture.as_deref(),
                 frames.environment_mask,
                 TextureRole::EnvironmentMask,
-            );
+            )?;
         }
         if let Some(phong) = surface.phong.as_ref() {
             data(
@@ -867,7 +1016,7 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
                     .and_then(|texture| texture.texture.as_deref()),
                 0,
                 TextureRole::PhongExponent,
-            );
+            )?;
             data(
                 phong
                     .diffuse_warp
@@ -875,7 +1024,7 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
                     .and_then(|texture| texture.texture.as_deref()),
                 0,
                 TextureRole::PhongWarp,
-            );
+            )?;
             data(
                 phong
                     .specular_warp
@@ -883,7 +1032,7 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
                     .and_then(|texture| texture.texture.as_deref()),
                 0,
                 TextureRole::PhongWarp,
-            );
+            )?;
         }
         if let Some(environment) = surface.envmap.as_ref()
             && let EnvironmentMapSource::Named(cube) = &environment.source
@@ -895,22 +1044,110 @@ fn material_textures<'a>(slot: &'a MaterialSlot, frames: &MaterialFrames) -> Vec
                 cube.on_demand(),
                 frames.environment,
                 TextureReadTransfer::SrgbToLinear,
-            );
+            )?;
         }
     }
-    pages
+    Ok(())
+}
+
+fn material_need_visitor_enabled() -> bool {
+    #[cfg(feature = "map-capture")]
+    {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_MATERIAL_NEED_VISITOR").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        })
+    }
+    #[cfg(not(feature = "map-capture"))]
+    true
+}
+
+fn visit_material_needs<'a, E>(
+    slot: &'a MaterialSlot,
+    frames: &MaterialFrames,
+    visit: impl FnMut(TextureNeed<'a>) -> Result<(), E>,
+) -> Result<(), E> {
+    visit_material_needs_with_mode(slot, frames, material_need_visitor_enabled(), visit)
+}
+
+fn visit_material_needs_with_mode<'a, E>(
+    slot: &'a MaterialSlot,
+    frames: &MaterialFrames,
+    use_visitor: bool,
+    visit: impl FnMut(TextureNeed<'a>) -> Result<(), E>,
+) -> Result<(), E> {
+    #[cfg(not(any(test, feature = "map-capture")))]
+    let _ = use_visitor;
+    #[cfg(any(test, feature = "map-capture"))]
+    if !use_visitor {
+        let mut visit = visit;
+        let mut needs = Vec::new();
+        infallible(visit_material_textures(slot, frames, |need| {
+            needs.push(need);
+            Ok(())
+        }));
+        for need in needs {
+            visit(need)?;
+        }
+        return Ok(());
+    }
+    visit_material_textures(slot, frames, visit)
+}
+
+fn infallible<T>(result: Result<T, std::convert::Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
 }
 
 fn material_pages(slot: &MaterialSlot, frames: &MaterialFrames) -> Vec<PageNeed> {
     let mut pages = Vec::new();
-    for need in material_textures(slot, frames) {
-        push_page(&mut pages, need.source, need.frame, need.transfer);
-    }
+    collect_material_pages(&mut pages, slot, frames, material_need_visitor_enabled());
     pages
+}
+
+fn collect_material_pages(
+    pages: &mut Vec<PageNeed>,
+    slot: &MaterialSlot,
+    frames: &MaterialFrames,
+    use_visitor: bool,
+) {
+    infallible(visit_material_needs_with_mode(
+        slot,
+        frames,
+        use_visitor,
+        |need| {
+            push_page(pages, need.source, need.frame, need.transfer);
+            Ok(())
+        },
+    ));
+}
+
+fn append_material_pages(pages: &mut Vec<PageNeed>, slot: &MaterialSlot, frames: &MaterialFrames) {
+    append_material_pages_with_mode(pages, slot, frames, material_need_visitor_enabled());
+}
+
+fn append_material_pages_with_mode(
+    pages: &mut Vec<PageNeed>,
+    slot: &MaterialSlot,
+    frames: &MaterialFrames,
+    use_visitor: bool,
+) {
+    #[cfg(any(test, feature = "map-capture"))]
+    if !use_visitor {
+        let mut material = Vec::new();
+        collect_material_pages(&mut material, slot, frames, false);
+        pages.extend(material);
+        return;
+    }
+    collect_material_pages(pages, slot, frames, use_visitor);
 }
 
 #[derive(Debug)]
 pub(super) struct FrameRequest {
+    page_needs: OnceLock<Vec<PageNeed>>,
     pub source: PreviewScene,
     pub materials: Vec<MaterialKey>,
     pub sky: bool,
@@ -950,6 +1187,7 @@ impl FrameRequest {
             })
             .collect::<Result<_, _>>()?;
         Ok(Self {
+            page_needs: OnceLock::new(),
             #[cfg(feature = "map-capture")]
             exact_frame: primitive.exact_texture_frame,
             source: source.clone(),
@@ -966,13 +1204,36 @@ impl FrameRequest {
             frame_water_time: water_time,
         })
     }
-    fn page_needs(&self) -> Vec<PageNeed> {
+    fn page_needs(&self) -> Cow<'_, [PageNeed]> {
+        #[cfg(feature = "map-capture")]
+        let enabled = {
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            *ENABLED.get_or_init(|| {
+                std::env::var_os("GMPUBLISHED_PAGE_NEEDS_CACHE").as_deref()
+                    != Some(std::ffi::OsStr::new("0"))
+            })
+        };
+        #[cfg(not(feature = "map-capture"))]
+        let enabled = true;
+        self.page_needs_with_cache(enabled)
+    }
+
+    fn page_needs_with_cache(&self, enabled: bool) -> Cow<'_, [PageNeed]> {
+        if enabled {
+            Cow::Borrowed(self.page_needs.get_or_init(|| self.collect_page_needs()))
+        } else {
+            Cow::Owned(self.collect_page_needs())
+        }
+    }
+
+    fn collect_page_needs(&self) -> Vec<PageNeed> {
         let mut needs = Vec::new();
         for key in &self.materials {
-            needs.extend(material_pages(
+            append_material_pages(
+                &mut needs,
                 &self.source.render_scene().materials[key.slot],
                 &key.frames,
-            ));
+            );
         }
         if self.sky {
             needs.extend(super::background_bindings::sky_pages(&self.source));
@@ -1028,15 +1289,18 @@ impl BindingCache {
         self.staging_sources = true;
         self.staged_keys.clear();
         for request in requests {
-            for (key, source) in request.page_needs() {
+            for (key, source) in request.page_needs().iter() {
                 self.staged_keys.insert(key.clone());
-                self.pages.entry(key).or_insert(PendingPage {
-                    source,
-                    ticket: None,
-                    image: None,
-                    allocation: None,
-                    error: None,
-                });
+                self.pages
+                    .entry(key.clone())
+                    .or_insert_with(|| PendingPage {
+                        validation: PageValidation::default(),
+                        source: Arc::clone(source),
+                        ticket: None,
+                        image: None,
+                        allocation: None,
+                        error: None,
+                    });
             }
         }
     }
@@ -1049,13 +1313,13 @@ impl BindingCache {
             .collect();
         let mut needs = Vec::new();
         for request in requests {
-            needs.extend(request.page_needs());
+            needs.extend(request.page_needs().iter().cloned());
         }
         if !self.staging_sources {
             self.update_sources(requests);
         }
         self.staging_sources = false;
-        self.demand_pages(device, needs);
+        self.demand_pages(device, &needs);
         self.retain(&keys);
         let backgrounds: HashSet<_> = requests
             .iter()
@@ -1063,43 +1327,54 @@ impl BindingCache {
             .collect();
         self.backgrounds.retain(|key, _| backgrounds.contains(key));
     }
-    fn demand_pages(&mut self, device: &wgpu::Device, needs: Vec<PageNeed>) {
-        let active: HashSet<_> = needs.iter().map(|(key, _)| key.clone()).collect();
+    fn demand_pages(&mut self, device: &wgpu::Device, needs: &[PageNeed]) {
+        let cache_enabled = page_validation_cache_enabled();
+        let policy = PageDevicePolicy::new(device);
+        let active: ResidencySet<_> = needs.iter().map(|(key, _)| key.clone()).collect();
         self.active_keys.clone_from(&active);
         let pins: Vec<_> = needs
             .iter()
             .filter_map(|(key, source)| {
-                let normalized =
-                    ImageCache::page_request_for_device(device, &key.request, source.metadata());
-                if source.validate_page(&normalized).is_err() {
+                let state = self
+                    .pages
+                    .entry(key.clone())
+                    .or_insert_with(|| PendingPage {
+                        validation: PageValidation::default(),
+                        source: Arc::clone(source),
+                        ticket: None,
+                        image: None,
+                        allocation: None,
+                        error: None,
+                    });
+                if state
+                    .validation
+                    .get_with(policy, cache_enabled, || {
+                        validate_page(device, key, &state.source, cache_enabled)
+                    })
+                    .is_err()
+                {
                     return None;
                 }
-                let image = self
-                    .pages
-                    .get(key)
-                    .and_then(|page| page.image.as_ref())
+                let image = state
+                    .image
+                    .as_ref()
                     .cloned()
                     .or_else(|| self.images.lookup_page(&key.request, key.transfer))?;
-                Some((key.clone(), Arc::clone(source), image))
+                Some((key.clone(), image))
             })
             .collect();
         let mut pinned = HashSet::new();
-        for (key, source, image) in pins {
+        for (key, image) in pins {
             let allocation = allocation_key(&self.images, &image, key.transfer);
             pinned.insert(allocation.clone());
             self.retiring_warm
                 .retain(|retiring| !retiring.ptr_eq(&Arc::downgrade(&image)));
             forget_aliases(&mut self.images, self.warm.activate(&allocation));
-            self.pages.insert(
-                key,
-                PendingPage {
-                    source,
-                    ticket: None,
-                    allocation: Some((allocation, image.byte_len())),
-                    error: None,
-                    image: Some(image),
-                },
-            );
+            let state = self.pages.get_mut(&key).expect("active page is tracked");
+            state.ticket = None;
+            state.allocation = Some((allocation, image.byte_len()));
+            state.error = None;
+            state.image = Some(image);
         }
         let warm = &mut self.warm;
         let images = &mut self.images;
@@ -1125,15 +1400,6 @@ impl BindingCache {
             }
             self.staged_keys.contains(key)
         });
-        for (key, source) in needs {
-            self.pages.entry(key).or_insert_with(|| PendingPage {
-                source,
-                ticket: None,
-                image: None,
-                allocation: None,
-                error: None,
-            });
-        }
         forget_aliases(
             &mut self.images,
             self.warm
@@ -1146,6 +1412,8 @@ impl BindingCache {
         }
     }
     pub fn stage_pages(&mut self, device: &wgpu::Device) {
+        let cache_enabled = page_validation_cache_enabled();
+        let policy = PageDevicePolicy::new(device);
         let Ok(service) = &self.service else {
             return;
         };
@@ -1156,40 +1424,45 @@ impl BindingCache {
             if state.image.is_some() || state.allocation.is_some() || state.error.is_some() {
                 continue;
             }
-            let normalized =
-                ImageCache::page_request_for_device(device, &key.request, state.source.metadata());
-            if let Err(error) = state.source.validate_page(&normalized) {
-                state.error = Some(error.to_string());
-                continue;
-            }
-            if let Err(error) =
-                ImageCache::page_allocation_cost(device, &key.request, state.source.metadata())
-            {
-                state.error = Some(error.to_string());
-                continue;
-            }
-            let ticket = state
-                .ticket
-                .get_or_insert_with(|| service.request(Arc::clone(&state.source), normalized));
+            let validation = match state.validation.get_with(policy, cache_enabled, || {
+                validate_page(device, key, &state.source, true)
+            }) {
+                Ok(validation) => validation,
+                Err(error) => {
+                    state.error = Some(error);
+                    continue;
+                }
+            };
+            let bytes = validation.bytes;
+            let ticket = state.ticket.get_or_insert_with(|| {
+                service.request(Arc::clone(&state.source), validation.normalized.clone())
+            });
             match ticket.status() {
                 PageStatus::Ready(page) => {
-                    match ImageCache::page_allocation_cost(
-                        device,
-                        &key.request,
-                        state.source.metadata(),
-                    ) {
-                        Ok(bytes) => {
-                            state.allocation = Some((
-                                AllocationKey {
-                                    resident: ImageCache::allocation_id(device, page.resident()),
-                                    transfer: (!self.images.compatible_transfer_views())
-                                        .then_some(key.transfer),
-                                },
-                                bytes,
-                            ));
+                    let bytes = if cache_enabled {
+                        bytes
+                    } else {
+                        match ImageCache::page_allocation_cost(
+                            device,
+                            &key.request,
+                            state.source.metadata(),
+                        ) {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                state.error = Some(error.to_string());
+                                state.ticket = None;
+                                continue;
+                            }
                         }
-                        Err(error) => state.error = Some(error.to_string()),
-                    }
+                    };
+                    state.allocation = Some((
+                        AllocationKey {
+                            resident: ImageCache::allocation_id(device, page.resident()),
+                            transfer: (!self.images.compatible_transfer_views())
+                                .then_some(key.transfer),
+                        },
+                        bytes,
+                    ));
                     state.ticket = None;
                 }
                 PageStatus::Failed(error) => {
@@ -1241,10 +1514,10 @@ impl BindingCache {
             return Err(error);
         }
         let mut cost = WorkingSet::new();
-        for (key, source) in request.page_needs() {
+        for (key, source) in request.page_needs().iter() {
             if let Some((allocation, bytes)) = self
                 .pages
-                .get(&key)
+                .get(key)
                 .and_then(|page| page.allocation.as_ref())
             {
                 cost.insert(SampledAllocation::Texture(allocation.clone()), *bytes, true);
@@ -1282,14 +1555,16 @@ impl BindingCache {
                 &request.source.render_scene().materials[key.slot],
             )
             .map_err(|error| error.to_string())?;
-            for need in material_textures(
+            visit_material_needs(
                 &request.source.render_scene().materials[key.slot],
                 &key.frames,
-            ) {
-                if let Some(source) = need.resident {
-                    resident(source, need.transfer)?;
-                }
-            }
+                |need| -> Result<(), String> {
+                    if let Some(source) = need.resident {
+                        resident(source, need.transfer)?;
+                    }
+                    Ok(())
+                },
+            )?;
         }
         if request.sky {
             super::texture_barriers::validate_sky(&request.source)
@@ -1337,16 +1612,25 @@ impl BindingCache {
         if let Some(error) = self.staged_error(request) {
             return Err(error);
         }
+        // The guard submits participating leases before any return, including errors.
+        let batch = super::texture_upload::lease_batching_enabled()
+            .then(|| super::texture_upload::UploadLeaseBatch::new(&resources.texture_uploader));
         let mut snapshot = BindingSnapshot::default();
         let mut ready = true;
         for key in &request.materials {
-            match self.material(
-                device,
-                queue,
-                resources,
-                key.clone(),
-                &request.source.render_scene().materials[key.slot],
-            )? {
+            let slot = &request.source.render_scene().materials[key.slot];
+            let material = match batch.as_ref() {
+                Some(batch) => self.material_with_batch(
+                    device,
+                    queue,
+                    resources,
+                    key.clone(),
+                    slot,
+                    Some(batch),
+                ),
+                None => self.material(device, queue, resources, key.clone(), slot),
+            }?;
+            match material {
                 Some(binding) => {
                     snapshot.materials.0.insert(key.slot, binding);
                 }
@@ -1368,7 +1652,13 @@ impl BindingCache {
         if let Some(effect) = request.immersion() {
             needs.extend(super::background_bindings::immersion_pages(effect));
         }
-        ready &= self.prepare_pages(device, queue, &resources.texture_uploader, &needs)?;
+        ready &= self.prepare_pages_with_batch(
+            device,
+            queue,
+            &resources.texture_uploader,
+            &needs,
+            batch.as_ref(),
+        )?;
         if !ready {
             return Ok(None);
         }
@@ -1378,7 +1668,10 @@ impl BindingCache {
         } else {
             let mut background = BackgroundBindings::default();
             let mut sampler_diagnostics = Vec::new();
-            let mut lease = self.images.lease(&resources.texture_uploader);
+            let mut lease = match batch.as_ref() {
+                Some(batch) => self.images.lease_batched(batch),
+                None => self.images.lease(&resources.texture_uploader),
+            };
             if request.sky {
                 background.skybox = super::background_bindings::sky(
                     device,

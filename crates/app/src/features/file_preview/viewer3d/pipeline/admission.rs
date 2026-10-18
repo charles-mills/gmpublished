@@ -1,16 +1,16 @@
 use super::lightmaps::MissingCost;
-use std::collections::HashMap;
+use super::residency_hash::Map;
 use std::hash::Hash;
 
 #[derive(Clone, Debug)]
 pub(super) struct Cost<K> {
-    allocations: HashMap<K, (u64, bool)>,
+    allocations: Map<K, (u64, bool)>,
 }
 
 impl<K: Eq + Hash + Clone> Cost<K> {
     pub fn new() -> Self {
         Self {
-            allocations: HashMap::new(),
+            allocations: Map::default(),
         }
     }
 
@@ -76,6 +76,31 @@ pub(super) fn select<K: Eq + Hash + Clone>(
     candidates: &[Candidate<K>],
     capacity: MissingCost,
 ) -> Vec<Decision> {
+    if let [candidate] = candidates {
+        // An empty accepted union adds no information to an already deduplicated cost.
+        let decision = match &candidate.cost {
+            Err(reason) => Decision::Rejected(reason.clone()),
+            Ok(cost) => match cost.upper_bound() {
+                Err(reason) => Decision::Rejected(reason),
+                Ok(total) if !exceeds(total, capacity) => Decision::Admitted,
+                Ok(_) => match cost.total(true) {
+                    Err(reason) => Decision::Rejected(reason),
+                    Ok(total) if exceeds(total, capacity) => {
+                        Decision::Rejected(rejection(total, capacity))
+                    }
+                    Ok(_) => Decision::Pending,
+                },
+            },
+        };
+        return vec![decision];
+    }
+    select_general(candidates, capacity)
+}
+
+fn select_general<K: Eq + Hash + Clone>(
+    candidates: &[Candidate<K>],
+    capacity: MissingCost,
+) -> Vec<Decision> {
     let mut order: Vec<_> = (0..candidates.len()).collect();
     order.sort_by_key(|&index| (!candidates[index].priority, index));
     let mut decisions = vec![Decision::Pending; candidates.len()];
@@ -122,6 +147,47 @@ mod tests {
 
     fn capacity(bytes: u64, allocations: u64) -> MissingCost {
         MissingCost { bytes, allocations }
+    }
+
+    #[test]
+    fn single_candidate_matches_union_selection_for_aliases_resolution_and_overflow() {
+        let cases = [
+            Ok(cost(&[])),
+            Ok(cost(&[("a", 0, true)])),
+            Ok(cost(&[("a", 64, true), ("b", 32, true)])),
+            Ok(cost(&[("a", 64, false), ("b", 32, false)])),
+            Ok(cost(&[("a", 64, true), ("b", 32, false)])),
+            // One physical image retains the final alias's size and resolution state.
+            Ok(cost(&[("shared", 64, false), ("shared", 32, true)])),
+            Ok(cost(&[("shared", 64, true), ("shared", 32, false)])),
+            Ok(cost(&[("a", u64::MAX, true), ("b", 1, true)])),
+            Ok(cost(&[("a", u64::MAX, false), ("b", 1, false)])),
+            Ok(cost(&[("a", u64::MAX, true), ("b", 1, false)])),
+            Err("invalid source".into()),
+        ];
+        for priority in [false, true] {
+            for (case, cost) in cases.iter().enumerate() {
+                let candidates = [Candidate {
+                    priority,
+                    cost: cost.clone(),
+                }];
+                for capacity in [
+                    capacity(0, 0),
+                    capacity(0, 2),
+                    capacity(32, 1),
+                    capacity(64, 1),
+                    capacity(96, 1),
+                    capacity(96, 2),
+                    capacity(u64::MAX, u64::MAX),
+                ] {
+                    assert_eq!(
+                        select(&candidates, capacity),
+                        select_general(&candidates, capacity),
+                        "case {case}, priority {priority}, capacity {capacity:?}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -236,5 +302,51 @@ mod tests {
         assert!(matches!(decisions[0], Decision::Rejected(_)));
         assert_eq!(decisions[1], Decision::Rejected("invalid source".into()));
         assert_eq!(decisions[2], Decision::Admitted);
+    }
+
+    #[test]
+    fn exact_union_budget_is_independent_of_hash_algorithm_seed_and_iteration_order() {
+        use super::super::residency_hash::Builder;
+        for builder in [
+            Builder::Fast(ahash::RandomState::new()),
+            Builder::Fast(ahash::RandomState::new()),
+            Builder::Standard(std::collections::hash_map::RandomState::new()),
+        ] {
+            for reverse in [false, true] {
+                let make = |mut entries: Vec<(u64, u64)>| {
+                    if reverse {
+                        entries.reverse();
+                    }
+                    let mut cost = Cost {
+                        allocations: Map::with_hasher(builder.clone()),
+                    };
+                    for (key, bytes) in entries {
+                        cost.insert(key, bytes, true);
+                    }
+                    cost
+                };
+                let candidates = [
+                    Candidate {
+                        priority: false,
+                        cost: Ok(make(vec![(7, 40), (8, 60)])),
+                    },
+                    Candidate {
+                        priority: true,
+                        cost: Ok(make(vec![(8, 60), (9, 60)])),
+                    },
+                ];
+                assert_eq!(
+                    select(&candidates, capacity(160, 3)),
+                    [Decision::Admitted, Decision::Admitted]
+                );
+                assert_eq!(
+                    select(&candidates, capacity(159, 3)),
+                    [
+                        Decision::Rejected(rejection(capacity(160, 3), capacity(159, 3))),
+                        Decision::Admitted
+                    ]
+                );
+            }
+        }
     }
 }

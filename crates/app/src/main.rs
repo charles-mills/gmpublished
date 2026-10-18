@@ -101,9 +101,18 @@ static PANIC_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn main() -> ExitCode {
+    let shutdown = GpuShutdownGuard(true);
     let outcome = run();
-    // Flush after both GUI and CLI exit. Later messages can only reach stderr.
+    let gpu_shutdown: Result<(), features::file_preview::ShutdownError> = shutdown.finish();
+    // Flush after GUI/CLI resources drop and completion workers have joined.
     gmpublished_backend::shutdown_logging();
+    if let Err(error) = gpu_shutdown {
+        eprintln!("GPU completion shutdown failed: {error}");
+        if let Err(error) = outcome {
+            eprintln!("Error: {error}");
+        }
+        return ExitCode::FAILURE;
+    }
 
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -111,6 +120,24 @@ fn main() -> ExitCode {
             eprintln!("Error: {error}");
             eprintln!("Panic log: {}", panic_log_path().display());
             ExitCode::FAILURE
+        }
+    }
+}
+
+struct GpuShutdownGuard(bool);
+impl GpuShutdownGuard {
+    fn finish(mut self) -> Result<(), features::file_preview::ShutdownError> {
+        let result = features::file_preview::finish_gpu_shutdown();
+        self.0 = false;
+        result
+    }
+}
+impl Drop for GpuShutdownGuard {
+    fn drop(&mut self) {
+        if self.0
+            && let Err(error) = features::file_preview::finish_gpu_shutdown()
+        {
+            eprintln!("GPU completion shutdown failed during unwinding: {error}");
         }
     }
 }

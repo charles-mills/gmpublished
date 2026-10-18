@@ -1,4 +1,3 @@
-use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 use super::DrawPlans;
 use super::geometry::ViewerScene;
 use super::targets::RenderTargets;
@@ -174,6 +173,9 @@ pub struct SceneView {
     pub(super) planar_indices: super::planar::Selections,
     pub transparency: Vec<super::transparency::Draw>,
     pub skybox_transparency: Vec<super::transparency::Draw>,
+    pub(super) transparent_indirect: super::transparent_indirect::Slots,
+    #[cfg(feature = "map-capture")]
+    pub(super) optical_cpu_planning: Option<super::optical_planning::Diagnostics>,
     pub transparency_diagnostics: super::transparency::TransparencyDiagnostics,
     pub skybox_transparency_diagnostics: super::transparency::TransparencyDiagnostics,
 }
@@ -199,6 +201,9 @@ impl SceneView {
             planar_indices: super::planar::Selections::default(),
             transparency: Vec::new(),
             skybox_transparency: Vec::new(),
+            transparent_indirect: super::transparent_indirect::Slots::default(),
+            #[cfg(feature = "map-capture")]
+            optical_cpu_planning: None,
             transparency_diagnostics: super::transparency::TransparencyDiagnostics::default(),
             skybox_transparency_diagnostics: super::transparency::TransparencyDiagnostics::default(
             ),
@@ -381,11 +386,31 @@ impl PlanarView {
         upload: &ViewerScene,
         size: (u32, u32),
     ) {
-        let surface = &upload.assets.reflectors[self.surface_index];
-        let shader = &primitive.preview.render_scene().materials[surface.material_slot].shader;
-        let Some(view) = self.reflection.as_mut() else {
+        let Some(input) = self.prepare_reflection_input(device, queue, primitive, upload, size)
+        else {
             return;
         };
+        super::optical_planning::prepare_view(
+            self.reflection.as_mut().expect("initialized reflection"),
+            &input,
+            upload,
+            super::optical_planning::Common::new(primitive, upload),
+            false,
+        );
+        self.finish_reflection(device, queue, resources, primitive, upload, &input);
+    }
+
+    pub(super) fn prepare_reflection_input(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        primitive: &ModelPrimitive,
+        upload: &ViewerScene,
+        size: (u32, u32),
+    ) -> Option<super::optical_planning::Input> {
+        let surface = &upload.assets.reflectors[self.surface_index];
+        let shader = &primitive.preview.render_scene().materials[surface.material_slot].shader;
+        let view = self.reflection.as_mut()?;
         let offset = primitive.raster_offset();
         // Optical target orientation also reverses its half-pixel bias.
         let reflected_offset = if shader.mirror().is_some() {
@@ -458,40 +483,41 @@ impl PlanarView {
                 eye,
             );
         }
-        let plans = view.plan_cache.prepare(
-            upload,
-            DrawPlanRequest {
-                world_view: Some(&main),
-                skybox_view: skybox.as_ref(),
-                content_id: primitive.content_id,
-                selection: DrawPlanSelection {
-                    skin_remap: &primitive.skin_remap,
-                    bodygroup_choices: &primitive.bodygroup_choices,
-                },
-                camera_position: main.camera_position,
-                map_skybox_visible: primitive.map_skybox_visible
-                    && water.is_none_or(|water| water.reflect_3d_skybox),
-                map_skybox_content_present: upload.assets.has_map_skybox_content(),
-                map_skybox_camera_position: skybox.map(|uniforms| uniforms.camera_position),
-                visibility_plan: view.visibility.plan.as_ref(),
-            },
-            view.visibility.revision,
-            if water.is_some_and(|water| !water.reflect_entities) {
+        Some(super::optical_planning::Input {
+            world: main,
+            skybox,
+            skybox_visible: primitive.map_skybox_visible
+                && water.is_none_or(|water| water.reflect_3d_skybox),
+            entities: if water.is_some_and(|water| !water.reflect_entities) {
                 super::view_preparation::Entities::WorldOnly
             } else {
                 super::view_preparation::Entities::All
             },
-        );
-        let sun_skybox = skybox.filter(|_| plans.map_skybox.is_some());
-        view.plans = Some(plans);
-        super::transparency::prepare(
-            view,
-            upload,
-            &main,
-            skybox.as_ref(),
-            water.map(|_| super::transparency::WaterSide::Above),
-            water.is_none(),
-        );
+            water_side: water.map(|_| super::transparency::WaterSide::Above),
+            include_water: water.is_none(),
+            kind: super::draw::ViewKind::Reflection,
+            excluded_plane: None,
+            size,
+        })
+    }
+
+    pub(super) fn finish_reflection(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &RenderResources,
+        primitive: &ModelPrimitive,
+        upload: &ViewerScene,
+        input: &super::optical_planning::Input,
+    ) {
+        let view = self.reflection.as_mut().expect("initialized reflection");
+        let sun_skybox = input.skybox.filter(|_| {
+            view.plans
+                .as_ref()
+                .expect("prepared optical plans")
+                .map_skybox
+                .is_some()
+        });
         super::planar::prepare(
             view,
             upload,
@@ -500,11 +526,12 @@ impl PlanarView {
             queue,
             None,
         );
+        super::transparent_indirect::prepare(view, upload, device, queue);
         RenderTargets::ensure(
             &mut view.targets,
             device,
-            resources.for_view(super::draw::ViewKind::Reflection),
-            size,
+            resources.for_view(input.kind),
+            input.size,
         );
         view.sun.prepare(
             device,
@@ -512,7 +539,7 @@ impl PlanarView {
             &resources.reflection_sun,
             &super::sun::gpu::Inputs {
                 map: primitive.preview.map(),
-                world: main,
+                world: input.world,
                 skybox: sun_skybox,
                 targets: view.targets.as_ref().unwrap(),
             },

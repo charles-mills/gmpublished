@@ -198,6 +198,7 @@ pub(super) fn prepare(
         queue,
         Some(plane),
     );
+    super::transparent_indirect::prepare(view, upload, device, queue);
     Some(super::water_clip::world_plane(
         plane,
         super::water_clip::WorldWaterPass::Main,

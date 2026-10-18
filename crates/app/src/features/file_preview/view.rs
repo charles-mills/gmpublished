@@ -572,6 +572,7 @@ fn model_preview<'a>(
             .unwrap_or_default();
         container(
             iced::widget::shader(super::viewer3d::Viewer3d {
+                cpu_executor: ctx.cpu_executor.cloned(),
                 model: std::sync::Arc::clone(model),
                 render_feedback: std::sync::Arc::clone(
                     state.render_feedback().expect("model render feedback"),
@@ -1156,6 +1157,7 @@ fn map_preview<'a>(
     let viewer = || {
         let viewer = container(
             iced::widget::shader(super::viewer3d::FlyViewer {
+                cpu_executor: ctx.cpu_executor.cloned(),
                 #[cfg(feature = "gui-benchmark")]
                 benchmark: state.benchmark_view(),
                 render_feedback: state.render_feedback().cloned().unwrap_or_default(),

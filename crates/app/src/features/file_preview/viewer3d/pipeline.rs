@@ -22,6 +22,13 @@ mod bindings;
 mod bounds_query;
 mod clipping;
 mod completion;
+pub use completion::ShutdownError;
+
+// The application scope has dropped all render owners before this boundary.
+pub fn finish_gpu_shutdown() -> Result<(), ShutdownError> {
+    completion::finish_application_shutdown()
+}
+
 mod cubemap;
 mod draw;
 mod frame_selection;
@@ -34,8 +41,11 @@ mod lightmap_ranges;
 mod lightmaps;
 mod marks;
 mod materials;
+#[cfg(feature = "map-capture")]
+mod mdi_diagnostics;
 mod model_lighting;
 mod model_lighting_visibility;
+mod optical_planning;
 mod passes;
 mod planar;
 mod presentation;
@@ -43,6 +53,7 @@ mod reflections;
 mod refraction;
 mod residency;
 mod residency_demand;
+mod residency_hash;
 mod resources;
 mod samplers;
 pub(super) mod sampling;
@@ -56,6 +67,7 @@ mod targets;
 mod texture_barriers;
 pub(super) mod texture_upload;
 mod transparency;
+mod transparent_indirect;
 mod uniforms;
 mod upload;
 pub(super) mod view_camera;
@@ -87,7 +99,7 @@ use presentation::{OutputKey, Readiness, SubmissionHistory, ViewOutput};
 use reflections::{PlanarView, SceneView, ViewUniforms};
 use resources::RenderResources;
 use std::sync::atomic::Ordering;
-use targets::{RenderTargets, WaterBindingInputs, WaterBindings};
+use targets::RenderTargets;
 use upload::UploadCache;
 pub(super) use upload::{UploadedMapRenderable, UploadedMesh, UploadedModel, UploadedReceiver};
 
@@ -139,6 +151,7 @@ impl PreviewScene {
     reason = "three independent render toggles plus the camera's water state"
 )]
 pub struct ModelPrimitive {
+    pub(super) cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     pub(super) render_feedback: Option<Arc<super::feedback::RenderFeedback>>,
     pub(super) model_lighting_time: f64,
     #[cfg(feature = "map-capture")]
@@ -218,8 +231,14 @@ impl PreparedFrame {
 }
 
 #[cfg(feature = "map-capture")]
-fn preparation_diagnostics(view: &SceneView) -> serde_json::Value {
+fn preparation_diagnostics(view: &SceneView, upload: &ViewerScene) -> serde_json::Value {
     serde_json::json!({
+        "opaque_mdi_runs":mdi_diagnostics::collect(view, upload),
+        "native_transparent_mdi":view.transparent_indirect.diagnostics(),
+        "optical_cpu_planning":view.optical_cpu_planning,
+        "opaque_binding_suppression":draw::opaque_binding_suppression_enabled(),
+        "transparent_binding_suppression":draw::transparent_binding_suppression_enabled(),
+        "opaque_pass_coalescing":passes::opaque_pass_coalescing_enabled(),
         "semantic_world_cache":view.plan_cache.world_cache_diagnostics(),
         "world":view.plans.as_ref().map(|plans|&plans.world.world_opaque.issues),
         "skybox":view.plans.as_ref().and_then(|plans|plans.map_skybox.as_ref()).map(|plan|&plan.world_opaque.issues),
@@ -680,42 +699,19 @@ impl shader::Primitive for ModelPrimitive {
             .capture_diagnostics
             .as_ref()
             .and_then(|observer| observer.span(super::capture::Phase::OpticalPrepare));
-        for surface in &mut frame.planar_views {
-            surface.prepare_optics(
-                device,
-                queue,
-                &pipeline.resources,
-                self,
-                upload,
-                refraction::OpticalInputs {
-                    size: reflection_size,
-                    lighting: &frame.lighting,
-                    surface_marks: &frame.marks.buffer,
-                },
-            );
-            let refracted = surface
-                .refraction
-                .as_ref()
-                .or(surface.reflection.as_ref())
-                .and_then(|view| view.targets.as_ref())
-                .expect("active planar input");
-            let reflected = surface
-                .reflection
-                .as_ref()
-                .and_then(|view| view.targets.as_ref())
-                .unwrap_or(refracted);
-            WaterBindings::ensure(
-                &mut surface.water_bind_group,
-                device,
-                &pipeline.resources,
-                WaterBindingInputs {
-                    uniforms: &surface.surface_uniforms.buffer,
-                    refraction: &refracted.resolve_view,
-                    depth: &refracted.depth,
-                    reflection: &reflected.resolve_view,
-                },
-            );
-        }
+        optical_planning::prepare(
+            &mut frame.planar_views,
+            device,
+            queue,
+            &pipeline.resources,
+            self,
+            upload,
+            refraction::OpticalInputs {
+                size: reflection_size,
+                lighting: &frame.lighting,
+                surface_marks: &frame.marks.buffer,
+            },
+        );
         #[cfg(feature = "map-capture")]
         drop(optical_span);
         frame.main.plans = Some(plans);
@@ -863,6 +859,7 @@ impl shader::Primitive for ModelPrimitive {
             true,
         );
         planar::prepare(&mut frame.main, upload, scene, device, queue, None);
+        transparent_indirect::prepare(&mut frame.main, upload, device, queue);
         #[cfg(feature = "map-capture")]
         drop(transparency_span);
 
@@ -886,7 +883,7 @@ impl shader::Primitive for ModelPrimitive {
                     "reflected_eye":surface.plane.reflect_point(eye).to_array(),
                     "camera_position":if refracted {eye.to_array()} else {surface.plane.reflect_point(eye).to_array()},
                     "transparent_primitives":view.transparency.len(),
-                    "preparation":preparation_diagnostics(view),
+                    "preparation":preparation_diagnostics(view, upload),
                     "world_opaque_meshes":plans.world.opaque_mesh_indices().len(),
                     "world_surface_marks":plans.world.surface_mark_count(),
                     "transparent_receiver_marks":plans.world.receiver_mark_count(),
@@ -923,12 +920,12 @@ impl shader::Primitive for ModelPrimitive {
                 "material_samplers":upload.bindings.samplers().map(samplers::SamplerDiagnostic::capture_json).collect::<Vec<_>>(),
                 "raster_offset_physical_pixels":self.raster_offset(),"main_target_dimensions":size,"reflection_views":records(false),"refraction_views":records(true),
                 "single_bounce":true,"nested_planar_fallback":"average sky tint (cubemap pending)",
-                "water_intersection":frame.water_intersection.as_ref().and_then(|intersection|intersection.selection.map(|selection|serde_json::json!({"surface_index":selection.surface_index,"body_index":selection.body_index,"preparation":preparation_diagnostics(&intersection.view)}))),
+                "water_intersection":frame.water_intersection.as_ref().and_then(|intersection|intersection.selection.map(|selection|serde_json::json!({"surface_index":selection.surface_index,"body_index":selection.body_index,"preparation":preparation_diagnostics(&intersection.view, upload)}))),
                 "water_body":map.and_then(|map|map.water_volumes.as_ref()).and_then(|volumes|volumes.at(eye)).map(|sample|serde_json::json!({"index":sample.body_index,"surface_z":sample.body.surface_z,"min_z":sample.body.min_z,"surface_material":sample.body.material_name,"contents":sample.contents})),
                 "underwater_overlay":map.and_then(|map|map.immersion_material(eye)).and_then(|water|water.underwater_overlay.as_ref()).map(|effect|&effect.name),
                 "clear_color_linear":self.clear_color,
                 "main_camera_position":self.uniforms.camera_position, "main_fog_color":self.uniforms.fog_color, "main_fog":{"start":self.uniforms.fog.start,"end":self.uniforms.fog.end,"max_density":self.uniforms.fog.max_density,"mode":self.uniforms.fog.mode}, "main_clip_plane":main_uniforms.clip_plane, "main_visibility_state":format!("{:?}",frame.main.visibility.tracker.state),
-                "main_preparation":preparation_diagnostics(&frame.main),
+                "main_preparation":preparation_diagnostics(&frame.main, upload),
                 "surface_mark_metadata_bytes":frame.marks.buffer.size(), "world_surface_marks":frame.main.plans.as_ref().unwrap().world.surface_mark_count(), "transparent_receiver_marks":frame.main.plans.as_ref().unwrap().world.receiver_mark_count(),
                 "estimated_target_bytes":bytes,"composition":"planar depth occludes main transparency; clipped refraction includes below-plane transparency"
             });
@@ -964,7 +961,10 @@ impl shader::Primitive for ModelPrimitive {
                     pages,
                     self.model_lighting_time as f32,
                 ) {
-                    Ok(request) => frame.lightmap_request = Some(request),
+                    Ok(request) => {
+                        frame.lightmap_request =
+                            Some(request.with_cpu_executor(self.cpu_executor.clone()));
+                    }
                     Err(error) => {
                         frame.binding_request = None;
                         frame.lightmap_request = None;
@@ -1170,6 +1170,8 @@ impl shader::Pipeline for ModelPipeline {
         }
     }
     fn finish_prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        #[cfg(feature = "gui-benchmark")]
+        let mut scope = iced_wgpu::profiling::begin_cpu_scope("map.residency.stage");
         let empty_lightmaps = self.lightmaps.empty_snapshot();
         for frame in &mut self.frames {
             if !frame.live || frame.binding_request.is_none() || frame.lightmap_request.is_none() {
@@ -1221,6 +1223,11 @@ impl shader::Pipeline for ModelPipeline {
             .collect();
         self.bindings.stage_visible(&stage_requests);
         self.bindings.stage_pages(device);
+        #[cfg(feature = "gui-benchmark")]
+        {
+            drop(scope.take());
+            scope = iced_wgpu::profiling::begin_cpu_scope("map.residency.admission");
+        }
         let candidates: Vec<_> = self
             .frames
             .iter()
@@ -1256,6 +1263,11 @@ impl shader::Pipeline for ModelPipeline {
                 frame.screen_overlay = None;
             }
         }
+        #[cfg(feature = "gui-benchmark")]
+        {
+            drop(scope.take());
+            scope = iced_wgpu::profiling::begin_cpu_scope("map.residency.demand");
+        }
         let lightmap_requests: Vec<_> = self
             .frames
             .iter()
@@ -1287,6 +1299,11 @@ impl shader::Pipeline for ModelPipeline {
                 self.lightmaps.active_cost(),
             )
         });
+        #[cfg(feature = "gui-benchmark")]
+        {
+            drop(scope.take());
+            scope = iced_wgpu::profiling::begin_cpu_scope("map.residency.lightmaps");
+        }
         let mut lightmap_results = Vec::with_capacity(self.frames.len());
         for (index, frame) in self.frames.iter_mut().enumerate() {
             let result = if let admission::Decision::Rejected(reason) = &decisions[index] {
@@ -1317,6 +1334,11 @@ impl shader::Pipeline for ModelPipeline {
                 Ok(false)
             };
             lightmap_results.push(result);
+        }
+        #[cfg(feature = "gui-benchmark")]
+        {
+            drop(scope.take());
+            scope = iced_wgpu::profiling::begin_cpu_scope("map.residency.bindings");
         }
         let mut pins = Vec::new();
         let mut lightmap_pins = Vec::new();
@@ -1466,6 +1488,11 @@ impl shader::Pipeline for ModelPipeline {
                 }
             }
         }
+        #[cfg(feature = "gui-benchmark")]
+        {
+            drop(scope.take());
+            scope = iced_wgpu::profiling::begin_cpu_scope("map.residency.pressure");
+        }
         if let Some(pressure) = self.bindings.pressure(&self.resources) {
             for frame in self
                 .frames
@@ -1483,6 +1510,8 @@ impl shader::Pipeline for ModelPipeline {
         }
         self.submission = Some(residency_demand::SubmissionPins::new(pins));
         self.lightmap_submission = Some(residency_demand::SubmissionPins::new(lightmap_pins));
+        #[cfg(feature = "gui-benchmark")]
+        drop(scope);
     }
     fn submitted(&mut self, queue: &wgpu::Queue) {
         let completion = self

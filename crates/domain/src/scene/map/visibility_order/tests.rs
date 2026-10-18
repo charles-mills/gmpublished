@@ -8,8 +8,10 @@ fn fixture() -> (FaceOrdering, MapLeafLocator) {
         displacements: Vec::new(),
         node_faces: std::iter::once(0..2).collect(),
         node_bounds: vec![],
+        node_bounds_valid: vec![],
         child_bounds_contained: vec![],
         leaf_bounds: vec![],
+        leaf_bounds_valid: vec![],
         leaf_solid: vec![],
         leaf_underwater: vec![],
         leaf_displacements: vec![],
@@ -1273,4 +1275,396 @@ fn uncontained_child_nodes_are_retested_before_their_faces_or_leaves() {
             MapBoundsCullMask::NONE
         ]
     );
+}
+
+#[test]
+fn reused_traversal_keeps_camera_filter_and_viewer_state_independent() {
+    let (mut ordering, locator) = fixture();
+    let bounds = super::super::super::MapBounds {
+        min: Vec3::splat(-100.0),
+        max: Vec3::splat(100.0),
+    };
+    ordering.node_bounds = vec![bounds];
+    ordering.leaf_bounds = vec![bounds; 2];
+    ordering.validate_bounds_hierarchy(&locator);
+    let mut traversal = MapWorldTraversal::default();
+    let mut other_viewer = MapWorldTraversal::default();
+    for iteration in 0..64 {
+        let eye = Vec3::new(if iteration % 2 == 0 { 10.0 } else { -10.0 }, 0.0, 10.0);
+        let faces = |face| face % 3 != iteration % 3;
+        let expected = ordering.world_surface_groups(&locator, eye, faces, |_| true, |_| true);
+        for scratch in [&mut traversal, &mut other_viewer] {
+            let actual = ordering.world_surface_groups_prepared(
+                &locator,
+                eye,
+                faces,
+                |bounds, _| {
+                    assert!(bounds.is_valid());
+                    MapBoundsCulling::Visible(MapBoundsCullMask::NONE)
+                },
+                |_| true,
+                scratch,
+            );
+            assert_eq!(actual.into_legacy(), expected);
+        }
+    }
+    let capacities = (
+        traversal.stack.capacity(),
+        traversal.visited.capacity(),
+        traversal.faces.capacity(),
+    );
+    traversal.generation = u32::MAX - 3;
+    let actual = ordering.world_surface_groups_prepared(
+        &locator,
+        Vec3::splat(10.0),
+        |_| true,
+        |_, mask| MapBoundsCulling::Visible(mask),
+        |_| true,
+        &mut traversal,
+    );
+    assert_eq!(
+        actual.into_legacy(),
+        ordering.world_surface_groups(&locator, Vec3::splat(10.0), |_| true, |_| true, |_| true)
+    );
+    assert_eq!(traversal.generation, 4);
+    assert_eq!(
+        capacities,
+        (
+            traversal.stack.capacity(),
+            traversal.visited.capacity(),
+            traversal.faces.capacity()
+        )
+    );
+}
+
+#[test]
+fn prepared_bounds_retain_invalid_children_and_reset_inherited_masks() {
+    let (mut ordering, locator) = fixture();
+    let bounds = super::super::super::MapBounds {
+        min: Vec3::splat(-100.0),
+        max: Vec3::splat(100.0),
+    };
+    ordering.node_bounds = vec![bounds];
+    ordering.leaf_bounds = vec![bounds; 2];
+    ordering.leaf_bounds[0].min[0] = f32::NAN;
+    ordering.leaf_bounds[1].max[0] = -101.0;
+    ordering.validate_bounds_hierarchy(&locator);
+    let mut traversal = MapWorldTraversal::default();
+    let actual = ordering.world_surface_groups_prepared(
+        &locator,
+        Vec3::splat(10.0),
+        |_| true,
+        |bounds, mask| {
+            if bounds.is_valid() {
+                MapBoundsCulling::Visible(MapBoundsCullMask::NONE)
+            } else {
+                assert_eq!(mask, MapBoundsCullMask::ALL);
+                MapBoundsCulling::Visible(MapBoundsCullMask::ALL)
+            }
+        },
+        |_| true,
+        &mut traversal,
+    );
+    assert_eq!(
+        actual.into_legacy(),
+        ordering.world_surface_groups(&locator, Vec3::splat(10.0), |_| true, |_| true, |_| true)
+    );
+}
+
+#[test]
+fn traversal_reuse_after_rejected_views_and_cycles_does_not_leak_faces() {
+    let (ordering, mut locator) = fixture();
+    locator.nodes[0].children = [0, -2];
+    let mut traversal = MapWorldTraversal::default();
+    for visible in [true, false, true] {
+        let actual = ordering.world_surface_groups_prepared(
+            &locator,
+            Vec3::splat(10.0),
+            |_| visible,
+            |_, mask| MapBoundsCulling::Visible(mask),
+            |_| true,
+            &mut traversal,
+        );
+        let expected = ordering.world_surface_groups(
+            &locator,
+            Vec3::splat(10.0),
+            |_| visible,
+            |_| true,
+            |_| true,
+        );
+        assert_eq!(actual.into_legacy(), expected);
+    }
+}
+
+#[test]
+fn packed_leaf_output_matches_original_grouping_across_views_filters_and_generation_wrap() {
+    let (mut ordering, mut locator) = fixture();
+    let bounds = super::super::super::MapBounds {
+        min: Vec3::splat(-100.0),
+        max: Vec3::splat(100.0),
+    };
+    ordering.node_bounds = vec![bounds];
+    ordering.leaf_bounds = vec![
+        super::super::super::MapBounds {
+            min: Vec3::new(0.0, -100.0, -100.0),
+            max: bounds.max,
+        },
+        super::super::super::MapBounds {
+            min: bounds.min,
+            max: Vec3::new(0.0, 100.0, 100.0),
+        },
+    ];
+    locator.leaves[0].cluster = 0;
+    locator.leaves[1].cluster = 1;
+    ordering.validate_bounds_hierarchy(&locator);
+    let mut traversal = MapWorldTraversal::default();
+    let mut reference_traversal = MapWorldTraversal::default();
+    let mut saw_empty = false;
+    let mut saw_faces = false;
+    for x in [-10.0, 10.0] {
+        for clip in [-1, 0, 1] {
+            for pvs in 0..4 {
+                for include_faces in [false, true] {
+                    let eye = Vec3::new(x, 0.0, 10.0);
+                    let culling = |bounds: MapPreparedBounds, mask| {
+                        let bounds = bounds.bounds();
+                        if (clip < 0 && bounds.min[0] >= 0.0) || (clip > 0 && bounds.max[0] <= 0.0)
+                        {
+                            MapBoundsCulling::Outside
+                        } else {
+                            MapBoundsCulling::Visible(mask)
+                        }
+                    };
+                    let cluster = |value| match pvs {
+                        0 => true,
+                        1 => value == 0,
+                        2 => value == 1,
+                        _ => false,
+                    };
+                    let mut expected = Vec::<super::super::MapWorldSurfaceGroup>::new();
+                    ordering.visit_world_surfaces_with_culling(
+                        &locator,
+                        eye,
+                        |_| include_faces,
+                        culling,
+                        cluster,
+                        &mut reference_traversal,
+                        |event| match event {
+                            WorldSurfaceEncounter::Leaf(leaf_index) => {
+                                expected.push(super::super::MapWorldSurfaceGroup {
+                                    leaf_index,
+                                    faces: Vec::new(),
+                                });
+                            }
+                            WorldSurfaceEncounter::Face(face) => {
+                                if let Some(group) = expected.last_mut() {
+                                    group.faces.push(face);
+                                }
+                            }
+                        },
+                    );
+                    traversal.generation = u32::MAX - 3;
+                    let packed = ordering.world_surface_groups_prepared(
+                        &locator,
+                        eye,
+                        |_| include_faces,
+                        culling,
+                        cluster,
+                        &mut traversal,
+                    );
+                    assert_eq!(traversal.generation, 4);
+                    assert_eq!(packed.len(), expected.len());
+                    for (actual, expected) in packed.iter().zip(&expected) {
+                        assert_eq!(actual.leaf_index, expected.leaf_index);
+                        assert_eq!(actual.faces, expected.faces);
+                        saw_empty |= actual.faces.is_empty();
+                        saw_faces |= !actual.faces.is_empty();
+                    }
+                    assert_eq!(packed.clone().into_legacy(), expected);
+                    assert_eq!(
+                        packed.into_legacy(),
+                        ordering.world_surface_groups_with_culling(
+                            &locator,
+                            eye,
+                            |_| include_faces,
+                            |bounds, mask| culling(MapPreparedBounds::new(bounds), mask),
+                            cluster
+                        )
+                    );
+                }
+            }
+        }
+    }
+    assert!(saw_empty && saw_faces);
+}
+
+#[test]
+fn packed_leaf_views_borrow_one_face_buffer_and_keep_empty_repeated_leaf_events() {
+    let legacy = vec![
+        super::super::MapWorldSurfaceGroup {
+            leaf_index: 7,
+            faces: vec![10, 11],
+        },
+        super::super::MapWorldSurfaceGroup {
+            leaf_index: 7,
+            faces: Vec::new(),
+        },
+        super::super::MapWorldSurfaceGroup {
+            leaf_index: 9,
+            faces: vec![12],
+        },
+    ];
+    let packed: super::super::MapWorldSurfaceGroups = legacy.clone().into_iter().collect();
+    assert_eq!(packed.len(), 3);
+    assert_eq!(
+        packed
+            .iter()
+            .rev()
+            .map(|group| group.leaf_index)
+            .collect::<Vec<_>>(),
+        [9, 7, 7]
+    );
+    assert_eq!(packed.get(0).unwrap().faces, [10, 11]);
+    assert!(packed.get(1).unwrap().faces.is_empty());
+    assert_eq!(
+        packed.get(2).unwrap().faces.as_ptr(),
+        packed.get(0).unwrap().faces.as_ptr().wrapping_add(2)
+    );
+    assert!(packed.get(3).is_none());
+    assert_eq!(packed.into_legacy(), legacy);
+}
+
+#[test]
+#[ignore = "isolated output-allocation and traversal microbenchmark; run with --ignored --nocapture --test-threads=1"]
+fn packed_leaf_output_microbenchmark() {
+    fn tree(first: usize, count: usize, nodes: &mut Vec<MapNode>) -> i32 {
+        if count == 1 {
+            return -(first as i32) - 1;
+        }
+        let index = nodes.len();
+        nodes.push(MapNode {
+            plane_index: 0,
+            children: [0, 0],
+        });
+        let children = [
+            tree(first, count / 2, nodes),
+            tree(first + count / 2, count / 2, nodes),
+        ];
+        nodes[index].children = children;
+        index as i32
+    }
+    fn original_grouping(
+        ordering: &FaceOrdering,
+        locator: &MapLeafLocator,
+        traversal: &mut MapWorldTraversal,
+    ) -> Vec<super::super::MapWorldSurfaceGroup> {
+        let mut groups = Vec::<super::super::MapWorldSurfaceGroup>::new();
+        ordering.visit_world_surfaces_with_culling(
+            locator,
+            Vec3::splat(10.0),
+            |_| true,
+            |_, mask| MapBoundsCulling::Visible(mask),
+            |_| true,
+            traversal,
+            |event| match event {
+                WorldSurfaceEncounter::Leaf(leaf_index) => {
+                    groups.push(super::super::MapWorldSurfaceGroup {
+                        leaf_index,
+                        faces: Vec::new(),
+                    });
+                }
+                WorldSurfaceEncounter::Face(face) => {
+                    if let Some(group) = groups.last_mut() {
+                        group.faces.push(face);
+                    }
+                }
+            },
+        );
+        groups
+    }
+    let (mut ordering, mut locator) = fixture();
+    let leaves = 1024;
+    let faces_per_leaf = 4;
+    let mut nodes = Vec::new();
+    ordering.root = tree(0, leaves, &mut nodes);
+    ordering.node_faces = vec![0..0; nodes.len()];
+    ordering.faces = vec![ordering.faces[2]; leaves * faces_per_leaf];
+    ordering.leaf_ranges = (0..leaves)
+        .map(|leaf| leaf * faces_per_leaf..(leaf + 1) * faces_per_leaf)
+        .collect();
+    ordering.leaf_faces = (0..leaves * faces_per_leaf)
+        .map(|face| u16::try_from(face).unwrap())
+        .collect();
+    locator.nodes = nodes;
+    locator.leaves = vec![locator.leaves[0]; leaves];
+    let mut original_traversal = MapWorldTraversal::default();
+    let mut packed_traversal = MapWorldTraversal::default();
+    let original = original_grouping(&ordering, &locator, &mut original_traversal);
+    let packed = ordering.world_surface_groups_prepared(
+        &locator,
+        Vec3::splat(10.0),
+        |_| true,
+        |_, mask| MapBoundsCulling::Visible(mask),
+        |_| true,
+        &mut packed_traversal,
+    );
+    assert_eq!(packed.clone().into_legacy(), original);
+    let original_buffers = usize::from(original.capacity() != 0)
+        + original
+            .iter()
+            .filter(|group| group.faces.capacity() != 0)
+            .count();
+    let packed_buffers =
+        usize::from(packed.leaves.capacity() != 0) + usize::from(packed.faces.capacity() != 0);
+    let original_bytes = original.capacity()
+        * std::mem::size_of::<super::super::MapWorldSurfaceGroup>()
+        + original
+            .iter()
+            .map(|group| group.faces.capacity() * std::mem::size_of::<u32>())
+            .sum::<usize>();
+    let packed_bytes = packed.leaves.capacity()
+        * std::mem::size_of::<super::super::MapWorldSurfaceLeaf>()
+        + packed.faces.capacity() * std::mem::size_of::<u32>();
+    drop((original, packed));
+    let iterations = 2000;
+    let measure_original = |traversal: &mut MapWorldTraversal| {
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            drop(std::hint::black_box(original_grouping(
+                &ordering, &locator, traversal,
+            )));
+        }
+        start.elapsed().as_secs_f64()
+    };
+    let measure_packed = |traversal: &mut MapWorldTraversal| {
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            drop(std::hint::black_box(
+                ordering.world_surface_groups_prepared(
+                    &locator,
+                    Vec3::splat(10.0),
+                    |_| true,
+                    |_, mask| MapBoundsCulling::Visible(mask),
+                    |_| true,
+                    traversal,
+                ),
+            ));
+        }
+        start.elapsed().as_secs_f64()
+    };
+    for packed_first in [false, true] {
+        let (original_seconds, packed_seconds) = if packed_first {
+            let packed = measure_packed(&mut packed_traversal);
+            (measure_original(&mut original_traversal), packed)
+        } else {
+            let original = measure_original(&mut original_traversal);
+            (original, measure_packed(&mut packed_traversal))
+        };
+        println!(
+            "packed_first={packed_first} leaves={leaves} faces_per_leaf={faces_per_leaf} iterations={iterations} original_live_output_buffers={original_buffers} packed_live_output_buffers={packed_buffers} original_output_capacity_bytes={original_bytes} packed_output_capacity_bytes={packed_bytes} original_us={:.3} packed_us={:.3} ratio={:.3}",
+            original_seconds * 1e6 / f64::from(iterations),
+            packed_seconds * 1e6 / f64::from(iterations),
+            original_seconds / packed_seconds
+        );
+    }
 }

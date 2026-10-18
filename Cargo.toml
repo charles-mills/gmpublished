@@ -129,6 +129,12 @@ opt-level = 3
 [profile.release.package.gmpublished-domain]
 opt-level = 3
 
+[profile.release.package.wgpu-core]
+opt-level = 3
+
+[profile.release.package.wgpu-hal]
+opt-level = 3
+
 [profile.profiling]
 inherits = "release"
 debug = true

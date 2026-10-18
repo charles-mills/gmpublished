@@ -271,7 +271,15 @@ fn queue(
     groups: WorldDrawGroups,
 ) -> (Vec<Draw>, TransparencyDiagnostics) {
     let details = details::prepare(upload, uniforms, visibility, skybox, groups.water_side);
-    let schedule = schedule::Schedule::prepare(upload, plan, uniforms, skybox, groups, &details);
+    let schedule = schedule::Schedule::prepare(
+        upload,
+        plan,
+        uniforms,
+        skybox,
+        groups,
+        visibility.plan.is_some(),
+        &details,
+    );
     let draws = remaining_queue(
         upload,
         plan,
@@ -306,7 +314,10 @@ fn remaining_queue(
     let mut draws = Vec::new();
     for items in [&plan.translucent, &plan.additive] {
         for item in items {
-            if schedule.is_some_and(|schedule| schedule.covers(item.mesh_index, None)) {
+            // The schedule is immutable while its borrowed ranges are used;
+            // resolving membership once avoids hashing the same mesh per part.
+            let coverage = schedule.map(|schedule| schedule.coverage(item.mesh_index));
+            if coverage.is_some_and(|coverage| coverage.covers(None)) {
                 continue;
             }
             let mesh = &upload.meshes[item.mesh_index];
@@ -318,9 +329,7 @@ fn remaining_queue(
                 });
             } else {
                 for part in mesh.transparent_parts() {
-                    if schedule.is_some_and(|schedule| {
-                        schedule.covers(item.mesh_index, Some(&part.indices))
-                    }) {
+                    if coverage.is_some_and(|coverage| coverage.covers(Some(&part.indices))) {
                         continue;
                     }
                     if let Some(plan) = visibility.plan.as_ref()

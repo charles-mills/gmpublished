@@ -1509,6 +1509,7 @@ dependencies = [
 name = "gmpublished"
 version = "0.2.5"
 dependencies = [
+ "ahash",
  "arc-swap",
  "block2 0.6.2",
  "bytemuck",

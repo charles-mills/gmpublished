@@ -1,5 +1,6 @@
 use super::*;
 use crate::features::file_preview::viewer3d::Uniforms;
+use bytemuck::Zeroable;
 use gmpublished_domain::math::Vec3;
 use gmpublished_domain::scene::map::{MapMeshClusterRanges, MapMeshIndexRange};
 
@@ -189,7 +190,6 @@ fn baked_reference_scan_uses_indexed_geometry_and_keeps_runtime_contexts_when_bo
 
 #[test]
 fn supplied_optical_clip_is_used_while_main_unclipped_state_remains_conservative() {
-    use bytemuck::Zeroable;
     let mut view = Uniforms::zeroed();
     view.view_proj = [
         [1.0, 0.0, 0.0, 0.0],
@@ -266,4 +266,145 @@ fn duplicate_range_with_distinct_faces_retains_legacy_duplicate_draw_behavior() 
         clusters: vec![],
     };
     assert!(MeshPlacements::prepare(3, vec![part(0..3, 0.0, 0)], Some(&visibility)).is_none());
+}
+
+#[test]
+fn static_prop_frustum_bound_uses_indexed_geometry_beyond_compiled_box() {
+    let mut view = Uniforms::zeroed();
+    view.view_proj = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let query = view.bounds_query();
+    let compiled = bounds(3.0);
+    let vertices = [
+        ModelVertex {
+            position: bounds(0.0).min,
+            ..ModelVertex::zeroed()
+        },
+        ModelVertex {
+            position: bounds(0.0).max,
+            ..ModelVertex::zeroed()
+        },
+    ];
+    let (geometry, _) = geometry_references(&vertices, &[0, 1]);
+    let combined = owner_bounds([geometry], Some(compiled));
+    let supported = Some(StaticPropGeometry {
+        geometry: MeshGeometry::Model,
+        door: false,
+        animated: false,
+    });
+    let verified = static_prop_owner_bounds(
+        MapRenderableSource::StaticProp { index: 0 },
+        Some(compiled),
+        combined,
+        [supported],
+    )
+    .unwrap();
+    assert!(!query.intersects(compiled));
+    assert!(
+        query.intersects(verified),
+        "compiled metadata must not hide visible indexed geometry"
+    );
+    assert_eq!(verified, combined.unwrap());
+    let outside = static_prop_owner_bounds(
+        MapRenderableSource::StaticProp { index: 1 },
+        Some(compiled),
+        owner_bounds([Some(compiled)], Some(compiled)),
+        [supported],
+    )
+    .unwrap();
+    assert!(!query.intersects(outside));
+}
+
+#[test]
+fn static_prop_culling_rejects_unknown_invalid_dynamic_or_mixed_geometry_proofs() {
+    let source = MapRenderableSource::StaticProp { index: 0 };
+    let known = bounds(3.0);
+    let supported = StaticPropGeometry {
+        geometry: MeshGeometry::Model,
+        door: false,
+        animated: false,
+    };
+    for unsafe_part in [
+        None,
+        Some(StaticPropGeometry {
+            geometry: MeshGeometry::Brush,
+            ..supported
+        }),
+        Some(StaticPropGeometry {
+            door: true,
+            ..supported
+        }),
+        Some(StaticPropGeometry {
+            animated: true,
+            ..supported
+        }),
+    ] {
+        assert!(
+            static_prop_owner_bounds(
+                source,
+                Some(known),
+                Some(known),
+                [Some(supported), unsafe_part]
+            )
+            .is_none()
+        );
+    }
+    assert!(
+        static_prop_owner_bounds(
+            MapRenderableSource::EntityProp { placement_index: 0 },
+            Some(known),
+            Some(known),
+            [Some(supported)],
+        )
+        .is_none()
+    );
+    assert!(static_prop_owner_bounds(source, None, Some(known), [Some(supported)]).is_none());
+    assert!(static_prop_owner_bounds(source, Some(known), None, [Some(supported)]).is_none());
+    assert!(static_prop_owner_bounds(source, Some(known), Some(known), []).is_none());
+    for invalid in [
+        MapBounds {
+            min: Vec3::splat(f32::NAN),
+            max: known.max,
+        },
+        MapBounds {
+            min: known.min,
+            max: Vec3::splat(f32::INFINITY),
+        },
+        MapBounds {
+            min: known.max,
+            max: known.min,
+        },
+    ] {
+        assert!(
+            static_prop_owner_bounds(source, Some(invalid), Some(known), [Some(supported)])
+                .is_none()
+        );
+        assert!(
+            static_prop_owner_bounds(source, Some(known), Some(invalid), [Some(supported)])
+                .is_none()
+        );
+    }
+    let nonfinite = ModelVertex {
+        position: Vec3::splat(f32::NAN),
+        ..ModelVertex::zeroed()
+    };
+    for (vertices, indices) in [
+        (vec![ModelVertex::zeroed()], vec![1]),
+        (vec![ModelVertex::zeroed(), nonfinite], vec![0, 1]),
+    ] {
+        let (unproven, _) = geometry_references(&vertices, &indices);
+        assert!(
+            static_prop_owner_bounds(
+                source,
+                Some(known),
+                owner_bounds([unproven], Some(known)),
+                [Some(supported)],
+            )
+            .is_none()
+        );
+    }
 }

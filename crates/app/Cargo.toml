@@ -23,6 +23,7 @@ map-capture = ["dep:iced_runtime"]
 gui-benchmark = ["map-capture", "dep:iced_wgpu", "iced_wgpu/renderer-profiling"]
 
 [dependencies]
+ahash = "=0.8.12"
 arc-swap.workspace = true
 bytemuck.workspace = true
 vformats.workspace = true

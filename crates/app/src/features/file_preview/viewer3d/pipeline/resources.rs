@@ -1505,6 +1505,10 @@ mod sampler_layout_tests {
             adapter.request_device(&wgpu::DeviceDescriptor::default()),
         )
         .unwrap();
+        let _completion_scope =
+            crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+                &device,
+            );
         device.push_error_scope(wgpu::ErrorFilter::Validation);
         let resources = RenderResources::new(
             &device,

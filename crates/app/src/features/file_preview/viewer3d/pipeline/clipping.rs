@@ -349,6 +349,10 @@ mod tests {
                 },
             ))
             .expect("Vulkan device");
+            let _completion_scope =
+                crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+                    &device,
+                );
             device.push_error_scope(wgpu::ErrorFilter::Validation);
             let resources = super::super::resources::RenderResources::new(
                 &device,

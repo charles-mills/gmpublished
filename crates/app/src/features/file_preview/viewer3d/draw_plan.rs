@@ -27,8 +27,7 @@ pub(super) struct DrawPlans {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawPlan {
-    pub(super) transparency_leaves:
-        Option<Vec<gmpublished_domain::scene::map::MapWorldSurfaceGroup>>,
+    pub(super) transparency_leaves: Option<gmpublished_domain::scene::map::MapWorldSurfaceGroups>,
     pub(super) world_opaque: Arc<WorldOpaquePlan>,
     pub(super) opaque: Vec<DrawItem>,
     pub(super) opaque_ranges: HashMap<usize, OpaqueRanges>,
@@ -258,6 +257,7 @@ pub(super) fn prepare_draw_plans(
     upload: &ViewerScene,
     request: DrawPlanRequest<'_>,
     cache: &mut WorldCache,
+    traversal: &mut gmpublished_domain::scene::map::MapWorldTraversal,
     world_only: bool,
 ) -> DrawPlans {
     let world = prepare_partition_draw_plan(
@@ -271,6 +271,7 @@ pub(super) fn prepare_draw_plans(
             world_only,
         },
         cache,
+        traversal,
     );
     let map_skybox = if request.map_skybox_visible && request.map_skybox_content_present {
         request.map_skybox_camera_position.map(|camera_position| {
@@ -285,6 +286,7 @@ pub(super) fn prepare_draw_plans(
                     world_only,
                 },
                 cache,
+                traversal,
             ))
         })
     } else {
@@ -314,6 +316,7 @@ fn prepare_partition_draw_plan(
     upload: &ViewerScene,
     request: PartitionDrawRequest<'_>,
     cache: &mut WorldCache,
+    traversal: &mut gmpublished_domain::scene::map::MapWorldTraversal,
 ) -> DrawPlan {
     let PartitionDrawRequest {
         selection,
@@ -327,7 +330,14 @@ fn prepare_partition_draw_plan(
         skin_remap,
         bodygroup_choices,
     } = selection;
-    let receivers = receiver_encounters(upload, camera_position, partition, visibility_plan, view);
+    let receivers = receiver_encounters(
+        upload,
+        camera_position,
+        partition,
+        visibility_plan,
+        view,
+        traversal,
+    );
     let mut plan = prepare_partition_draw_plan_from_sources(
         upload
             .meshes
@@ -666,7 +676,7 @@ impl SurfaceBatch {
 struct ReceiverEncounters {
     encounters: Vec<ReceiverPlanSource>,
     visible: Option<ReceiverVisibility>,
-    leaves: Option<Vec<gmpublished_domain::scene::map::MapWorldSurfaceGroup>>,
+    leaves: Option<gmpublished_domain::scene::map::MapWorldSurfaceGroups>,
 }
 
 impl ReceiverEncounters {
@@ -688,6 +698,7 @@ fn receiver_encounters(
     partition: PartitionFilter,
     visibility: Option<&WorldVisibilityPlan>,
     view: Option<&super::Uniforms>,
+    traversal: &mut gmpublished_domain::scene::map::MapWorldTraversal,
 ) -> ReceiverEncounters {
     let Some(map) = upload
         .assets
@@ -701,13 +712,13 @@ fn receiver_encounters(
     let bounds_query = view.map(super::Uniforms::bounds_query);
     let mut visible = ReceiverVisibility::new(index, partition, map.visibility.is_some());
     let leaves = map.visibility.as_ref().map(|ordering| {
-        ordering.world_surface_groups_with_culling(
+        ordering.world_surface_groups_prepared(
             eye,
             |face| index.world_face(face, partition),
             |bounds, mask| {
                 bounds_query.as_ref().map_or(
                     gmpublished_domain::scene::map::MapBoundsCulling::Visible(mask),
-                    |query| query.classify(bounds, mask),
+                    |query| query.classify_prepared(bounds, mask),
                 )
             },
             |cluster| {
@@ -719,6 +730,7 @@ fn receiver_encounters(
                         .unwrap_or(false)
                 })
             },
+            traversal,
         )
     });
     let mut door_eyes = vec![None; map.doors.len()];
@@ -765,7 +777,7 @@ fn receiver_encounters(
         });
     };
     if let Some(leaves) = &leaves {
-        for face in leaves.iter().flat_map(|group| &group.faces) {
+        for face in leaves.iter().flat_map(|group| group.faces) {
             for receiver in index.get(face).into_iter().flatten() {
                 if receiver_draws(receiver)
                     && partition.accepts(upload.meshes[receiver.mesh_index].map_skybox)

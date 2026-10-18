@@ -936,7 +936,13 @@ impl PendingLightmapBlock {
 
 fn lightmap_gamma_goal(value: f32) -> f32 {
     let index = (value * 1024.0).round().clamp(0.0, 4095.0);
-    ((index / 1024.0).powf(1.0 / 2.2) * 0.5).min(1.0)
+    if index.is_nan() {
+        return 1.0;
+    }
+    static GOALS: std::sync::OnceLock<[f32; 4096]> = std::sync::OnceLock::new();
+    GOALS.get_or_init(|| {
+        std::array::from_fn(|index| ((index as f32 / 1024.0).powf(1.0 / 2.2) * 0.5).min(1.0))
+    })[index as usize]
 }
 
 fn lightmap_bytes(value: Vec3) -> [u8; 4] {
@@ -1020,7 +1026,10 @@ pub(super) fn decode_light_sample(sample: ColorRgbExp) -> [u8; 4] {
 }
 
 pub(super) fn decode_light_sample_linear(sample: ColorRgbExp) -> Vec3 {
-    let scale = 2.0_f32.powi(i32::from(sample.exponent)) / 255.0;
+    static SCALES: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let scale = SCALES.get_or_init(|| {
+        std::array::from_fn(|exponent| 2.0_f32.powi(i32::from(exponent as u8 as i8)) / 255.0)
+    })[usize::from(sample.exponent as u8)];
     Vec3::new(
         f32::from(sample.r) * scale,
         f32::from(sample.g) * scale,
@@ -1515,6 +1524,147 @@ mod lightmap_tests {
             b,
             exponent: 0,
         }
+    }
+
+    fn scalar_gamma_goal(value: f32) -> f32 {
+        let index = (value * 1024.0).round().clamp(0.0, 4095.0);
+        ((index / 1024.0).powf(1.0 / 2.2) * 0.5).min(1.0)
+    }
+
+    fn scalar_decode_light_sample_linear(sample: ColorRgbExp) -> Vec3 {
+        let scale = 2.0_f32.powi(i32::from(sample.exponent)) / 255.0;
+        Vec3::new(
+            f32::from(sample.r) * scale,
+            f32::from(sample.g) * scale,
+            f32::from(sample.b) * scale,
+        )
+    }
+
+    #[test]
+    fn lightmap_gamma_table_matches_every_bin_and_rounding_boundary_bit_exactly() {
+        let check = |value| {
+            assert_eq!(
+                lightmap_gamma_goal(value).to_bits(),
+                scalar_gamma_goal(value).to_bits(),
+                "gamma input {value:?}"
+            );
+        };
+        for index in 0..4096 {
+            check(index as f32 / 1024.0);
+            let boundary = (index as f32 + 0.5) / 1024.0;
+            check(boundary.next_down());
+            check(boundary);
+            check(boundary.next_up());
+        }
+        for value in [
+            -0.0,
+            0.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            -1.0,
+            -f32::MAX,
+            f32::MAX,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::NAN,
+            f32::from_bits(0x7fc0_1234),
+            f32::from_bits(0xffc0_1234),
+        ] {
+            check(value);
+        }
+    }
+
+    #[test]
+    fn lightmap_exponent_table_preserves_every_exponent_and_mantissa_bit_exactly() {
+        for exponent in i8::MIN..=i8::MAX {
+            for channel in u8::MIN..=u8::MAX {
+                let sample = ColorRgbExp {
+                    r: channel,
+                    g: channel.wrapping_add(85),
+                    b: channel.wrapping_add(170),
+                    exponent,
+                };
+                assert_eq!(
+                    decode_light_sample_linear(sample)
+                        .to_array()
+                        .map(f32::to_bits),
+                    scalar_decode_light_sample_linear(sample)
+                        .to_array()
+                        .map(f32::to_bits),
+                    "sample {sample:?}"
+                );
+            }
+        }
+    }
+
+    fn benchmark_lightmap_arithmetic(
+        samples: &[ColorRgbExp],
+        decode: impl Fn(ColorRgbExp) -> Vec3,
+        gamma: impl Fn(f32) -> f32,
+    ) -> u64 {
+        let mut checksum = 0_u64;
+        for _ in 0..64 {
+            for pair in samples.chunks_exact(2) {
+                let linear = decode(std::hint::black_box(pair[0])) * 0.75
+                    + decode(std::hint::black_box(pair[1])) * 0.25;
+                let goal = Vec3::from(linear.to_array().map(&gamma));
+                checksum += u64::from(u32::from_le_bytes(lightmap_bytes(goal)));
+            }
+        }
+        std::hint::black_box(checksum)
+    }
+
+    #[test]
+    #[ignore = "release-only CPU microbenchmark; run without competing compilation"]
+    fn benchmark_scalar_and_table_lightmap_cook_arithmetic() {
+        assert!(
+            !std::hint::black_box(cfg!(debug_assertions)),
+            "run this benchmark with --release"
+        );
+        let samples = (0..16384_usize)
+            .map(|index| ColorRgbExp {
+                r: index as u8,
+                g: (index / 3) as u8,
+                b: (index / 7) as u8,
+                exponent: (index % 12) as i8 - 8,
+            })
+            .collect::<Vec<_>>();
+        std::hint::black_box(lightmap_gamma_goal(1.0));
+        std::hint::black_box(decode_light_sample_linear(samples[0]));
+        let mut times = [Vec::new(), Vec::new()];
+        let mut expected = None;
+        for round in 0..8 {
+            for method in [round % 2, 1 - round % 2] {
+                let start = std::time::Instant::now();
+                let checksum = if method == 0 {
+                    benchmark_lightmap_arithmetic(
+                        &samples,
+                        scalar_decode_light_sample_linear,
+                        scalar_gamma_goal,
+                    )
+                } else {
+                    benchmark_lightmap_arithmetic(
+                        &samples,
+                        decode_light_sample_linear,
+                        lightmap_gamma_goal,
+                    )
+                };
+                times[method].push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(*expected.get_or_insert(checksum), checksum);
+            }
+        }
+        for values in &mut times {
+            values.sort_by(f64::total_cmp);
+        }
+        let scalar = times[0][4];
+        let table = times[1][4];
+        eprintln!(
+            "lightmap LUT arithmetic: samples=16384 pairs_per_run=524288 scalar_ms={scalar:.3} table_ms={table:.3} speedup={:.3} checksum={} scalar_runs_ms={:?} table_runs_ms={:?}",
+            scalar / table,
+            expected.unwrap(),
+            times[0],
+            times[1]
+        );
     }
 
     #[test]

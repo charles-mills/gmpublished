@@ -6,6 +6,7 @@ mod state;
 mod update;
 mod view;
 mod viewer3d;
+pub use viewer3d::{ShutdownError, finish_gpu_shutdown};
 
 pub use effect::Effect;
 use iced::{Subscription, time};

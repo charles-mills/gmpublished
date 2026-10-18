@@ -160,3 +160,69 @@ fn submitted_pins_retire_only_at_completion_and_unsubmitted_cancellation_is_loca
     drop(cancelled);
     assert_eq!(dropped.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn completed_material_slots_match_independent_set_oracle_for_all_small_inputs() {
+    let values = [0, 1, 2, 3, usize::MAX];
+    for mask in 0..1usize << values.len() {
+        let original: Arc<[usize]> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(bit, &slot)| (mask & (1 << bit) != 0).then_some(slot))
+            .collect();
+        for sun in values {
+            for debug in values {
+                for duplicate in values {
+                    let additional = [sun, debug, duplicate];
+                    let expected: BTreeSet<_> =
+                        original.iter().copied().chain(additional).collect();
+                    let expected: Arc<[usize]> = expected.into_iter().collect();
+                    let actual = sorted_material_slots(Arc::clone(&original), additional);
+                    assert_eq!(actual, expected, "mask={mask}, additional={additional:?}");
+                    for count in [0, 1, 3, 4, usize::MAX] {
+                        let expected = match expected.iter().find(|&&slot| slot >= count) {
+                            Some(&slot) => Err(DemandError::InvalidMaterial { slot, count }),
+                            None => Ok(Arc::clone(&expected)),
+                        };
+                        assert_eq!(
+                            complete_material_slots(Arc::clone(&original), additional, count),
+                            expected,
+                            "mask={mask}, additional={additional:?}, count={count}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sorted_material_slots_reuse_unchanged_arc_and_keep_sorted_sun_debug_additions() {
+    let original: Arc<[usize]> = Arc::from([1, 4, 9]);
+    let none = sorted_material_slots(Arc::clone(&original), []);
+    let existing = sorted_material_slots(Arc::clone(&original), [9, 1, 4, 1]);
+    assert!(Arc::ptr_eq(&none, &original));
+    assert!(Arc::ptr_eq(&existing, &original));
+    let appended = sorted_material_slots(Arc::clone(&original), [8, 0, 4, 10, 8]);
+    assert_eq!(&*appended, &[0, 1, 4, 8, 9, 10]);
+    assert_eq!(&*original, &[1, 4, 9]);
+    assert!(!Arc::ptr_eq(&appended, &original));
+    let empty: Arc<[usize]> = Arc::from([]);
+    let unchanged = sorted_material_slots(Arc::clone(&empty), []);
+    assert!(Arc::ptr_eq(&empty, &unchanged));
+}
+
+#[test]
+fn completed_material_slots_preserve_first_invalid_slot_including_maximum() {
+    assert_eq!(
+        complete_material_slots(Arc::from([2, 9]), [usize::MAX, 7, 5], 5),
+        Err(DemandError::InvalidMaterial { slot: 5, count: 5 })
+    );
+    assert_eq!(
+        complete_material_slots(Arc::from([]), [usize::MAX], usize::MAX),
+        Err(DemandError::InvalidMaterial {
+            slot: usize::MAX,
+            count: usize::MAX,
+        })
+    );
+}

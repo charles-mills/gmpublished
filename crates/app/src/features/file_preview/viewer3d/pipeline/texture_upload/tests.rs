@@ -181,6 +181,70 @@ fn completion_owned_permits_outlive_submission_and_image_owners() {
 }
 
 #[test]
+fn cached_staging_remains_charged_and_excess_or_closed_returns_release_ownership() {
+    let ledger = Arc::new(Ledger::default());
+    let failed = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let mut submitted: Vec<_> = (0..3)
+        .map(|id| Some((id, StagingPermit::new(&ledger, 256))))
+        .collect();
+    // Completion can return slots in a different order from submission.
+    for index in [2, 0, 1] {
+        return_staging(submitted[index].take().unwrap(), &Ok(()), &sender, &failed);
+    }
+    // Three completed slots fit the live budget, but only two may stay idle.
+    assert_eq!(ledger.peak_staging.load(Ordering::Acquire), 768);
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 512);
+    assert!(!failed.load(Ordering::Acquire));
+    let reused = receiver.try_recv().unwrap();
+    assert_eq!(reused.0, 2);
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 512);
+    drop(reused);
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 256);
+    drop(receiver);
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
+    // A callback after uploader shutdown must not block or retain its buffer.
+    return_staging(
+        (3, StagingPermit::new(&ledger, 256)),
+        &Ok(()),
+        &sender,
+        &failed,
+    );
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
+    assert!(!failed.load(Ordering::Acquire));
+}
+
+#[test]
+fn failed_remapping_is_reported_and_does_not_publish_or_replace_ready_storage() {
+    let ledger = Arc::new(Ledger::default());
+    let failed = AtomicBool::new(false);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    return_staging(StagingPermit::new(&ledger, 256), &Ok(()), &sender, &failed);
+    return_staging(
+        StagingPermit::new(&ledger, 512),
+        &Err(wgpu::BufferAsyncError),
+        &sender,
+        &failed,
+    );
+    assert!(failed.load(Ordering::Acquire));
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 256);
+    assert_eq!(receiver.try_recv().unwrap().bytes, 256);
+    assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn staging_idle_retention_is_limited_by_slots_bytes_and_the_original_aggregate_budget() {
+    let mib = 1024 * 1024;
+    assert_eq!(staging_idle_limit(8 * mib, 64 * mib), 2);
+    assert_eq!(staging_idle_limit(8 * mib, 8 * mib), 1);
+    assert_eq!(staging_idle_limit(16 * mib, 64 * mib), 1);
+    assert_eq!(staging_idle_limit(32 * mib, 64 * mib), 0);
+    assert_eq!(staging_idle_limit(256, 512), 2);
+    assert_eq!(staging_idle_limit(256, 256), 1);
+}
+
+#[test]
 #[ignore = "requires an exclusively reserved Vulkan GPU"]
 fn gpu_bc_fallback_all_mips_frames_cube_views_and_pressure_are_bounded() {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -195,6 +259,10 @@ fn gpu_bc_fallback_all_mips_frames_cube_views_and_pressure_are_bounded() {
         adapter.request_device(&wgpu::DeviceDescriptor::default()),
     )
     .unwrap();
+    let _completion_scope =
+        crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+            &device,
+        );
     assert!(
         !device
             .features()
@@ -225,16 +293,31 @@ fn gpu_native_bc_all_mips_frames_and_views_preserve_blocks() {
             ..Default::default()
         }))
         .unwrap();
+    let _completion_scope =
+        crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+            &device,
+        );
     gpu_bc_roundtrips(&device, &queue, true);
 }
 
 fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
+    for aggregate_staging_bytes in [256, 512] {
+        gpu_bc_roundtrips_with_budget(device, queue, native, aggregate_staging_bytes);
+    }
+}
+
+fn gpu_bc_roundtrips_with_budget(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    native: bool,
+    aggregate_staging_bytes: u64,
+) {
     for format in [BcFormat::Bc1, BcFormat::Bc2, BcFormat::Bc3] {
         let uploader = TextureUploader::shared(
             device,
             queue,
             UploadPolicy {
-                aggregate_staging_bytes: 512,
+                aggregate_staging_bytes,
                 batch_bytes: 256,
                 ..Default::default()
             },
@@ -433,8 +516,16 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
             serde_json::to_string(&stats).unwrap()
         );
         assert!(stats.submissions > 1);
-        assert!(stats.peak_staging_bytes <= 512);
-        assert_eq!(stats.staging_bytes, 0);
+        assert!(stats.peak_staging_bytes <= aggregate_staging_bytes);
+        if staging_reuse_enabled() {
+            assert!(stats.staging_reuses > 0);
+            assert!(stats.staging_allocations <= aggregate_staging_bytes / 256);
+            assert!(stats.staging_bytes > 0);
+            assert!(stats.staging_bytes <= aggregate_staging_bytes);
+        } else {
+            assert_eq!(stats.staging_reuses, 0);
+            assert_eq!(stats.staging_bytes, 0);
+        }
         assert_eq!(stats.owned_image_allocations, 1);
         assert_eq!(
             stats.owned_image_texel_bytes,
@@ -454,6 +545,9 @@ fn gpu_bc_roundtrips(device: &wgpu::Device, queue: &wgpu::Queue, native: bool) {
         let retired = uploader.lock().unwrap().stats();
         assert_eq!(retired.owned_image_allocations, 0);
         assert_eq!(retired.sampled_image_bytes, 0);
+        let ledger = Arc::clone(&uploader.lock().unwrap().ledger);
+        drop(uploader);
+        assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
     }
 }
 
@@ -472,6 +566,10 @@ fn gpu_cancel_unsubmitted_batch_releases_staging_and_texture_ownership() {
         adapter.request_device(&wgpu::DeviceDescriptor::default()),
     )
     .unwrap();
+    let _completion_scope =
+        crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+            &device,
+        );
     let uploader = TextureUploader::shared(
         &device,
         &queue,
@@ -519,10 +617,270 @@ fn gpu_cancel_unsubmitted_batch_releases_staging_and_texture_ownership() {
     assert_eq!(ledger.owned_images.load(Ordering::Acquire), 1);
     assert_eq!(ledger.staging.load(Ordering::Acquire), 256);
     drop(uploader);
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    // A concurrent completion worker may already own the callback when a main
+    // thread poll returns. Observe real retirement without another render/poll.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while ledger.owned_images.load(Ordering::Acquire) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "image retirement stalled"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(ledger.owned_images.load(Ordering::Acquire), 0);
     assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
     assert_eq!(ledger.submissions.load(Ordering::Acquire), 0);
+}
+
+#[test]
+#[ignore = "requires an exclusively reserved Vulkan GPU"]
+fn gpu_scoped_image_lease_batches_preserve_uploads_pressure_and_cancellation() {
+    use super::super::images::{ImageCache, ImageView};
+    use crate::bridge::materials::{DecodedTextureFrames, ResolvedTextureMip, TextureReadTransfer};
+
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    let adapter = iced::futures::executor::block_on(
+        instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .unwrap();
+    let (device, queue) = iced::futures::executor::block_on(
+        adapter.request_device(&wgpu::DeviceDescriptor::default()),
+    )
+    .unwrap();
+    let _completion_scope = super::super::completion::TestDeviceScope::new(&device);
+    let frames = |pixel: [u8; 4]| {
+        DecodedTextureFrames::from_rgba(
+            0,
+            vec![vec![ResolvedTextureMip {
+                rgba: pixel.to_vec(),
+                width: 1,
+                height: 1,
+            }]],
+        )
+        .unwrap()
+    };
+    let uploader = |bytes| {
+        TextureUploader::shared(
+            &device,
+            &queue,
+            UploadPolicy {
+                aggregate_staging_bytes: bytes,
+                batch_bytes: bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+
+    // Two padded rows fit per batch. A full batch must still submit before
+    // the outer scope ends, even with only one staging slot available.
+    let pressure = uploader(512);
+    let mut cache = ImageCache::default();
+    let mut views = Vec::new();
+    {
+        let batch = UploadLeaseBatch::new(&pressure);
+        for value in 1..=5 {
+            let source = frames([value, 32, 96, 255]);
+            let mut lease = cache.lease_batched(&batch);
+            views.push(
+                lease
+                    .view(
+                        &device,
+                        &queue,
+                        source.resident().unwrap(),
+                        TextureReadTransfer::Unmodified,
+                        ImageView::D2(0),
+                    )
+                    .unwrap(),
+            );
+            assert!(lease.finish().1.is_empty());
+        }
+        assert_eq!(pressure.lock().unwrap().stats().submissions, 2);
+    }
+    let stats = pressure.lock().unwrap().stats();
+    assert_eq!(stats.submissions, 3);
+    assert!(stats.peak_staging_bytes <= 512);
+    for (value, view) in (1..=5).zip(&views) {
+        assert_eq!(
+            read_image_pixel(&device, &queue, view),
+            [value, 32, 96, 255]
+        );
+    }
+
+    // An unrelated standalone lease on the same uploader retains its immediate
+    // submission contract while a group is alive.
+    let standalone = uploader(1024);
+    let mut cache = ImageCache::default();
+    let first = frames([17, 31, 47, 255]);
+    let second = frames([59, 73, 89, 255]);
+    let batch = UploadLeaseBatch::new(&standalone);
+    let mut grouped = cache.lease_batched(&batch);
+    let first_view = grouped
+        .view(
+            &device,
+            &queue,
+            first.resident().unwrap(),
+            TextureReadTransfer::Unmodified,
+            ImageView::D2(0),
+        )
+        .unwrap();
+    grouped.finish();
+    assert_eq!(standalone.lock().unwrap().stats().submissions, 0);
+    let mut separate = cache.lease(&standalone);
+    let second_view = separate
+        .view(
+            &device,
+            &queue,
+            second.resident().unwrap(),
+            TextureReadTransfer::Unmodified,
+            ImageView::D2(0),
+        )
+        .unwrap();
+    separate.finish();
+    assert_eq!(standalone.lock().unwrap().stats().submissions, 1);
+    drop(batch);
+    assert_eq!(standalone.lock().unwrap().stats().submissions, 1);
+    assert_eq!(
+        read_image_pixel(&device, &queue, &first_view),
+        [17, 31, 47, 255]
+    );
+    assert_eq!(
+        read_image_pixel(&device, &queue, &second_view),
+        [59, 73, 89, 255]
+    );
+
+    // A Result early return drops the outer guard. Dropping an unfinished
+    // participating lease must keep its pending-copy permit until submission
+    // completes, even after its view and image owners have been canceled.
+    let canceled = uploader(1024);
+    let mut cache = ImageCache::default();
+    let mut retained = None;
+    let mut fail_after_uploads = || -> Result<(), ()> {
+        let batch = UploadLeaseBatch::new(&canceled);
+        let source = frames([101, 113, 127, 255]);
+        let mut lease = cache.lease_batched(&batch);
+        retained = Some(
+            lease
+                .view(
+                    &device,
+                    &queue,
+                    source.resident().unwrap(),
+                    TextureReadTransfer::Unmodified,
+                    ImageView::D2(0),
+                )
+                .unwrap(),
+        );
+        lease.finish();
+        let source = frames([139, 151, 163, 255]);
+        let mut lease = cache.lease_batched(&batch);
+        drop(
+            lease
+                .view(
+                    &device,
+                    &queue,
+                    source.resident().unwrap(),
+                    TextureReadTransfer::Unmodified,
+                    ImageView::D2(0),
+                )
+                .unwrap(),
+        );
+        drop(lease);
+        let stats = canceled.lock().unwrap().stats();
+        assert_eq!(stats.submissions, 0);
+        assert_eq!(stats.owned_image_allocations, 2);
+        Err(())
+    };
+    let result = fail_after_uploads();
+    assert!(result.is_err());
+    assert_eq!(canceled.lock().unwrap().stats().submissions, 1);
+    assert_eq!(
+        read_image_pixel(&device, &queue, retained.as_ref().unwrap()),
+        [101, 113, 127, 255]
+    );
+    drop(retained);
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while canceled.lock().unwrap().stats().owned_image_allocations != 0 {
+        assert!(
+            Instant::now() < deadline,
+            "batched image retirement stalled"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+// Read the sampled image through a separately submitted compute pipeline. This
+// exercises visibility to real GPU work without adding COPY_SRC to image uploads.
+fn read_image_pixel(device: &wgpu::Device, queue: &wgpu::Queue, view: &UploadedView) -> [u32; 4] {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("scoped image lease readback"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+            "@group(0) @binding(0) var image: texture_2d<f32>;
+             @group(0) @binding(1) var<storage, read_write> output: array<u32>;
+             @compute @workgroup_size(1) fn main() {
+                 let pixel = vec4<u32>(round(textureLoad(image, vec2<i32>(0), 0) * 255.0));
+                 output[0] = pixel.x; output[1] = pixel.y;
+                 output[2] = pixel.z; output[3] = pixel.w;
+             }",
+        )),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let output = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 16,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 16);
+    queue.submit([encoder.finish()]);
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |result| result.unwrap());
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let read = readback.slice(..).get_mapped_range();
+    let pixel = std::array::from_fn(|index| {
+        u32::from_ne_bytes(read[index * 4..index * 4 + 4].try_into().unwrap())
+    });
+    drop(read);
+    readback.unmap();
+    pixel
 }
 
 #[test]
@@ -651,6 +1009,10 @@ fn gpu_final_close_drains_submission_staging_and_image_retirement_without_anothe
         adapter.request_device(&wgpu::DeviceDescriptor::default()),
     )
     .unwrap();
+    let _completion_scope =
+        crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+            &device,
+        );
     let uploader = TextureUploader::shared(
         &device,
         &queue,

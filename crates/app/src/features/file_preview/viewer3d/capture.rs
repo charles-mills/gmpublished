@@ -1092,6 +1092,12 @@ fn git_output(args: &[&str]) -> Option<String> {
 }
 
 pub fn capture_map_reference_frames() {
+    let cpu_executor = gmpublished_backend::CpuExecutor::build(
+        gmpublished_backend::ExecutionConfig::for_machine().cpu_threads,
+    )
+    .expect("capture CPU executor");
+    let allow_solid_eyes = std::env::var_os("GMPUBLISHED_MAP_CAPTURE_ALLOW_SOLID").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
     let texture_upload_policy = super::pipeline::capture_texture_upload_policy();
     let resource_defaults = TextureResourcePolicy::default();
     let suite_path = std::env::var_os("GMPUBLISHED_MAP_CAPTURE_SUITE").map_or_else(
@@ -1244,6 +1250,7 @@ pub fn capture_map_reference_frames() {
         "scene_msaa_samples": super::scene_sample_count(),
         "optical_msaa_samples": 1,
         "requested_bc_upload": super::pipeline::capture_bc_upload(),
+        "allow_solid_eyes": allow_solid_eyes,
         "sampler_quality": {
             "profile_override": std::env::var("GMPUBLISHED_MAP_CAPTURE_SAMPLER_PROFILE").ok(),
             "anisotropy_override": std::env::var("GMPUBLISHED_MAP_CAPTURE_ANISOTROPY").ok(),
@@ -1527,9 +1534,10 @@ pub fn capture_map_reference_frames() {
                 .as_ref()
                 .is_some_and(|collision| collision.aabb_trace_solid(pose.position, Vec3::ZERO));
             assert!(
-                !eye_in_solid,
+                !eye_in_solid || allow_solid_eyes,
                 "{} / {} eye is inside solid collision",
-                map.name, shot.name
+                map.name,
+                shot.name
             );
             camera.water = if submerged {
                 super::camera::WaterLevel::Eyes
@@ -1552,6 +1560,7 @@ pub fn capture_map_reference_frames() {
                 frame_probe: shot.frame_probe,
                 target: shot.target(),
                 viewer: FlyViewer {
+                    cpu_executor: Some(cpu_executor.clone()),
                     #[cfg(feature = "gui-benchmark")]
                     benchmark: None,
                     scene: Arc::clone(&scene),
@@ -1823,6 +1832,7 @@ pub fn capture_map_reference_frames() {
                 frame_probe: shot.frame_probe,
                 target: CaptureTarget::Main,
                 viewer: FlyViewer {
+                    cpu_executor: Some(cpu_executor.clone()),
                     #[cfg(feature = "gui-benchmark")]
                     benchmark: None,
                     scene: Arc::clone(&scene),

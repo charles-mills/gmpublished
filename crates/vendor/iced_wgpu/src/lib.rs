@@ -175,7 +175,12 @@ impl Renderer {
             .begin(&self.engine.device, &mut encoder, token);
         #[cfg(feature = "renderer-profiling")]
         let prepare_started = std::time::Instant::now();
-        self.prepare(&mut encoder, viewport);
+        self.prepare(
+            &mut encoder,
+            viewport,
+            #[cfg(feature = "renderer-profiling")]
+            token,
+        );
         #[cfg(feature = "renderer-profiling")]
         let prepare_ms = profiling::elapsed(prepare_started);
         #[cfg(feature = "renderer-profiling")]
@@ -386,6 +391,7 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         viewport: &Viewport,
+        #[cfg(feature = "renderer-profiling")] token: Option<profiling::FrameToken>,
     ) {
         self.engine
             .primitive_storage
@@ -504,11 +510,19 @@ impl Renderer {
                 prepare_span.finish();
             }
         }
+        #[cfg(feature = "renderer-profiling")]
+        let finish_prepare_started = std::time::Instant::now();
         self.engine
             .primitive_storage
             .write()
             .expect("Write primitive storage")
             .finish_prepare(&self.engine.device, &self.engine.queue);
+        #[cfg(feature = "renderer-profiling")]
+        if let Some(token) = token {
+            profiling::update(token, |sample| {
+                sample.cpu_primitive_finish_prepare_ms = profiling::elapsed(finish_prepare_started);
+            });
+        }
     }
 
     fn render(
@@ -1034,6 +1048,7 @@ impl renderer::Headless for Renderer {
 
         let requested_features = (wgpu::Features::TEXTURE_COMPRESSION_BC
             | wgpu::Features::CLIP_DISTANCES
+            | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
             | wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER
             | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING).intersection(adapter.features());
         let (device, queue) = adapter

@@ -7,12 +7,106 @@ use super::details::{DetailDraw, DetailProfile};
 use super::{Draw, DrawGroup, Primitive, WorldDrawGroups, depth};
 use gmpublished_domain::math::Vec3;
 use gmpublished_domain::scene::map::{
-    MapBounds, MapPropLeafMembership, MapSurfaceOwnerId, MapWorldSurfaceGroup,
-    MapWorldSurfaceRendering,
+    MapBounds, MapPropLeafMembership, MapSurfaceOwnerId, MapWorldSurfaceGroupRef,
+    MapWorldSurfaceGroups, MapWorldSurfaceRendering,
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::OnceLock;
+
+// Local admission membership borrows the existing plan; the resulting schedule
+// stores copied DrawItems and never retains this index or its references.
+enum MeshItems<'a> {
+    Dense(Vec<Option<&'a DrawItem>>),
+    #[cfg(any(test, feature = "map-capture"))]
+    Standard(HashMap<usize, DrawItem>),
+}
+
+impl<'a> MeshItems<'a> {
+    fn new(mesh_count: usize, items: impl Iterator<Item = &'a DrawItem>) -> Self {
+        #[cfg(any(test, feature = "map-capture"))]
+        if !dense_mesh_membership_enabled() {
+            return Self::standard(items);
+        }
+        Self::dense(mesh_count, items)
+    }
+
+    fn dense(mesh_count: usize, items: impl Iterator<Item = &'a DrawItem>) -> Self {
+        let mut items = items.peekable();
+        if items.peek().is_none() {
+            return Self::Dense(Vec::new());
+        }
+        let mut selected = vec![None; mesh_count];
+        for item in items {
+            if let Some(slot) = selected.get_mut(item.mesh_index) {
+                // As with HashMap::collect, the last admission for a mesh wins.
+                *slot = Some(item);
+            }
+        }
+        Self::Dense(selected)
+    }
+
+    #[cfg(any(test, feature = "map-capture"))]
+    fn standard(items: impl Iterator<Item = &'a DrawItem>) -> Self {
+        Self::Standard(items.map(|&item| (item.mesh_index, item)).collect())
+    }
+
+    fn get(&self, mesh: usize) -> Option<DrawItem> {
+        match self {
+            Self::Dense(selected) => selected.get(mesh).copied().flatten().copied(),
+            #[cfg(any(test, feature = "map-capture"))]
+            Self::Standard(selected) => selected.get(&mesh).copied(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "map-capture"))]
+fn dense_mesh_membership_enabled() -> bool {
+    #[cfg(feature = "map-capture")]
+    {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_DENSE_MESH_MEMBERSHIP").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        })
+    }
+    #[cfg(not(feature = "map-capture"))]
+    true
+}
+
+// Borrow one immutable mesh's coverage for all of its transparent parts.
+// Range containment intentionally remains the original single-interval scan.
+#[derive(Clone, Copy)]
+pub(super) enum MeshCoverage<'a> {
+    World,
+    Ranges(&'a [Range<u32>]),
+}
+
+impl MeshCoverage<'_> {
+    pub(super) fn covers(self, indices: Option<&Range<u32>>) -> bool {
+        match self {
+            Self::World => true,
+            Self::Ranges(ranges) => indices.is_some_and(|indices| {
+                ranges
+                    .iter()
+                    .any(|range| range.start <= indices.start && range.end >= indices.end)
+            }),
+        }
+    }
+}
+
+fn static_prop_frustum_culling_enabled() -> bool {
+    #[cfg(feature = "map-capture")]
+    {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_STATIC_PROP_FRUSTUM_CULLING").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        })
+    }
+    #[cfg(not(feature = "map-capture"))]
+    true
+}
 
 struct WorldFace {
     draw: DrawGroup,
@@ -23,6 +117,25 @@ struct WorldFace {
 struct Owner {
     draw: DrawGroup,
     origin: Vec3,
+}
+
+impl Owner {
+    fn from_operations(
+        depth: f32,
+        origin: Vec3,
+        operations: Range<usize>,
+        emit_geometry: bool,
+    ) -> Option<Self> {
+        if emit_geometry && operations.is_empty() {
+            return None;
+        }
+        // A geometrically culled owner still drains details and acts as a
+        // depth barrier when compose merges the remaining draw queue.
+        Some(Self {
+            draw: DrawGroup { depth, operations },
+            origin,
+        })
+    }
 }
 
 struct Sprite {
@@ -68,9 +181,9 @@ pub struct Diagnostics {
 }
 
 fn prepared_leaves(
-    leaves: Option<&[MapWorldSurfaceGroup]>,
+    leaves: Option<&MapWorldSurfaceGroups>,
     has_receivers: bool,
-) -> Result<&[MapWorldSurfaceGroup], ScheduleUnavailable> {
+) -> Result<&MapWorldSurfaceGroups, ScheduleUnavailable> {
     leaves.ok_or(if has_receivers {
         ScheduleUnavailable::UnsupportedTraversalContext
     } else {
@@ -95,6 +208,7 @@ impl Schedule {
         uniforms: &Uniforms,
         skybox: bool,
         groups: WorldDrawGroups,
+        pvs_limited: bool,
         details: &[DetailDraw],
     ) -> Result<Self, ScheduleUnavailable> {
         let map = upload.assets.map().ok_or(ScheduleUnavailable::NotMap)?;
@@ -105,7 +219,7 @@ impl Schedule {
         let mut diagnostics = Diagnostics::default();
         let leaves = pruned_leaves(
             prepared_leaves(
-                plan.transparency_leaves.as_deref(),
+                plan.transparency_leaves.as_ref(),
                 !map.surface_receivers.is_empty(),
             )?,
             groups.water_side,
@@ -117,12 +231,10 @@ impl Schedule {
             .enumerate()
             .map(|(index, leaf)| (leaf.leaf_index, index))
             .collect::<HashMap<_, _>>();
-        let items = plan
-            .translucent
-            .iter()
-            .chain(&plan.additive)
-            .map(|&item| (item.mesh_index, item))
-            .collect::<HashMap<_, _>>();
+        let items = MeshItems::new(
+            upload.meshes.len(),
+            plan.translucent.iter().chain(&plan.additive),
+        );
         let mut schedule = Self {
             operations: Vec::new(),
             groups: Vec::new(),
@@ -139,15 +251,16 @@ impl Schedule {
                 .or_default()
                 .push(mark);
         }
-        for face in upload
-            .assets
-            .receiver_faces
-            .world_faces_for_meshes(items.keys().copied())
-        {
+        for face in upload.assets.receiver_faces.world_faces_for_meshes(
+            plan.translucent
+                .iter()
+                .chain(&plan.additive)
+                .map(|item| item.mesh_index),
+        ) {
             let receivers = upload.assets.receiver_faces.get(&face).unwrap();
             let receivers = receivers.iter().filter(|receiver| {
                 map.surface_receivers[receiver.source_index].owner.id() == MapSurfaceOwnerId::World
-                    && items.contains_key(&receiver.mesh_index)
+                    && items.get(receiver.mesh_index).is_some()
             });
             if receivers.clone().next().is_none() {
                 continue;
@@ -165,7 +278,9 @@ impl Schedule {
             let mut encounter = None;
             for receiver in receivers {
                 let source = &map.surface_receivers[receiver.source_index];
-                let item = items[&receiver.mesh_index];
+                let item = items
+                    .get(receiver.mesh_index)
+                    .expect("admitted receiver mesh");
                 encounter = Some(ReceiverPlanSource {
                     receiver_mesh_index: Some(item.mesh_index),
                     face,
@@ -256,11 +371,16 @@ impl Schedule {
                 origin: brush.origin,
             });
         }
-        for renderable in &upload.assets.renderables {
+        // The extra owner query pays off when PVS has stood down; ordinary
+        // cluster-limited queues already reject most of these placements.
+        let bounds_query = (!pvs_limited && static_prop_frustum_culling_enabled())
+            .then(|| uniforms.bounds_query());
+        for (owner_index, renderable) in upload.assets.renderables.iter().enumerate() {
             if renderable.map_skybox != skybox {
                 continue;
             }
             let mut ranges = admitted_ranges(&renderable.ranges, &items).peekable();
+            // Empty depth barriers are retained only for admitted geometry.
             if ranges.peek().is_none() {
                 continue;
             }
@@ -299,6 +419,13 @@ impl Schedule {
                     });
                 continue;
             };
+            let emit_geometry = bounds_query.as_ref().is_none_or(|query| {
+                upload
+                    .assets
+                    .opaque_placements
+                    .static_prop_frustum_bounds(owner_index)
+                    .is_none_or(|bounds| query.intersects(bounds))
+            });
             let first = schedule.operations.len();
             let distance = super::owner_depth(
                 uniforms,
@@ -311,7 +438,7 @@ impl Schedule {
                     .entry(item.mesh_index)
                     .or_default()
                     .push(range.indices.clone());
-                if leaf.is_some() {
+                if leaf.is_some() && emit_geometry {
                     schedule.operations.push(mesh_draw(
                         upload,
                         item,
@@ -321,15 +448,14 @@ impl Schedule {
                 }
             }
             if let Some(leaf) = leaf
-                && first != schedule.operations.len()
+                && let Some(owner) = Owner::from_operations(
+                    distance,
+                    source.origin,
+                    first..schedule.operations.len(),
+                    emit_geometry,
+                )
             {
-                owners[leaf].push(Owner {
-                    draw: DrawGroup {
-                        depth: distance,
-                        operations: first..schedule.operations.len(),
-                    },
-                    origin: source.origin,
-                });
+                owners[leaf].push(owner);
             }
         }
         let profile = DetailProfile::SOURCE_LDR;
@@ -365,14 +491,18 @@ impl Schedule {
         );
         let mut pending_details = Vec::new();
         for (index, leaf) in leaves.iter().enumerate().rev() {
-            if leaf.faces.iter().any(|face| {
+            let has_world_surfaces = leaf.faces.iter().any(|face| {
                 world
                     .get(face)
                     .is_some_and(|face| groups.allows(face.rendering.material_group))
-            }) {
+            });
+            if has_world_surfaces {
                 schedule.flush_details(&mut detail_leaves, &mut pending_details, profile);
             }
-            for material_group in 0..4 {
+            // With no admitted surface, both face scans for every material group
+            // are empty. Keep owner/detail processing below independent of this.
+            let material_groups = if has_world_surfaces { 0..4 } else { 0..0 };
+            for material_group in material_groups {
                 let selected = |face: &u32| {
                     world.get(face).is_some_and(|face| {
                         face.rendering.material_group.index() == material_group
@@ -502,15 +632,17 @@ impl Schedule {
         }
     }
 
-    pub(super) fn covers(&self, mesh: usize, indices: Option<&Range<u32>>) -> bool {
-        self.world_meshes.contains(&mesh)
-            || indices.is_some_and(|indices| {
-                self.ranges.get(&mesh).is_some_and(|ranges| {
-                    ranges
-                        .iter()
-                        .any(|range| range.start <= indices.start && range.end >= indices.end)
-                })
-            })
+    pub(super) fn coverage(&self, mesh: usize) -> MeshCoverage<'_> {
+        if self.world_meshes.contains(&mesh) {
+            MeshCoverage::World
+        } else {
+            MeshCoverage::Ranges(self.ranges.get(&mesh).map_or(&[][..], Vec::as_slice))
+        }
+    }
+
+    #[cfg(test)]
+    fn covers(&self, mesh: usize, indices: Option<&Range<u32>>) -> bool {
+        self.coverage(mesh).covers(indices)
     }
 
     pub(super) fn covers_brush(&self, index: usize) -> bool {
@@ -585,11 +717,11 @@ fn bounds_leaf(
 
 fn admitted_ranges<'a>(
     ranges: &'a [super::super::upload::UploadedRenderableRange],
-    items: &'a HashMap<usize, DrawItem>,
+    items: &'a MeshItems<'_>,
 ) -> impl Iterator<Item = (&'a super::super::upload::UploadedRenderableRange, DrawItem)> {
     ranges
         .iter()
-        .filter_map(|range| items.get(&range.mesh_index).map(|&item| (range, item)))
+        .filter_map(|range| items.get(range.mesh_index).map(|item| (range, item)))
 }
 
 fn cached_bounds_leaf(
@@ -621,13 +753,13 @@ fn nearest_visible_leaf(
 }
 
 fn pruned_leaves<'a>(
-    leaves: &'a [MapWorldSurfaceGroup],
+    leaves: &'a MapWorldSurfaceGroups,
     side: Option<super::WaterSide>,
     underwater: impl Fn(u32) -> Option<bool>,
     rejected: &mut Vec<RejectedResource>,
-) -> Vec<&'a MapWorldSurfaceGroup> {
+) -> Vec<MapWorldSurfaceGroupRef<'a>> {
     let mut selected = Vec::with_capacity(leaves.len());
-    for leaf in leaves {
+    for leaf in leaves.iter() {
         if let Some(side) = side {
             let Some(submerged) = underwater(leaf.leaf_index) else {
                 rejected.push(RejectedResource::LeafWaterMetadata {
@@ -654,6 +786,7 @@ fn mesh_draw(upload: &ViewerScene, item: DrawItem, indices: Range<u32>, depth: f
 
 #[cfg(test)]
 mod tests {
+    use gmpublished_domain::scene::map::MapWorldSurfaceGroup;
     #[test]
     fn absent_receiver_preparation_and_empty_visible_world_are_distinct() {
         assert_eq!(
@@ -664,8 +797,9 @@ mod tests {
             prepared_leaves(None, true),
             Err(ScheduleUnavailable::UnsupportedTraversalContext)
         );
-        assert_eq!(prepared_leaves(Some(&[]), false), Ok([].as_slice()));
-        assert_eq!(prepared_leaves(Some(&[]), true), Ok([].as_slice()));
+        let empty = MapWorldSurfaceGroups::default();
+        assert_eq!(prepared_leaves(Some(&empty), false), Ok(&empty));
+        assert_eq!(prepared_leaves(Some(&empty), true), Ok(&empty));
     }
 
     use super::*;
@@ -714,7 +848,7 @@ mod tests {
             material_group: MapWorldMaterialGroup::AboveWater,
             displacement: None,
         };
-        let leaves = [
+        let leaves: MapWorldSurfaceGroups = [
             MapWorldSurfaceGroup {
                 leaf_index: 1,
                 faces: vec![10],
@@ -723,7 +857,9 @@ mod tests {
                 leaf_index: 2,
                 faces: vec![11],
             },
-        ];
+        ]
+        .into_iter()
+        .collect();
         for (face, mesh) in [(10, 0), (11, 1)] {
             assert_eq!(
                 schedule.admit_world_face(face, [mesh], Some(rendering), false),
@@ -751,7 +887,7 @@ mod tests {
 
     #[test]
     fn bad_optical_leaf_is_omitted_without_reassigning_unaffected_faces() {
-        let leaves = [
+        let leaves: MapWorldSurfaceGroups = [
             MapWorldSurfaceGroup {
                 leaf_index: 1,
                 faces: vec![10],
@@ -764,7 +900,9 @@ mod tests {
                 leaf_index: 3,
                 faces: vec![12],
             },
-        ];
+        ]
+        .into_iter()
+        .collect();
         let mut rejected = Vec::new();
         let selected = pruned_leaves(
             &leaves,
@@ -775,13 +913,19 @@ mod tests {
         assert_eq!(
             selected
                 .iter()
-                .flat_map(|leaf| &leaf.faces)
+                .flat_map(|leaf| leaf.faces)
                 .copied()
                 .collect::<Vec<_>>(),
             [10, 12]
         );
-        assert!(std::ptr::eq(selected[0], &leaves[0]));
-        assert!(std::ptr::eq(selected[1], &leaves[2]));
+        assert!(std::ptr::eq(
+            selected[0].faces,
+            leaves.get(0).unwrap().faces
+        ));
+        assert!(std::ptr::eq(
+            selected[1].faces,
+            leaves.get(2).unwrap().faces
+        ));
         assert_eq!(rejected, [RejectedResource::LeafWaterMetadata { leaf: 2 }]);
         let visible = HashMap::from([(1, 0), (3, 1)]);
         assert_eq!(nearest_visible_leaf([2], &visible), None);
@@ -798,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_placement_ranges_preserve_source_order_and_mixed_meshes() {
+    fn admitted_placement_ranges_preserve_order_and_last_admission_against_hash_map() {
         use super::super::super::upload::UploadedRenderableRange;
         let ranges = [
             UploadedRenderableRange {
@@ -817,19 +961,92 @@ mod tests {
                 mesh_index: 2,
                 indices: 0..3,
             },
+            UploadedRenderableRange {
+                mesh_index: 10,
+                indices: 12..15,
+            },
+            UploadedRenderableRange {
+                mesh_index: usize::MAX,
+                indices: 15..18,
+            },
         ];
-        let item = |mesh_index| DrawItem {
-            mesh_index,
-            material_slot: mesh_index,
+        // Returning owned items must not extend the admission plan's lifetime.
+        let actual = {
+            let admissions = [
+                DrawItem {
+                    mesh_index: 2,
+                    material_slot: 20,
+                },
+                DrawItem {
+                    mesh_index: 9,
+                    material_slot: 90,
+                },
+                DrawItem {
+                    mesh_index: 9,
+                    material_slot: 99,
+                },
+            ];
+            let oracle: HashMap<_, _> = admissions
+                .iter()
+                .map(|&item| (item.mesh_index, item))
+                .collect();
+            let expected = ranges
+                .iter()
+                .filter_map(|range| {
+                    oracle
+                        .get(&range.mesh_index)
+                        .map(|&item| (range.mesh_index, range.indices.clone(), item))
+                })
+                .collect::<Vec<_>>();
+            let dense = MeshItems::dense(10, admissions.iter());
+            let standard = MeshItems::standard(admissions.iter());
+            for selected in [&dense, &standard] {
+                assert_eq!(selected.get(9).unwrap().material_slot, 99);
+                for missing in [4, 10, usize::MAX] {
+                    assert_eq!(selected.get(missing), None);
+                }
+                assert_eq!(
+                    admitted_ranges(&ranges, selected)
+                        .map(|(range, item)| (range.mesh_index, range.indices.clone(), item))
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            admitted_ranges(&ranges, &dense)
+                .map(|(range, item)| (range.indices.clone(), item))
+                .collect::<Vec<_>>()
         };
-        let items = HashMap::from([(2, item(2)), (9, item(9))]);
         assert_eq!(
-            admitted_ranges(&ranges, &items)
-                .map(|(range, item)| (item.mesh_index, range.indices.clone()))
-                .collect::<Vec<_>>(),
-            [(9, 0..3), (9, 6..9), (2, 0..3)]
+            actual,
+            [
+                (
+                    0..3,
+                    DrawItem {
+                        mesh_index: 9,
+                        material_slot: 99
+                    }
+                ),
+                (
+                    6..9,
+                    DrawItem {
+                        mesh_index: 9,
+                        material_slot: 99
+                    }
+                ),
+                (
+                    0..3,
+                    DrawItem {
+                        mesh_index: 2,
+                        material_slot: 20
+                    }
+                ),
+            ]
         );
-        assert!(admitted_ranges(&ranges, &HashMap::new()).next().is_none());
+        let empty = MeshItems::dense(3848, std::iter::empty());
+        assert!(matches!(&empty, MeshItems::Dense(storage) if storage.capacity() == 0));
+        assert!(admitted_ranges(&ranges, &empty).next().is_none());
+        let standard_empty = MeshItems::standard(std::iter::empty());
+        assert!(admitted_ranges(&ranges, &standard_empty).next().is_none());
     }
 
     #[test]
@@ -901,7 +1118,7 @@ mod tests {
 
     #[test]
     fn optical_leaf_pruning_assigns_spanning_owners_without_moving_world_faces() {
-        let leaves = [
+        let leaves: MapWorldSurfaceGroups = [
             MapWorldSurfaceGroup {
                 leaf_index: 7,
                 faces: vec![10, 11],
@@ -914,7 +1131,9 @@ mod tests {
                 leaf_index: 9,
                 faces: vec![13],
             },
-        ];
+        ]
+        .into_iter()
+        .collect();
         let submerged = |leaf| match leaf {
             7 | 9 => Some(false),
             3 => Some(true),
@@ -953,11 +1172,12 @@ mod tests {
                 let index = nearest_visible_leaf(membership, &indices).unwrap();
                 assert_eq!(selected[index].leaf_index, owner_leaf);
             }
-            assert!(
-                selected
-                    .iter()
-                    .all(|leaf| leaves.iter().any(|original| std::ptr::eq(*leaf, original)))
-            );
+            assert!(selected.iter().all(|leaf| {
+                leaves.iter().any(|original| {
+                    leaf.leaf_index == original.leaf_index
+                        && std::ptr::eq(leaf.faces, original.faces)
+                })
+            }));
         }
         let main = pruned_leaves(&leaves, None, |_| None, &mut Vec::new());
         assert_eq!(main.len(), 3);
@@ -1086,5 +1306,200 @@ mod tests {
         let ordered = schedule.compose(Vec::new());
         assert!(matches!(ordered[0].primitive, Primitive::Mesh(item, _) if item.mesh_index == 0));
         assert!(matches!(ordered[1].primitive, Primitive::Mesh(item, _) if item.mesh_index == 1));
+    }
+
+    fn mesh_draw_fixture(mesh_index: usize, depth: f32) -> Draw {
+        Draw {
+            primitive: Primitive::Mesh(
+                DrawItem {
+                    mesh_index,
+                    material_slot: 0,
+                },
+                None,
+            ),
+            depth,
+            blend: super::super::super::RenderMode::Translucent,
+        }
+    }
+
+    fn mesh_ids(draws: &[Draw]) -> Vec<usize> {
+        draws
+            .iter()
+            .map(|draw| match draw.primitive {
+                Primitive::Mesh(item, _) => item.mesh_index,
+                _ => panic!("mesh-only fixture"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn culled_owner_retains_fallback_depth_barrier_and_all_coverage_claims() {
+        let prepare = |emit_geometry| {
+            let mut schedule = Schedule::default();
+            schedule.operations.push(mesh_draw_fixture(0, 10.0));
+            schedule.groups.push(DrawGroup {
+                depth: 10.0,
+                operations: 0..1,
+            });
+            let first = schedule.operations.len();
+            if emit_geometry {
+                schedule.operations.push(mesh_draw_fixture(1, 1.0));
+            }
+            let owner = Owner::from_operations(
+                1.0,
+                Vec3::new(2.0, 0.0, 0.0),
+                first..schedule.operations.len(),
+                emit_geometry,
+            )
+            .unwrap();
+            assert_eq!(owner.origin, Vec3::new(2.0, 0.0, 0.0));
+            assert_eq!(owner.draw.depth, 1.0);
+            schedule.groups.push(owner.draw);
+            let next = schedule.operations.len();
+            schedule.operations.push(mesh_draw_fixture(2, 100.0));
+            schedule.groups.push(DrawGroup {
+                depth: 100.0,
+                operations: next..next + 1,
+            });
+            // The owner loop must claim its admitted ranges even when it emits
+            // no geometry, so remaining_queue cannot resurrect that geometry.
+            schedule
+                .ranges
+                .insert(1, [3..6, 9..12].into_iter().collect());
+            assert!(schedule.covers(1, Some(&(3..6))));
+            assert!(schedule.covers(1, Some(&(9..12))));
+            assert!(!schedule.covers(1, Some(&(3..12))));
+            schedule
+        };
+        let remaining = || vec![mesh_draw_fixture(3, 5.0)];
+        let original = mesh_ids(&prepare(true).compose(remaining()))
+            .into_iter()
+            .filter(|&mesh| mesh != 1)
+            .collect::<Vec<_>>();
+        let culled = mesh_ids(&prepare(false).compose(remaining()));
+        assert_eq!(culled, original);
+        assert_eq!(culled, [0, 3, 2]);
+        let mut missing_barrier = prepare(false);
+        missing_barrier.groups.remove(1);
+        assert_eq!(mesh_ids(&missing_barrier.compose(remaining())), [0, 2, 3]);
+        assert!(Owner::from_operations(1.0, Vec3::ZERO, 1..1, true).is_none());
+    }
+
+    #[test]
+    fn culled_owner_retains_detail_drain_position_before_later_world_group() {
+        let prepare = |emit_geometry| {
+            let mut schedule = Schedule {
+                operations: vec![
+                    mesh_draw_fixture(0, 10.0),
+                    mesh_draw_fixture(2, 100.0),
+                    mesh_draw_fixture(3, 5.0),
+                    mesh_draw_fixture(4, 0.5),
+                ],
+                ..Schedule::default()
+            };
+            schedule.groups.push(DrawGroup {
+                depth: 10.0,
+                operations: 0..1,
+            });
+            let first = schedule.operations.len();
+            if emit_geometry {
+                schedule.operations.push(mesh_draw_fixture(1, 1.0));
+            }
+            let owner = Owner::from_operations(
+                1.0,
+                Vec3::new(2.0, 0.0, 0.0),
+                first..schedule.operations.len(),
+                emit_geometry,
+            )
+            .unwrap();
+            let mut details = LeafDetails {
+                ordinary: vec![sprite(2, 9.0), sprite(3, 1.0)],
+                ..Default::default()
+            };
+            details.drain_before(
+                &mut schedule.groups,
+                super::super::details::radial_distance_squared(owner.origin, false),
+                DetailProfile::SOURCE_LDR,
+            );
+            schedule.groups.push(owner.draw);
+            details.drain_before(&mut schedule.groups, 0.0, DetailProfile::SOURCE_LDR);
+            schedule.groups.push(DrawGroup {
+                depth: 100.0,
+                operations: 1..2,
+            });
+            schedule
+        };
+        let original = mesh_ids(&prepare(true).compose(Vec::new()))
+            .into_iter()
+            .filter(|&mesh| mesh != 1)
+            .collect::<Vec<_>>();
+        let culled = mesh_ids(&prepare(false).compose(Vec::new()));
+        assert_eq!(culled, original);
+        assert_eq!(culled, [0, 3, 4, 2]);
+    }
+
+    #[test]
+    fn borrowed_mesh_coverage_matches_original_predicate_exhaustively() {
+        let endpoints = [0, 1, 2, 3, u32::MAX - 1, u32::MAX];
+        let intervals: Vec<_> = endpoints
+            .iter()
+            .flat_map(|&start| endpoints.iter().map(move |&end| start..end))
+            .collect();
+        for first in &intervals {
+            for second in &intervals {
+                let mut schedule = Schedule::default();
+                let original = vec![first.clone(), second.clone()];
+                schedule.ranges.insert(2, original.clone());
+                schedule.ranges.insert(3, Vec::new());
+                schedule.ranges.insert(4, original.clone());
+                schedule.world_meshes.extend([1, 4]);
+                for mesh in [0, 1, 2, 3, 4, usize::MAX] {
+                    let coverage = schedule.coverage(mesh);
+                    let original_query = |query: Option<&Range<u32>>| {
+                        schedule.world_meshes.contains(&mesh)
+                            || query.is_some_and(|query| {
+                                schedule.ranges.get(&mesh).is_some_and(|ranges| {
+                                    ranges.iter().any(|range| {
+                                        range.start <= query.start && range.end >= query.end
+                                    })
+                                })
+                            })
+                    };
+                    assert_eq!(coverage.covers(None), original_query(None));
+                    for query in &intervals {
+                        assert_eq!(
+                            coverage.covers(Some(query)),
+                            original_query(Some(query)),
+                            "mesh {mesh}, ranges {original:?}, query {query:?}"
+                        );
+                    }
+                }
+                assert_eq!(schedule.ranges[&2], original);
+                assert_eq!(schedule.ranges[&4], original);
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_mesh_coverage_retains_original_slice_and_iteration_order() {
+        let mut schedule = Schedule::default();
+        let ranges = vec![6..9, 0..3, 6..9, 3..6, 9..9];
+        schedule.ranges.insert(7, ranges.clone());
+        let MeshCoverage::Ranges(borrowed) = schedule.coverage(7) else {
+            panic!("range coverage expected");
+        };
+        assert!(std::ptr::eq(borrowed, schedule.ranges[&7].as_slice()));
+        assert_eq!(borrowed, ranges);
+        let coverage = schedule.coverage(7);
+        for query in [0..3, 0..9, 8..9, 9..9, Range { start: 8, end: 7 }] {
+            assert_eq!(
+                coverage.covers(Some(&query)),
+                ranges
+                    .iter()
+                    .any(|range| range.start <= query.start && range.end >= query.end)
+            );
+        }
+        assert!(!coverage.covers(Some(&(0..9))));
+        assert_eq!(schedule.ranges[&7], ranges);
     }
 }

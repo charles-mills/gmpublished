@@ -144,8 +144,9 @@ use visibility::{
 };
 pub use visibility::{
     MapBoundsCullMask, MapBoundsCulling, MapBrushModelRendering, MapBrushSurfaceGroup,
-    MapDecalProjection, MapDisplacementRendering, MapVisibility, MapWorldMaterialGroup,
-    MapWorldSurfaceGroup, MapWorldSurfaceRendering,
+    MapDecalProjection, MapDisplacementRendering, MapPreparedBounds, MapVisibility,
+    MapWorldMaterialGroup, MapWorldSurfaceGroup, MapWorldSurfaceGroupRef, MapWorldSurfaceGroups,
+    MapWorldSurfaceRendering, MapWorldTraversal,
 };
 use walk::{
     BoundsBuilder, MapLeafLocator, SKYBOX_COMPLETION_AABB_EXPANSION,

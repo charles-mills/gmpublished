@@ -1,5 +1,7 @@
 use super::Uniforms;
-use gmpublished_domain::scene::map::{MapBounds, MapBoundsCullMask, MapBoundsCulling};
+use gmpublished_domain::scene::map::{
+    MapBounds, MapBoundsCullMask, MapBoundsCulling, MapPreparedBounds,
+};
 
 #[derive(Clone, Copy)]
 struct HalfSpace {
@@ -134,16 +136,23 @@ impl BoundsQuery {
         Self { frustum, clip }
     }
 
+    #[cfg(test)]
     pub fn classify(&self, bounds: MapBounds, mask: MapBoundsCullMask) -> MapBoundsCulling {
-        if !bounds.min.is_finite()
-            || !bounds.max.is_finite()
-            || (0..3).any(|axis| bounds.min[axis] > bounds.max[axis])
-        {
+        self.classify_prepared(MapPreparedBounds::new(bounds), mask)
+    }
+
+    pub fn classify_prepared(
+        &self,
+        bounds: MapPreparedBounds,
+        mask: MapBoundsCullMask,
+    ) -> MapBoundsCulling {
+        if !bounds.is_valid() {
             return MapBoundsCulling::Visible(MapBoundsCullMask::ALL);
         }
         if mask == MapBoundsCullMask::NONE {
             return MapBoundsCulling::Visible(mask);
         }
+        let bounds = bounds.bounds();
         let mut remaining = 0;
         for (index, plane) in self
             .frustum

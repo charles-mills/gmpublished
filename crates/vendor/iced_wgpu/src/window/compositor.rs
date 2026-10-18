@@ -168,6 +168,7 @@ impl Compositor {
                     ),
                     required_features: (wgpu::Features::TEXTURE_COMPRESSION_BC
                         | wgpu::Features::CLIP_DISTANCES
+                        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
                         | wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER
                         | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING
                         | if cfg!(feature = "renderer-profiling") {

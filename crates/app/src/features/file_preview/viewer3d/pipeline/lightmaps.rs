@@ -1,3 +1,7 @@
+mod cooking;
+#[cfg(all(test, feature = "map-capture"))]
+mod gpu_tests;
+
 use super::texture_upload::{Input, SharedUploader, UploadedView};
 use super::{PreviewScene, SceneKey, wgpu};
 use crate::bridge::materials::TextureStorage;
@@ -28,12 +32,17 @@ pub(super) struct Key {
 
 #[derive(Debug)]
 pub(super) struct Request {
+    cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     source: PreviewScene,
     weights: [f32; 256],
     keys: Vec<Key>,
 }
 
 impl Request {
+    pub fn with_cpu_executor(mut self, executor: Option<gmpublished_backend::CpuExecutor>) -> Self {
+        self.cpu_executor = executor;
+        self
+    }
     pub fn new(
         source: PreviewScene,
         pages: impl IntoIterator<Item = LightmapPageId>,
@@ -65,6 +74,7 @@ impl Request {
             });
         }
         Ok(Self {
+            cpu_executor: None,
             source,
             weights,
             keys,
@@ -297,6 +307,8 @@ pub(super) struct MissingCost {
 
 #[derive(Debug)]
 pub(super) struct Pool {
+    #[cfg(feature = "map-capture")]
+    cooking: cooking::Diagnostics,
     uploader: SharedUploader,
     white: Arc<Page>,
     pages: HashMap<Key, Entry>,
@@ -311,6 +323,8 @@ pub(super) struct Pool {
 impl Pool {
     pub fn new(uploader: &SharedUploader, white: Arc<Page>) -> Self {
         Self {
+            #[cfg(feature = "map-capture")]
+            cooking: cooking::Diagnostics::default(),
             uploader: Arc::clone(uploader),
             white,
             pages: HashMap::new(),
@@ -426,6 +440,32 @@ impl Pool {
         layout: &wgpu::BindGroupLayout,
         request: &Request,
     ) -> Result<Arc<Snapshot>, Error> {
+        let executor = request.cpu_executor.as_ref();
+        let jobs = executor.map_or(1, |executor| executor.thread_count().min(cooking::MAX_JOBS));
+        let parallel = cooking::enabled() && jobs > 1;
+        #[cfg(feature = "map-capture")]
+        {
+            self.cooking = cooking::Diagnostics::new(executor, parallel);
+        }
+        if parallel {
+            self.prepare_parallel(
+                device,
+                layout,
+                request,
+                executor.expect("parallel executor"),
+                jobs,
+            )
+        } else {
+            self.prepare_serial(device, layout, request)
+        }
+    }
+
+    fn prepare_serial(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        request: &Request,
+    ) -> Result<Arc<Snapshot>, Error> {
         let mut pages = HashMap::with_capacity(request.keys.len());
         for key in &request.keys {
             let page = if let Some(entry) = self.pages.get(key) {
@@ -437,7 +477,15 @@ impl Pool {
             } else {
                 let set = request.lightmaps().ok_or(Error::MissingPage(key.page))?;
                 let metadata = set.page(key.page).ok_or(Error::MissingPage(key.page))?;
+                #[cfg(feature = "gui-benchmark")]
+                let cook = iced_wgpu::profiling::begin_cpu_scope("map.lightmap.cook");
+                #[cfg(feature = "map-capture")]
+                self.cooking.record(1, cooking::page_bytes(metadata));
                 let bytes = set.render_page(key.page, &request.weights)?;
+                #[cfg(feature = "gui-benchmark")]
+                drop(cook);
+                #[cfg(feature = "gui-benchmark")]
+                let upload = iced_wgpu::profiling::begin_cpu_scope("map.lightmap.upload");
                 let page = Arc::new(Page::upload(
                     device,
                     layout,
@@ -447,6 +495,8 @@ impl Pool {
                     &bytes,
                     true,
                 )?);
+                #[cfg(feature = "gui-benchmark")]
+                drop(upload);
                 let PreviewScene::Map(map) = &request.source else {
                     return Err(Error::MissingPage(key.page));
                 };
@@ -472,12 +522,103 @@ impl Pool {
         }))
     }
 
+    fn prepare_parallel(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        request: &Request,
+        executor: &gmpublished_backend::CpuExecutor,
+        jobs: usize,
+    ) -> Result<Arc<Snapshot>, Error> {
+        let mut pages = HashMap::with_capacity(request.keys.len());
+        let mut start = 0;
+        while start < request.keys.len() {
+            let wave = cooking::Wave::plan(start, request.keys.len(), jobs, |index| {
+                let key = &request.keys[index];
+                (!self.pages.contains_key(key)).then(|| {
+                    request
+                        .lightmaps()
+                        .and_then(|set| set.page(key.page))
+                        .map_or(0, cooking::page_bytes)
+                })
+            });
+            #[cfg(feature = "map-capture")]
+            if !wave.indices.is_empty() {
+                self.cooking.record(wave.indices.len(), wave.output_bytes);
+            }
+            #[cfg(feature = "gui-benchmark")]
+            let cook = iced_wgpu::profiling::begin_cpu_scope("map.lightmap.cook");
+            let results = cooking::cook(executor, &wave.indices, |&index| {
+                let key = &request.keys[index];
+                let set = request.lightmaps().ok_or(Error::MissingPage(key.page))?;
+                set.page(key.page).ok_or(Error::MissingPage(key.page))?;
+                set.render_page(key.page, &request.weights)
+                    .map_err(Error::from)
+            });
+            #[cfg(feature = "gui-benchmark")]
+            drop(cook);
+            let mut results = results.into_iter();
+            for key in &request.keys[start..wave.end] {
+                let page = if let Some(entry) = self.pages.get(key) {
+                    #[cfg(feature = "map-capture")]
+                    {
+                        self.cache_hits = self.cache_hits.saturating_add(1);
+                    }
+                    Arc::clone(&entry.page)
+                } else {
+                    let bytes = results.next().expect("one result per missing page")?;
+                    let metadata = request
+                        .lightmaps()
+                        .and_then(|set| set.page(key.page))
+                        .expect("successful page cook has metadata");
+                    #[cfg(feature = "gui-benchmark")]
+                    let upload = iced_wgpu::profiling::begin_cpu_scope("map.lightmap.upload");
+                    let page = Arc::new(Page::upload(
+                        device,
+                        layout,
+                        &self.uploader,
+                        &self.white.sampler,
+                        [metadata.width, metadata.height],
+                        &bytes,
+                        true,
+                    )?);
+                    #[cfg(feature = "gui-benchmark")]
+                    drop(upload);
+                    let PreviewScene::Map(map) = &request.source else {
+                        return Err(Error::MissingPage(key.page));
+                    };
+                    self.pages.insert(
+                        key.clone(),
+                        Entry {
+                            source: Arc::downgrade(map),
+                            page: Arc::clone(&page),
+                        },
+                    );
+                    #[cfg(feature = "map-capture")]
+                    {
+                        self.uploads = self.uploads.saturating_add(1);
+                    }
+                    page
+                };
+                pages.insert(key.page, (key.clone(), page));
+            }
+            debug_assert!(results.next().is_none());
+            start = wave.end;
+        }
+        self.uploader.lock().expect("texture uploader lock").flush();
+        Ok(Arc::new(Snapshot {
+            white: Arc::clone(&self.white),
+            pages,
+        }))
+    }
+
     #[cfg(feature = "map-capture")]
     pub fn stats(&self) -> serde_json::Value {
         let warm = self.warm.lock().expect("lightmap cache lock");
         let warm_stats = warm.images.stats();
         drop(warm);
         serde_json::json!({
+            "parallel_cooking": self.cooking,
             "resident_pages": self.pages.len(),
             "estimated_bytes": self.pages.values().map(|entry| entry.page.bytes).sum::<u64>(),
             "uploads": self.uploads, "cache_hits": self.cache_hits,

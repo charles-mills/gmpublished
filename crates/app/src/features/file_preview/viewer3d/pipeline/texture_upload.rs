@@ -5,11 +5,48 @@ use std::ops::Deref;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc::{self, Receiver, SyncSender},
 };
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 pub(super) type SharedUploader = Arc<Mutex<TextureUploader>>;
+
+#[must_use = "retain the batch until all participating image leases have finished"]
+pub(super) struct UploadLeaseBatch {
+    uploader: SharedUploader,
+}
+
+impl UploadLeaseBatch {
+    pub(super) fn new(uploader: &SharedUploader) -> Self {
+        Self {
+            uploader: Arc::clone(uploader),
+        }
+    }
+
+    pub(super) fn uploader(&self) -> &SharedUploader {
+        &self.uploader
+    }
+}
+
+impl Drop for UploadLeaseBatch {
+    fn drop(&mut self) {
+        self.uploader.lock().expect("texture uploader lock").flush();
+    }
+}
+
+pub(super) fn lease_batching_enabled() -> bool {
+    #[cfg(feature = "map-capture")]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_TEXTURE_UPLOAD_BATCHING").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        })
+    }
+    #[cfg(not(feature = "map-capture"))]
+    true
+}
 
 const PRESSURE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -168,6 +205,8 @@ pub(super) enum UploadError {
     DeviceLimit,
     #[error("texture upload format is unsupported")]
     UnsupportedFormat,
+    #[error("texture staging buffer remapping failed")]
+    StagingMap,
     #[error("texture upload metadata allocation failed")]
     HostAllocation,
     #[error("sampled image residency exceeds {bytes} bytes or {allocations} allocations")]
@@ -201,6 +240,8 @@ struct Ledger {
     pressure_waits: AtomicU64,
     pressure_flushes: AtomicU64,
     copied_bytes: AtomicU64,
+    staging_allocations: AtomicU64,
+    staging_reuses: AtomicU64,
     owned_images: AtomicU64,
     owned_texel_bytes: AtomicU64,
     sampled_images: Mutex<ImageAdmission>,
@@ -249,6 +290,7 @@ impl ImageAdmission {
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(super) struct UploadStats {
     pub policy: UploadPolicy,
+    pub lease_batching_enabled: bool,
     pub completion: super::completion::CompletionStats,
     #[serde(rename = "material_image_scope")]
     pub sampled_image_scope: &'static str,
@@ -257,6 +299,9 @@ pub(super) struct UploadStats {
     pub pressure_wait_timeout_ms: u64,
     pub staging_bytes: u64,
     pub peak_staging_bytes: u64,
+    pub staging_allocations: u64,
+    pub staging_reuses: u64,
+    pub staging_idle_slot_limit: usize,
     pub submissions: u64,
     pub pressure_waits: u64,
     pub pressure_flushes: u64,
@@ -508,9 +553,68 @@ struct Copy {
     rows: u32,
 }
 #[derive(Debug)]
-struct Batch {
+struct StagingSlot {
     buffer: wgpu::Buffer,
+    // Remapping and cached idle buffers remain charged to the aggregate budget.
     _permit: StagingPermit,
+}
+
+#[derive(Debug)]
+struct StagingReturns {
+    sender: SyncSender<StagingSlot>,
+    receiver: Receiver<StagingSlot>,
+    map_failed: Arc<AtomicBool>,
+}
+impl StagingReturns {
+    fn new(idle_limit: usize) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(idle_limit);
+        Self {
+            sender,
+            receiver,
+            map_failed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+// Never block a WGPU callback, including when the uploader has already closed.
+fn return_staging<T>(
+    slot: T,
+    result: &Result<(), wgpu::BufferAsyncError>,
+    sender: &SyncSender<T>,
+    map_failed: &AtomicBool,
+) {
+    if result.is_err() {
+        map_failed.store(true, Ordering::Release);
+        drop(slot);
+    } else {
+        // Full/disconnected channels drop the excess slot and its permit.
+        drop(sender.try_send(slot));
+    }
+}
+
+fn staging_idle_limit(batch_bytes: u64, aggregate_bytes: u64) -> usize {
+    const MAX_IDLE_BYTES: u64 = 16 * 1024 * 1024;
+    (MAX_IDLE_BYTES / batch_bytes)
+        .min(aggregate_bytes / batch_bytes)
+        .min(2) as usize
+}
+
+fn staging_reuse_enabled() -> bool {
+    #[cfg(feature = "map-capture")]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GMPUBLISHED_TEXTURE_STAGING_REUSE").as_deref()
+                != Some(std::ffi::OsStr::new("0"))
+        })
+    }
+    #[cfg(not(feature = "map-capture"))]
+    true
+}
+
+#[derive(Debug)]
+struct Batch {
+    slot: StagingSlot,
     used: u64,
     copies: Vec<Copy>,
 }
@@ -528,6 +632,7 @@ pub(super) struct TextureUploader {
     batch_bytes: u64,
     ledger: Arc<Ledger>,
     pending: Option<Batch>,
+    staging_returns: Option<StagingReturns>,
     in_flight: VecDeque<Submission>,
 }
 fn image_texel_bytes(
@@ -595,6 +700,9 @@ impl TextureUploader {
         let batch_bytes = batch_capacity(policy, device.limits().max_buffer_size)?;
         let completion = super::completion::CompletionDriver::shared(device)
             .map_err(|error| UploadError::CompletionWorker(error.to_string().into()))?;
+        let idle_limit = staging_idle_limit(batch_bytes, policy.aggregate_staging_bytes);
+        let staging_returns =
+            (staging_reuse_enabled() && idle_limit != 0).then(|| StagingReturns::new(idle_limit));
         let ledger = Arc::new(Ledger::default());
         completion.register_retirement(&ledger.retirements);
         Ok(Arc::new(Mutex::new(Self {
@@ -605,6 +713,7 @@ impl TextureUploader {
             batch_bytes,
             ledger,
             pending: None,
+            staging_returns,
             in_flight: VecDeque::new(),
         })))
     }
@@ -617,6 +726,7 @@ impl TextureUploader {
             .expect("image admission lock");
         UploadStats {
             policy: self.policy,
+            lease_batching_enabled: lease_batching_enabled(),
             completion: self.completion.stats(),
             sampled_image_scope: "shared renderer pool material textures and lightmap pages; excludes generated fallbacks and render targets",
             image_byte_measurement: "descriptor texel payload estimate; excludes driver, alignment and view overhead",
@@ -624,6 +734,11 @@ impl TextureUploader {
             pressure_wait_timeout_ms: PRESSURE_WAIT_TIMEOUT.as_millis() as u64,
             staging_bytes: self.ledger.staging.load(Ordering::Acquire),
             peak_staging_bytes: self.ledger.peak_staging.load(Ordering::Relaxed),
+            staging_allocations: self.ledger.staging_allocations.load(Ordering::Relaxed),
+            staging_reuses: self.ledger.staging_reuses.load(Ordering::Relaxed),
+            staging_idle_slot_limit: self.staging_returns.as_ref().map_or(0, |_| {
+                staging_idle_limit(self.batch_bytes, self.policy.aggregate_staging_bytes)
+            }),
             submissions: self.ledger.submissions.load(Ordering::Relaxed),
             pressure_waits: self.ledger.pressure_waits.load(Ordering::Relaxed),
             pressure_flushes: self.ledger.pressure_flushes.load(Ordering::Relaxed),
@@ -661,6 +776,8 @@ impl TextureUploader {
         desc: &wgpu::TextureDescriptor<'_>,
         sampled: bool,
     ) -> Result<UploadedTexture, UploadError> {
+        #[cfg(feature = "gui-benchmark")]
+        let _scope = iced_wgpu::profiling::begin_cpu_scope("map.upload.allocate");
         let limits = self.device.limits();
         if desc.dimension != wgpu::TextureDimension::D2
             || desc.size.width == 0
@@ -731,6 +848,8 @@ impl TextureUploader {
         })
     }
     fn start_batch(&mut self) -> Result<(), UploadError> {
+        #[cfg(feature = "gui-benchmark")]
+        let _scope = iced_wgpu::profiling::begin_cpu_scope("map.upload.batch");
         self.completion.check()?;
         self.device.poll(wgpu::PollType::Poll)?;
         while self
@@ -741,24 +860,53 @@ impl TextureUploader {
             self.in_flight.pop_front();
         }
         let pressure_started = Instant::now();
-        while self
-            .ledger
-            .staging
-            .load(Ordering::Acquire)
-            .checked_add(self.batch_bytes)
-            .ok_or(UploadError::Overflow)?
-            > self.policy.aggregate_staging_bytes
-        {
+        let slot = loop {
+            // Idle permits remain charged; reuse must precede allocation admission.
+            if let Some(pool) = &self.staging_returns {
+                if pool.map_failed.load(Ordering::Acquire) {
+                    return Err(UploadError::StagingMap);
+                }
+                if let Ok(slot) = pool.receiver.try_recv() {
+                    self.ledger.staging_reuses.fetch_add(1, Ordering::Relaxed);
+                    break slot;
+                }
+            }
+            if self
+                .ledger
+                .staging
+                .load(Ordering::Acquire)
+                .checked_add(self.batch_bytes)
+                .ok_or(UploadError::Overflow)?
+                <= self.policy.aggregate_staging_bytes
+            {
+                let permit = StagingPermit::new(&self.ledger, self.batch_bytes);
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("file_preview.texture_upload.batch"),
+                    size: self.batch_bytes,
+                    usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: true,
+                });
+                self.ledger
+                    .staging_allocations
+                    .fetch_add(1, Ordering::Relaxed);
+                break StagingSlot {
+                    buffer,
+                    _permit: permit,
+                };
+            }
             let timeout = PRESSURE_WAIT_TIMEOUT
                 .checked_sub(pressure_started.elapsed())
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or(UploadError::CompletionTimeout(PRESSURE_WAIT_TIMEOUT))?;
             let oldest = self.in_flight.front().ok_or(UploadError::InvalidPolicy)?;
             self.ledger.pressure_waits.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "gui-benchmark")]
+            let _wait = iced_wgpu::profiling::begin_cpu_scope("map.upload.pressure_wait");
             self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(oldest.index.clone()),
                 timeout: Some(timeout),
             })?;
+            self.completion.check()?;
             while self
                 .in_flight
                 .front()
@@ -766,17 +914,9 @@ impl TextureUploader {
             {
                 self.in_flight.pop_front();
             }
-        }
-        let permit = StagingPermit::new(&self.ledger, self.batch_bytes);
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("file_preview.texture_upload.batch"),
-            size: self.batch_bytes,
-            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
+        };
         self.pending = Some(Batch {
-            buffer,
-            _permit: permit,
+            slot,
             used: 0,
             copies: Vec::new(),
         });
@@ -856,6 +996,7 @@ impl TextureUploader {
             let offset = batch.used;
             {
                 let mut output = batch
+                    .slot
                     .buffer
                     .slice(offset..offset + tile.bytes)
                     .get_mapped_range_mut();
@@ -924,7 +1065,9 @@ impl TextureUploader {
         let Some(batch) = self.pending.take() else {
             return;
         };
-        batch.buffer.unmap();
+        #[cfg(feature = "gui-benchmark")]
+        let _scope = iced_wgpu::profiling::begin_cpu_scope("map.upload.flush");
+        batch.slot.buffer.unmap();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -933,7 +1076,7 @@ impl TextureUploader {
         for copy in &batch.copies {
             encoder.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
-                    buffer: &batch.buffer,
+                    buffer: &batch.slot.buffer,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: copy.offset,
                         bytes_per_row: Some(copy.pitch),
@@ -953,8 +1096,26 @@ impl TextureUploader {
         self.ledger.submissions.fetch_add(1, Ordering::Relaxed);
         let done = Arc::new(AtomicBool::new(false));
         let finished = Arc::clone(&done);
+        let Batch { slot, copies, .. } = batch;
+        let retained_slot = if let Some(pool) = &self.staging_returns {
+            let sender = pool.sender.clone();
+            let map_failed = Arc::clone(&pool.map_failed);
+            let buffer = slot.buffer.clone();
+            // WGPU guarantees mapping callbacks registered before on_done execute
+            // first. The existing completion driver therefore also drives remaps.
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Write, move |result| {
+                    return_staging(slot, &result, &sender, &map_failed);
+                });
+            None
+        } else {
+            Some(slot)
+        };
         self.completion.on_done(&self.queue, move || {
-            drop(batch);
+            drop(retained_slot);
+            // Idle staging slots must not retain uploaded texture owners.
+            drop(copies);
             finished.store(true, Ordering::Release);
         });
         self.in_flight.push_back(Submission { index, done });

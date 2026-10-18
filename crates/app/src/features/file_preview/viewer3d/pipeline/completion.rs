@@ -2,6 +2,8 @@ use super::{texture_upload::RetirementSignal, wgpu};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+mod threads;
+
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 const FAILED_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -118,39 +120,49 @@ pub(super) struct CompletionDriver {
 }
 impl CompletionDriver {
     pub fn shared(device: &wgpu::Device) -> Result<Arc<Self>, std::io::Error> {
-        static DRIVERS: OnceLock<Mutex<Vec<Weak<CompletionDriver>>>> = OnceLock::new();
-        let mut drivers = DRIVERS
-            .get_or_init(Default::default)
-            .lock()
-            .expect("GPU completion drivers");
-        drivers.retain(|driver| driver.strong_count() != 0);
-        if let Some(driver) = drivers
-            .iter()
-            .filter_map(Weak::upgrade)
-            .find(|driver| driver.device == *device)
-        {
-            drop(drivers);
-            return Ok(driver);
-        }
-        let signal = Arc::new(Signal::default());
-        let driver = Arc::new(Self {
-            device: device.clone(),
-            signal: Arc::clone(&signal),
-        });
-        let device = device.clone();
-        std::thread::Builder::new()
-            .name("gpu-completion".to_owned())
-            .spawn(move || {
-                run(&signal, || {
-                    device
-                        .poll(wgpu::PollType::Poll)
-                        .map(|_| ())
-                        .map_err(Into::into)
-                });
-            })?;
-        drivers.push(Arc::downgrade(&driver));
-        drop(drivers);
-        Ok(driver)
+        let registry = registry();
+        let mut state = registry.lock().expect("GPU completion drivers");
+        let finished = state.take_finished();
+        state.drivers.retain(|driver| driver.strong_count() != 0);
+        // Upgrades can become final owners; drop them after unlocking on all
+        // paths, including a spawn failure.
+        let keep_alive: Vec<_> = state.drivers.iter().filter_map(Weak::upgrade).collect();
+        let result = (|| {
+            if state.sealed {
+                return Err(std::io::Error::other("GPU completion is shutting down"));
+            }
+            if let Some(driver) = keep_alive.iter().find(|driver| driver.device == *device) {
+                return Ok(Arc::clone(driver));
+            }
+            let signal = Arc::new(Signal::default());
+            let worker_signal = Arc::clone(&signal);
+            let worker_device = device.clone();
+            let join = std::thread::Builder::new()
+                .name("gpu-completion".to_owned())
+                .spawn(move || {
+                    run(&worker_signal, || {
+                        worker_device
+                            .poll(wgpu::PollType::Poll)
+                            .map(|_| ())
+                            .map_err(Into::into)
+                    });
+                })?;
+            let driver = Arc::new(Self {
+                device: device.clone(),
+                signal: Arc::clone(&signal),
+            });
+            state.drivers.push(Arc::downgrade(&driver));
+            state.workers.push(threads::Worker::new(
+                device.clone(),
+                Arc::downgrade(&signal),
+                join,
+            ));
+            Ok(driver)
+        })();
+        drop(state);
+        drop(keep_alive);
+        threads::join(finished).map_err(std::io::Error::other)?;
+        result
     }
     pub fn register_retirement(&self, retirement: &Arc<RetirementSignal>) {
         let failure = {
@@ -246,6 +258,45 @@ fn run(signal: &Signal, mut poll: impl FnMut() -> Result<(), CompletionFailure>)
                     .wait_timeout(control, interval)
                     .expect("GPU completion wake"),
             );
+        }
+    }
+}
+
+type ThreadRegistry = threads::Registry<wgpu::Device>;
+pub use threads::ShutdownError;
+
+fn registry() -> &'static Mutex<ThreadRegistry> {
+    static DRIVERS: OnceLock<Mutex<ThreadRegistry>> = OnceLock::new();
+    DRIVERS.get_or_init(Default::default)
+}
+
+/// Call after the application scope has dropped all render owners and stopped
+/// registering workers. Joining must finish before native process finalizers.
+pub fn finish_application_shutdown() -> Result<(), ShutdownError> {
+    threads::shutdown(registry(), None)
+}
+
+#[cfg(test)]
+pub(in crate::features::file_preview::viewer3d) struct TestDeviceScope {
+    device: wgpu::Device,
+}
+#[cfg(test)]
+impl TestDeviceScope {
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            device: device.clone(),
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for TestDeviceScope {
+    fn drop(&mut self) {
+        if let Err(error) = threads::shutdown(registry(), Some(&self.device)) {
+            if std::thread::panicking() {
+                eprintln!("GPU fixture shutdown also failed: {error}");
+            } else {
+                panic!("GPU fixture shutdown failed: {error}");
+            }
         }
     }
 }

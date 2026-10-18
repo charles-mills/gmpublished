@@ -19,9 +19,11 @@ pub struct Report {
 pub struct FrameSample {
     pub frame_index: usize,
     pub cpu_prepare_ms: f64,
+    pub cpu_primitive_finish_prepare_ms: f64,
     pub cpu_encode_ms: f64,
     pub cpu_cleanup_ms: f64,
     pub cpu_submit_ms: f64,
+    pub cpu_scopes: Vec<(&'static str, f64)>,
     pub surface_acquire_ms: f64,
     pub surface_present_ms: f64,
     pub interval_ms: Option<f64>,
@@ -99,7 +101,36 @@ pub(crate) struct FrameToken {
     started: Instant,
 }
 
+thread_local! {
+    static CURRENT_FRAME: std::cell::Cell<Option<FrameToken>> = const { std::cell::Cell::new(None) };
+}
+
+pub struct CpuScope {
+    token: FrameToken,
+    name: &'static str,
+    started: Instant,
+}
+
+pub fn begin_cpu_scope(name: &'static str) -> Option<CpuScope> {
+    if !enabled() {
+        return None;
+    }
+    CURRENT_FRAME.get().map(|token| CpuScope {
+        token,
+        name,
+        started: Instant::now(),
+    })
+}
+
+impl Drop for CpuScope {
+    fn drop(&mut self) {
+        let duration = elapsed(self.started);
+        update(self.token, |sample| sample.cpu_scopes.push((self.name, duration)));
+    }
+}
+
 pub(crate) fn begin() -> Option<FrameToken> {
+    CURRENT_FRAME.set(None);
     if !enabled() {
         return None;
     }
@@ -133,11 +164,13 @@ pub(crate) fn begin() -> Option<FrameToken> {
         input_submissions,
         ..Default::default()
     });
-    Some(FrameToken {
+    let token = FrameToken {
         epoch: state.epoch,
         index,
         started: now,
-    })
+    };
+    CURRENT_FRAME.set(Some(token));
+    Some(token)
 }
 
 pub(crate) fn submitted(token: FrameToken) {

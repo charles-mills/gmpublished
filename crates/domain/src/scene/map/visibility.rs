@@ -59,10 +59,103 @@ pub enum MapBoundsCulling {
     Visible(MapBoundsCullMask),
 }
 
+/// Immutable bounds whose finite/order checks were performed during preparation.
+/// Invalid bounds remain explicit so cullers can conservatively restore all tests.
+#[derive(Clone, Copy, Debug)]
+pub struct MapPreparedBounds {
+    bounds: MapBounds,
+    valid: bool,
+}
+
+impl MapPreparedBounds {
+    pub fn new(bounds: MapBounds) -> Self {
+        Self {
+            valid: bounds.min.is_finite()
+                && bounds.max.is_finite()
+                && (0..3).all(|axis| bounds.min[axis] <= bounds.max[axis]),
+            bounds,
+        }
+    }
+
+    pub const fn bounds(self) -> MapBounds {
+        self.bounds
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.valid
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapWorldSurfaceGroup {
     pub leaf_index: u32,
     pub faces: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct MapWorldSurfaceLeaf {
+    pub(super) leaf_index: u32,
+    pub(super) faces: std::ops::Range<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MapWorldSurfaceGroupRef<'a> {
+    pub leaf_index: u32,
+    pub faces: &'a [u32],
+}
+
+/// Preserves every leaf encounter, including empty leaves, over one contiguous face buffer.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MapWorldSurfaceGroups {
+    pub(super) leaves: Vec<MapWorldSurfaceLeaf>,
+    pub(super) faces: Vec<u32>,
+}
+
+impl MapWorldSurfaceGroups {
+    pub fn len(&self) -> usize {
+        self.leaves.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
+    pub fn get(&self, index: usize) -> Option<MapWorldSurfaceGroupRef<'_>> {
+        let leaf = self.leaves.get(index)?;
+        Some(MapWorldSurfaceGroupRef {
+            leaf_index: leaf.leaf_index,
+            faces: &self.faces[leaf.faces.clone()],
+        })
+    }
+    pub fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = MapWorldSurfaceGroupRef<'_>> + DoubleEndedIterator {
+        self.leaves.iter().map(|leaf| MapWorldSurfaceGroupRef {
+            leaf_index: leaf.leaf_index,
+            faces: &self.faces[leaf.faces.clone()],
+        })
+    }
+    pub fn into_legacy(self) -> Vec<MapWorldSurfaceGroup> {
+        self.iter()
+            .map(|group| MapWorldSurfaceGroup {
+                leaf_index: group.leaf_index,
+                faces: group.faces.to_vec(),
+            })
+            .collect()
+    }
+}
+
+impl FromIterator<MapWorldSurfaceGroup> for MapWorldSurfaceGroups {
+    fn from_iter<T: IntoIterator<Item = MapWorldSurfaceGroup>>(groups: T) -> Self {
+        let mut output = Self::default();
+        for group in groups {
+            let start = output.faces.len();
+            output.faces.extend(group.faces);
+            output.leaves.push(MapWorldSurfaceLeaf {
+                leaf_index: group.leaf_index,
+                faces: start..output.faces.len(),
+            });
+        }
+        output
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -132,6 +225,7 @@ impl MapDecalProjection {
 #[path = "visibility_order.rs"]
 mod order;
 use order::FaceOrdering;
+pub use order::MapWorldTraversal;
 
 pub(super) const PROP_AABB_MAX_EXTENT: f32 = 8192.0;
 pub(super) const PROP_AABB_MAX_LEAVES: usize = 4096;
@@ -240,6 +334,25 @@ impl MapVisibility {
             visible,
             culling,
             cluster_visible,
+        )
+    }
+
+    /// Reuses caller-owned traversal storage; separate viewers must own separate storage.
+    pub fn world_surface_groups_prepared(
+        &self,
+        eye: Vec3,
+        visible: impl Fn(u32) -> bool,
+        culling: impl Fn(MapPreparedBounds, MapBoundsCullMask) -> MapBoundsCulling,
+        cluster_visible: impl Fn(i16) -> bool,
+        traversal: &mut MapWorldTraversal,
+    ) -> MapWorldSurfaceGroups {
+        self.ordering.world_surface_groups_prepared(
+            &self.locator,
+            eye,
+            visible,
+            culling,
+            cluster_visible,
+            traversal,
         )
     }
 

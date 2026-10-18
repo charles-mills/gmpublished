@@ -1605,7 +1605,8 @@ impl App {
             return view;
         }
         let tokens = self.state.tokens;
-        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let now = Instant::now();
         let route_body: Element<'_, RootMessage> = container(crate::widgets::settle::settle(
             self.active_route_view(),
@@ -1813,7 +1814,8 @@ impl App {
     }
 
     fn active_route_view(&self) -> Element<'_, RootMessage> {
-        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let route = self.state.features.shell.route();
         let blocker = prerequisites::blocker_for(
             route,

@@ -847,9 +847,9 @@ fn distribution(mut values: Vec<f64>) -> Value {
 
 fn report_value(report: &iced_wgpu::profiling::Report) -> Value {
     let frames:Vec<_> = report.frames.iter().map(|frame| json!({"frame_index":frame.frame_index,
-        "cpu_prepare_ms":frame.cpu_prepare_ms,"cpu_cleanup_ms":frame.cpu_cleanup_ms,"cpu_encode_ms":frame.cpu_encode_ms,"cpu_submit_ms":frame.cpu_submit_ms,
+        "cpu_prepare_ms":frame.cpu_prepare_ms,"cpu_primitive_finish_prepare_ms":frame.cpu_primitive_finish_prepare_ms,"cpu_cleanup_ms":frame.cpu_cleanup_ms,"cpu_encode_ms":frame.cpu_encode_ms,"cpu_submit_ms":frame.cpu_submit_ms,
         "surface_acquire_ms":frame.surface_acquire_ms,"surface_present_ms":frame.surface_present_ms,
-        "interval_ms":frame.interval_ms,"gpu_ms":frame.gpu_ms,"gpu_scopes":frame.gpu_scopes,
+        "interval_ms":frame.interval_ms,"gpu_ms":frame.gpu_ms,"gpu_scopes":frame.gpu_scopes,"cpu_scopes":frame.cpu_scopes,
         "input_submissions":frame.input_submissions})).collect();
     json!({"label":report.label,"dropped":report.dropped,"frames":frames,
         "unsubmitted_inputs":report.unsubmitted_inputs,"gpu_query_supported":report.gpu_query_supported,"gpu_ring_exhausted":report.gpu_ring_exhausted,
@@ -859,6 +859,7 @@ fn report_value(report: &iced_wgpu::profiling::Report) -> Value {
         "distributions":{"input_raw_delivery_to_submission_ms":distribution(report.frames.iter()
             .flat_map(|v|v.input_submissions.iter().map(|(_,ms)|*ms)).collect()),"cpu_cleanup_ms":distribution(report.frames.iter().map(|v|v.cpu_cleanup_ms).collect()),"interval_ms":distribution(report.frames.iter().filter_map(|v|v.interval_ms).collect()),
             "cpu_prepare_ms":distribution(report.frames.iter().map(|v|v.cpu_prepare_ms).collect()),
+            "cpu_primitive_finish_prepare_ms":distribution(report.frames.iter().map(|v|v.cpu_primitive_finish_prepare_ms).collect()),
             "cpu_encode_ms":distribution(report.frames.iter().map(|v|v.cpu_encode_ms).collect()),
             "cpu_submit_ms":distribution(report.frames.iter().map(|v|v.cpu_submit_ms).collect()),
             "surface_acquire_ms":distribution(report.frames.iter().map(|v|v.surface_acquire_ms).collect()),
@@ -912,7 +913,8 @@ impl App {
 
     pub(super) fn gui_benchmark_pair_view(&self) -> Option<Element<'_, RootMessage>> {
         let secondary = self.gui_benchmark.as_ref()?.secondary.as_ref()?;
-        let ctx = crate::theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = crate::theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let width = self.state.viewport_size.width * 0.5;
         let panes = iced::widget::row![
             file_preview::pane(&self.state.features.file_preview, ctx, false, width)

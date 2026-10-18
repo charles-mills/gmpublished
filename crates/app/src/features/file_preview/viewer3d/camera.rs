@@ -27,6 +27,7 @@ impl Default for ViewId {
 }
 
 pub struct Viewer3d {
+    pub(crate) cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     pub(crate) render_feedback: Arc<super::feedback::RenderFeedback>,
     pub model: Arc<ModelPreview>,
     pub content_id: u64,
@@ -147,6 +148,7 @@ impl shader::Program<Message> for Viewer3d {
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
         ModelPrimitive {
+            cpu_executor: self.cpu_executor.clone(),
             render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: None,
             #[cfg(feature = "map-capture")]
@@ -206,6 +208,7 @@ impl shader::Program<Message> for Viewer3d {
     reason = "each flag toggles an independent map render layer, not a mode enum"
 )]
 pub struct FlyViewer {
+    pub(crate) cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     #[cfg(feature = "gui-benchmark")]
     pub(crate) benchmark: Option<crate::app::gui_benchmark::ViewControl>,
     pub(crate) render_feedback: Arc<super::feedback::RenderFeedback>,
@@ -971,6 +974,7 @@ impl shader::Program<Message> for FlyViewer {
             camera.water_time,
         );
         ModelPrimitive {
+            cpu_executor: self.cpu_executor.clone(),
             render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: Some(super::pipeline::view_camera::ViewCamera::fly(
                 camera,
@@ -1077,6 +1081,7 @@ mod tests {
 
     fn input_viewer(captured: bool) -> FlyViewer {
         FlyViewer {
+            cpu_executor: None,
             #[cfg(feature = "gui-benchmark")]
             benchmark: None,
             scene: Arc::new(empty_preview(Vec3::ZERO, Vec3::splat(1024.0))),
@@ -1341,6 +1346,7 @@ mod tests {
                 alpha_policy: resolved.render_mode.texture_alpha_policy(),
             });
         FlyViewer {
+            cpu_executor: None,
             #[cfg(feature = "gui-benchmark")]
             benchmark: None,
             scene: Arc::new(scene),
@@ -1769,6 +1775,7 @@ mod tests {
         let scene = empty_preview(Vec3::splat(-32.0), Vec3::splat(32.0));
         let animation = gmpublished_domain::scene::model::animation_for_tests();
         let viewer = Viewer3d {
+            cpu_executor: None,
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
                 model_animations: vec![ModelAnimationInstance {
@@ -1848,6 +1855,7 @@ mod tests {
         }"#,
         );
         let viewer = Viewer3d {
+            cpu_executor: None,
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
                 model_animations: Vec::new(),

@@ -114,6 +114,7 @@ fn render_opaque(
             visibility: &view.skybox_visibility,
             skybox: true,
             transparency: &view.skybox_transparency,
+            indirect: view.transparent_indirect.skybox.program(),
         };
         render_world_batches(
             encoder,
@@ -172,6 +173,7 @@ fn render_world_opaque(
         visibility: &view.visibility,
         skybox: false,
         transparency: &view.transparency,
+        indirect: view.transparent_indirect.world.program(),
     };
     render_world_batches(
         encoder,
@@ -258,9 +260,14 @@ fn render_opaque_brushes(
     plan: &super::DrawPlan,
     view: DrawView<'_>,
 ) {
-    for brush in &plan.brushes {
-        render_opaque_surfaces(encoder, targets, resources, upload, &brush.opaque, view);
-    }
+    render_surface_batches(
+        encoder,
+        targets,
+        resources,
+        upload,
+        plan.brushes.iter().map(|brush| &brush.opaque),
+        view,
+    );
 }
 
 fn render_world_batches(
@@ -272,9 +279,93 @@ fn render_world_batches(
     view: DrawView<'_>,
     groups: super::transparency::WorldDrawGroups,
 ) {
-    for batch in &plan.world_opaque.batches {
-        if groups.allows(batch.material_group) {
-            render_opaque_surfaces(encoder, targets, resources, upload, &batch.surfaces, view);
+    render_surface_batches(
+        encoder,
+        targets,
+        resources,
+        upload,
+        plan.world_opaque
+            .batches
+            .iter()
+            .filter(|batch| groups.allows(batch.material_group))
+            .map(|batch| &batch.surfaces),
+        view,
+    );
+}
+
+/// Feature-only counterfactual; ordinary builds always coalesce compatible batches.
+#[inline]
+pub(super) fn opaque_pass_coalescing_enabled() -> bool {
+    #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            !matches!(
+                std::env::var("GMPUBLISHED_OPAQUE_PASS_COALESCING").as_deref(),
+                Ok("0")
+            )
+        })
+    }
+    #[cfg(not(any(feature = "gui-benchmark", feature = "map-capture")))]
+    {
+        true
+    }
+}
+
+fn render_surface_batches<'a>(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    batches: impl IntoIterator<Item = &'a super::super::draw_plan::SurfaceBatch>,
+    view: DrawView<'_>,
+) {
+    if !opaque_pass_coalescing_enabled() {
+        for batch in batches {
+            render_opaque_surfaces(encoder, targets, resources, upload, batch, view);
+        }
+        return;
+    }
+    let linear_marks = |batch: &super::super::draw_plan::SurfaceBatch| {
+        batch
+            .surface_marks
+            .iter()
+            .all(|mark| SurfaceBlend::from(mark.blend).color_transfer() == ColorTransfer::Linear)
+    };
+    let mut batches = batches
+        .into_iter()
+        .filter(|batch| !batch.meshes.is_empty() || !batch.surface_marks.is_empty())
+        .peekable();
+    while let Some(mut batch) = batches.next() {
+        if !linear_marks(batch) {
+            render_opaque_surfaces(encoder, targets, resources, upload, batch, view);
+            continue;
+        }
+        // These draws only sample immutable material/lightmap resources. Keep their
+        // order and MSAA samples, resolving once after the consecutive linear run.
+        let mut pass = pass(
+            encoder,
+            targets,
+            "file_preview.surface.opaque_run",
+            wgpu::LoadOp::Load,
+            Some(depth_load()),
+            true,
+        );
+        draw::configure_scene_pass(&mut pass, &local_bounds(targets));
+        loop {
+            if !batch.meshes.is_empty() {
+                draw::draw_opaque_surfaces(&mut pass, resources, upload, batch, view);
+            }
+            if !batch.surface_marks.is_empty() {
+                pass.set_bind_group(0, view.uniforms, &[]);
+                for &item in &batch.surface_marks {
+                    draw::draw_surface_mark(&mut pass, resources, upload, item);
+                }
+            }
+            if !batches.peek().is_some_and(|next| linear_marks(next)) {
+                break;
+            }
+            batch = batches.next().expect("peeked consecutive linear batch");
         }
     }
 }
@@ -362,6 +453,9 @@ fn render_transparent(
             upload,
             DrawView {
                 transparency: &view.transparency[start..end],
+                indirect: view
+                    .indirect
+                    .and_then(|program| program.segment(start..end)),
                 ..view
             },
         );
@@ -403,6 +497,7 @@ fn render_scene(
             visibility: &view.visibility,
             skybox: false,
             transparency: &view.transparency,
+            indirect: view.transparent_indirect.world.program(),
         },
     );
     if matches!(kind, ViewKind::Reflection) && sky {
@@ -593,6 +688,7 @@ pub fn render_frame<'a>(
             visibility: &view.visibility,
             skybox: false,
             transparency: &view.transparency,
+            indirect: view.transparent_indirect.world.program(),
         },
     );
     #[cfg(feature = "gui-benchmark")]
@@ -618,6 +714,7 @@ pub fn render_frame<'a>(
                 visibility: &intersection.visibility,
                 skybox: false,
                 transparency: &intersection.transparency,
+                indirect: intersection.transparent_indirect.world.program(),
             },
         );
     }

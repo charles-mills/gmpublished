@@ -27,6 +27,7 @@ mod doors;
 mod draw_plan;
 pub(super) mod feedback;
 mod pipeline;
+pub use pipeline::{ShutdownError, finish_gpu_shutdown};
 mod source_camera;
 #[cfg(test)]
 mod test_support;

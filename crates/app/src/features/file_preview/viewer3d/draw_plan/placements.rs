@@ -1,10 +1,11 @@
 use super::{DrawPlan, PartitionFilter, ViewerScene, WorldVisibilityPlan};
 use crate::features::file_preview::viewer3d::pipeline::UploadedMesh;
 use crate::media::preview_model::{
-    MapMeshVisibility, MapPreview, MeshGeometry, ModelVertex, RenderScene, vertex_lighting,
+    MapMeshVisibility, MapPreview, MapRenderableSource, MeshGeometry, ModelVertex, RenderScene,
+    vertex_lighting,
 };
-use gmpublished_domain::scene::map::MapBounds;
-use std::collections::{BTreeSet, HashMap};
+use gmpublished_domain::scene::map::{MapBounds, MapPreparedBounds};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 #[derive(Clone, Debug, Default)]
@@ -17,6 +18,7 @@ pub(in super::super) struct OpaqueRanges {
 pub(in super::super) struct OpaquePlacementIndex {
     meshes: Vec<Option<MeshPlacements>>,
     owner_count: usize,
+    static_prop_frustum_bounds: Vec<Option<MapBounds>>,
 }
 
 #[derive(Debug)]
@@ -71,6 +73,20 @@ impl OpaquePlacementIndex {
             return Self::default();
         };
         let mut parts = (0..meshes.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+        // Assets::upload builds mesh_instances from these same immutable source
+        // bindings and each UploadedMesh::receiver_source. Include every binding,
+        // even when an animation has not produced a viewer buffer yet.
+        let animated_sources: HashSet<_> = map
+            .model_animations
+            .iter()
+            .flat_map(|instance| {
+                instance
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.receiver_mesh)
+            })
+            .collect();
+        let mut static_prop_frustum_bounds = Vec::with_capacity(renderables.len());
         for (owner, renderable) in renderables.iter().enumerate() {
             let sources = if renderable.map_skybox {
                 &map.map_skybox_renderables
@@ -101,6 +117,18 @@ impl OpaquePlacementIndex {
                     .map(|(_, data)| data.as_ref().and_then(|(bounds, _)| *bounds)),
                 source.bounds.as_ref().ok().map(|bounds| bounds.world),
             );
+            static_prop_frustum_bounds.push(static_prop_owner_bounds(
+                source.source,
+                source.bounds.as_ref().ok().map(|bounds| bounds.world),
+                bounds,
+                renderable.ranges.iter().map(|range| {
+                    meshes.get(range.mesh_index).map(|mesh| StaticPropGeometry {
+                        geometry: mesh.geometry,
+                        door: mesh.door_index.is_some(),
+                        animated: animated_sources.contains(&mesh.receiver_source()),
+                    })
+                }),
+            ));
             for (range, data) in geometry {
                 if !range.indices.is_empty()
                     && let Some((_, contexts)) = data
@@ -117,6 +145,7 @@ impl OpaquePlacementIndex {
         }
         Self {
             owner_count: renderables.len(),
+            static_prop_frustum_bounds,
             meshes: meshes
                 .iter()
                 .zip(parts)
@@ -131,6 +160,13 @@ impl OpaquePlacementIndex {
                 })
                 .collect(),
         }
+    }
+
+    pub(in super::super) fn static_prop_frustum_bounds(&self, owner: usize) -> Option<MapBounds> {
+        self.static_prop_frustum_bounds
+            .get(owner)
+            .copied()
+            .flatten()
     }
 }
 
@@ -304,6 +340,39 @@ pub(super) fn attach(
             .get(&item.mesh_index)
             .is_none_or(|ranges| !ranges.indices.is_empty())
     });
+}
+
+#[derive(Clone, Copy)]
+struct StaticPropGeometry {
+    geometry: MeshGeometry,
+    door: bool,
+    animated: bool,
+}
+
+fn static_prop_owner_bounds(
+    source: MapRenderableSource,
+    compiled: Option<MapBounds>,
+    combined: Option<MapBounds>,
+    geometry: impl IntoIterator<Item = Option<StaticPropGeometry>>,
+) -> Option<MapBounds> {
+    if !matches!(source, MapRenderableSource::StaticProp { .. })
+        || !MapPreparedBounds::new(compiled?).is_valid()
+    {
+        return None;
+    }
+    let bounds = combined?;
+    if !MapPreparedBounds::new(bounds).is_valid() {
+        return None;
+    }
+    let mut any = false;
+    for part in geometry {
+        let part = part?;
+        if part.geometry != MeshGeometry::Model || part.door || part.animated {
+            return None;
+        }
+        any = true;
+    }
+    any.then_some(bounds)
 }
 
 fn owner_bounds(

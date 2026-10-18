@@ -35,6 +35,10 @@ pub struct BackendContext {
 }
 
 impl BackendContext {
+    pub(crate) fn cpu_executor(&self) -> &gmpublished_backend::CpuExecutor {
+        self.runtime.cpu()
+    }
+
     pub(crate) fn set_workshop_language(
         &self,
         language: gmpublished_backend::WorkshopLanguage,

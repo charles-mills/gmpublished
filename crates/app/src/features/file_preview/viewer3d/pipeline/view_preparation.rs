@@ -76,6 +76,7 @@ pub(super) struct PlanCache {
     bodygroups: Vec<usize>,
     plans: Option<DrawPlans>,
     world_cache: WorldCache,
+    traversal: gmpublished_domain::scene::map::MapWorldTraversal,
 }
 
 impl PlanCache {
@@ -83,6 +84,37 @@ impl PlanCache {
     pub(super) fn world_cache_diagnostics(&self) -> serde_json::Value {
         self.world_cache.diagnostics()
     }
+    pub(super) fn is_cached(
+        &self,
+        upload: &ViewerScene,
+        request: DrawPlanRequest<'_>,
+        visibility_revision: u64,
+        entities: Entities,
+    ) -> bool {
+        self.matches(
+            upload,
+            request.selection,
+            &PlanGeometry::new(
+                request,
+                visibility_revision,
+                upload.geometry_revision(),
+                entities,
+            ),
+        )
+    }
+
+    fn matches(
+        &self,
+        upload: &ViewerScene,
+        selection: super::super::draw_plan::DrawPlanSelection<'_>,
+        geometry: &PlanGeometry,
+    ) -> bool {
+        self.assets.ptr_eq(&Arc::downgrade(&upload.assets))
+            && self.geometry.as_ref() == Some(geometry)
+            && self.skin == selection.skin_remap
+            && self.bodygroups == selection.bodygroup_choices
+    }
+
     pub fn prepare(
         &mut self,
         upload: &ViewerScene,
@@ -96,17 +128,18 @@ impl PlanCache {
             upload.geometry_revision(),
             entities,
         );
-        if self.assets.ptr_eq(&Arc::downgrade(&upload.assets))
-            && self.geometry == Some(geometry)
-            && self.skin == request.selection.skin_remap
-            && self.bodygroups == request.selection.bodygroup_choices
-        {
+        if self.matches(upload, request.selection, &geometry) {
             return self.plans.as_ref().expect("cached draw plans").clone();
+        }
+        if !self.assets.ptr_eq(&Arc::downgrade(&upload.assets)) {
+            // Scratch belongs to this scene, not to a process-wide high-water mark.
+            self.traversal = Default::default();
         }
         let mut plans = prepare_draw_plans(
             upload,
             request,
             &mut self.world_cache,
+            &mut self.traversal,
             entities == Entities::WorldOnly,
         );
         if entities == Entities::WorldOnly {

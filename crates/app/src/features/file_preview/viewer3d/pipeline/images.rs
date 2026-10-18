@@ -343,9 +343,19 @@ impl ImageCache {
         ImageLease {
             cache: self,
             uploader: Arc::clone(uploader),
+            batch: None,
             images: Vec::new(),
             issues: Vec::new(),
         }
+    }
+
+    pub(super) fn lease_batched<'a>(
+        &'a mut self,
+        batch: &'a super::texture_upload::UploadLeaseBatch,
+    ) -> ImageLease<'a> {
+        let mut lease = self.lease(batch.uploader());
+        lease.batch = Some(batch);
+        lease
     }
 }
 
@@ -385,6 +395,7 @@ impl ImageUploadIssue {
 pub(super) struct ImageLease<'a> {
     cache: &'a mut ImageCache,
     uploader: super::texture_upload::SharedUploader,
+    batch: Option<&'a super::texture_upload::UploadLeaseBatch>,
     images: Vec<Arc<Image>>,
     issues: Vec<ImageUploadIssue>,
 }
@@ -464,7 +475,7 @@ impl ImageLease<'_> {
     }
 
     pub(super) fn finish(mut self) -> (Vec<Arc<Image>>, Vec<ImageUploadIssue>) {
-        self.uploader.lock().expect("texture uploader lock").flush();
+        self.flush();
         let mut seen = std::collections::HashSet::new();
         self.images.retain(|image| seen.insert(Arc::as_ptr(image)));
         (
@@ -472,11 +483,17 @@ impl ImageLease<'_> {
             std::mem::take(&mut self.issues),
         )
     }
+
+    fn flush(&self) {
+        if self.batch.is_none() {
+            self.uploader.lock().expect("texture uploader lock").flush();
+        }
+    }
 }
 
 impl Drop for ImageLease<'_> {
     fn drop(&mut self) {
-        self.uploader.lock().expect("texture uploader lock").flush();
+        self.flush();
     }
 }
 
@@ -877,6 +894,10 @@ mod tests {
             adapter.request_device(&wgpu::DeviceDescriptor::default()),
         )
         .expect("Vulkan device");
+        let _completion_scope =
+            crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+                &device,
+            );
         assert_eq!(device.features(), wgpu::Features::empty());
         let capabilities = adapter.get_downlevel_capabilities();
         let frames = || {
@@ -1080,6 +1101,10 @@ mod tests {
             adapter.request_device(&wgpu::DeviceDescriptor::default()),
         )
         .unwrap();
+        let _completion_scope =
+            crate::features::file_preview::viewer3d::pipeline::completion::TestDeviceScope::new(
+                &device,
+            );
         let caps = adapter.get_downlevel_capabilities();
         assert!(caps.flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS));
         let frames = |value| {
