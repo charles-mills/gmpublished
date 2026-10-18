@@ -1,0 +1,11 @@
+{
+  "source": "overlay-receivers native35, gm_tex13_source_bad_magic normal, bound GL texture level0 readback",
+  "dimensions": [
+    32,
+    32
+  ],
+  "format": "GL_SRGB8",
+  "rgba_sha256": "7f0619974033dbfe60b750ab0fc0cacae63e167f90bcfa15afe472c5f7e1d864",
+  "rgba_crc32": "36600d5a",
+  "mip_count": 1
+}

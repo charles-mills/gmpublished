@@ -1,29 +1,46 @@
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    // Directional light in world space (xyz) + ambient strength (w).
-    light: vec4<f32>,
-    camera_position: vec4<f32>,
-    fog_color: vec4<f32>,
-    // start, end, max density, enabled flag.
-    fog_params: vec4<f32>,
-    // x: animation time, yzw: sky tint.
-    water_time_sky_tint: vec4<f32>,
-    // xy: near and far clip distances.
-    water_depth_params: vec4<f32>,
-}
 
-struct Material {
-    // x: force opaque, y: alpha test cutout.
-    flags: vec4<u32>,
-}
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(1) var base_texture2: texture_2d<f32>;
-@group(1) @binding(2) var lightmap_texture: texture_2d<f32>;
+@group(2) @binding(0) var lightmap_texture: texture_2d<f32>;
 @group(1) @binding(3) var base_sampler: sampler;
-@group(1) @binding(4) var lightmap_sampler: sampler;
+@group(1) @binding(21) var base2_sampler:sampler;
+@group(1) @binding(22) var normal_sampler:sampler;
+@group(1) @binding(23) var normal2_sampler:sampler;
+@group(1) @binding(28) var model_exponent_sampler:sampler;
+@group(2) @binding(2) var lightmap_sampler: sampler;
 @group(1) @binding(5) var<uniform> material: Material;
+@group(1) @binding(6) var normal_texture: texture_2d_array<f32>;
+@group(1) @binding(7) var normal_texture2: texture_2d_array<f32>;
+
+const MODEL_DIFFUSE_WARP:u32=1u;
+const MODEL_SPECULAR_WARP:u32=2u;
+const MODEL_EXPONENT_MAP:u32=4u;
+const MODEL_HALF_LAMBERT:u32=8u;
+const MODEL_BASE_ALPHA_MASK:u32=16u;
+const MODEL_INVERT_MASK:u32=32u;
+const MODEL_MATERIAL_RIM:u32=1u;
+const MODEL_MATERIAL_PIXEL_LIGHTING:u32=2u;
+const LIGHTING_LINEAR_ILLUMINATION:u32=1u;
+const LIGHTING_STATIC_PROP:u32=2u;
+const LIGHTING_COMPILED_VERTEX:u32=4096u;
+const LIGHTING_RUNTIME_CONTEXT:u32=4u;
+const LIGHTING_MODEL_DRAW:u32=8u;
+const LIGHTING_LIGHTMAP:u32=16u;
+const LIGHTING_PREVIEW:u32=32u;
+const LIGHTING_LEGACY_VERTEX_COLOR:u32=64u;
+const LIGHTING_RECEIVER_LIGHTMAP:u32=128u;
+const LIGHTING_RECEIVER_CONSTANT:u32=256u;
+const LIGHTING_WORLD_CONSTANT:u32=512u;
+const LIGHTING_BATCHED_STATIC_DECAL:u32=1024u;
+const LIGHTING_DIRECTIONAL_LIGHTMAP_BLACK:u32=2048u;
+
+struct SurfaceMark {
+    origin:vec3<f32>, fade_min_sq:f32,
+    fade_max_sq:f32, fade_enabled:u32, padding:vec2<u32>,
+}
+@group(0) @binding(8) var<storage,read> surface_marks:array<SurfaceMark>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -32,68 +49,458 @@ struct VertexInput {
     @location(3) lightmap_uv: vec2<f32>,
     @location(4) color: vec3<f32>,
     @location(5) blend_alpha: f32,
+    @location(6) lightmap_bump_step:f32,
+    @location(7) opacity:f32,
+    @location(8) illumination:vec3<f32>,
+    @location(9) lighting_mode:u32,
+    @location(13) lighting_context:u32,
+    @location(14) surface_mark:u32,
+    @location(10) tangent_s:vec3<f32>,
+    @location(11) tangent_t:vec3<f32>,
+    @location(12) tangent_sign:f32,
 }
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) lightmap_uv: vec2<f32>,
+    @location(2) @interpolate(perspective, centroid) lightmap_uv: vec2<f32>,
     @location(3) color: vec3<f32>,
     @location(4) blend_alpha: f32,
-    @location(5) world_position: vec3<f32>,
+    @location(5) world_position_clip: vec4<f32>,
+    @location(6) lightmap_bump_step:f32,
+    @location(7) opacity:f32,
+    @location(8) illumination:vec3<f32>,
+    @location(9) @interpolate(flat) vertex_state:vec4<u32>,
+    @location(10) tangent_s:vec3<f32>,
+    @location(11) tangent_t:vec3<f32>,
+    @location(12) normal_vertex_unit:vec3<f32>,
+    @location(13) tangent_vertex_unit:vec4<f32>,
+    @location(14) light_attenuation:vec4<f32>,
+    @location(15) eye_vertex_unit:vec3<f32>,
 }
 
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
+fn transform_model_vertex(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = uniforms.view_proj * vec4<f32>(input.position, 1.0);
     out.normal = input.normal;
+    out.normal_vertex_unit = input.normal * inverseSqrt(max(dot(input.normal,input.normal),0.00000001));
+    out.tangent_vertex_unit = vec4<f32>(input.tangent_s * inverseSqrt(max(dot(input.tangent_s,input.tangent_s),0.00000001)),input.tangent_sign);
+    out.light_attenuation=vec4<f32>(0.0);
+    if (input.lighting_mode&LIGHTING_RUNTIME_CONTEXT)!=0u {
+        let context=model_lighting_state(input.lighting_context,input.lighting_mode);
+        for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
+            out.light_attenuation[i]=model_light_attenuation(context.lights[i],input.position);
+        }
+    }
+    let eye=uniforms.camera_position.xyz-input.position;
+    out.eye_vertex_unit = eye * inverseSqrt(max(dot(eye,eye),0.00000001));
+    out.tangent_s = input.tangent_s;
+    out.tangent_t = input.tangent_t;
+    if model_material.skin!=0u {
+        out.tangent_t=input.tangent_t*inverseSqrt(max(dot(input.tangent_t,input.tangent_t),0.00000001));
+        out.eye_vertex_unit=eye;
+    }
     out.uv = input.uv;
     out.lightmap_uv = input.lightmap_uv;
+    out.lightmap_bump_step=input.lightmap_bump_step;
     out.color = input.color;
+    if (input.lighting_mode&LIGHTING_LINEAR_ILLUMINATION)!=0u {
+        out.color=surface_modulation(true,input.color,(input.lighting_mode&(LIGHTING_STATIC_PROP|LIGHTING_MODEL_DRAW))!=0u).rgb;
+    }
     out.blend_alpha = input.blend_alpha;
-    out.world_position = input.position;
+    out.opacity = input.opacity;
+    var surface_mark_fade = 1.0;
+    if input.surface_mark!=0u {
+        let mark=surface_marks[input.surface_mark];
+        if mark.fade_enabled!=0u {
+            let delta=uniforms.camera_position.xyz-mark.origin;
+            surface_mark_fade=clamp((mark.fade_max_sq-dot(delta,delta))/(mark.fade_max_sq-mark.fade_min_sq),0.0,1.0);
+        }
+    }
+    out.illumination = input.illumination;
+    if (input.lighting_mode&LIGHTING_RUNTIME_CONTEXT)!=0u && !model_pixel_lighting_enabled() {
+        let lighting=model_vertex_lighting(input.position,out.normal_vertex_unit,out.light_attenuation,model_lighting_state(input.lighting_context,input.lighting_mode));
+        if (input.lighting_mode&LIGHTING_COMPILED_VERTEX)!=0u {out.illumination+=lighting;}
+        else {out.illumination=lighting;}
+    }
+    out.vertex_state = vec4<u32>(input.lighting_mode,input.lighting_context,bitcast<u32>(input.opacity),bitcast<u32>(surface_mark_fade));
+    out.world_position_clip = vec4<f32>(input.position,view_clip_distance(input.position));
     return out;
 }
 
+fn vertex_lighting_flags(input:VertexOutput)->u32 {return input.vertex_state.x;}
+fn vertex_lighting_context(input:VertexOutput)->u32 {return input.vertex_state.y;}
+fn vertex_draw_opacity(input:VertexOutput)->f32 {return bitcast<f32>(input.vertex_state.z);}
+fn vertex_surface_mark_fade(input:VertexOutput)->f32 {return bitcast<f32>(input.vertex_state.w);}
+
+fn quantized_vertex_alpha(alpha:f32)->f32 {
+    // The float mantissa rounds to an alpha byte, including ties to even.
+    let rounding_bias=8388608.0;
+    return f32(bitcast<u32>(alpha*255.0+rounding_bias)&255u)/255.0;
+}
+
+fn shade(input: VertexOutput) -> vec4<f32> {
+    if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
+    let height_fog=uniforms.fog.mode==FOG_HEIGHT;
+    let mark_fade=vertex_surface_mark_fade(input);
+    if mark_fade<=0.0 {discard;}
+    let weight=surface_weight(input.uv,input.blend_alpha,height_fog);
+    let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
+    var albedo=textureSample(base_texture,base_sampler,uv);
+    if surface.flags.x==SURFACE_DECAL_MODULATE {
+        if albedo.a<=0.0 {discard;}
+        let factor=pow(view_fog_factor(input.world_position_clip.xyz,1.0/input.clip_position.w),0.4);
+        let opacity=select(factor*factor,factor,uniforms.fog.mode==FOG_HEIGHT);
+        return vec4<f32>(mix(albedo.rgb,vec3<f32>(0.5),opacity),albedo.a);
+    }
+    if surface.alpha_state.x==0u {albedo.a=1.0;}
+    var environment_alpha=albedo.a;
+    if surface.blend.base_mode!=BASE_BLEND_SINGLE {
+        var second=textureSample(base_texture2,base2_sampler,uv);
+        if surface.alpha_state.y==0u {second.a=1.0;}
+        albedo=vec4<f32>(mix(albedo.rgb,second.rgb,weight),albedo.a);
+        environment_alpha=mix(albedo.a,second.a,weight);
+    }
+    let base_alpha=albedo.a;
+    let detail_color=surface_detail(input.uv);
+    albedo=surface_combine(albedo,detail_color);
+    let unmodulated_albedo=albedo.rgb;
+    let explicit_lighting=(vertex_lighting_flags(input)&LIGHTING_LINEAR_ILLUMINATION)!=0u;
+    let static_prop=(vertex_lighting_flags(input)&LIGHTING_STATIC_PROP)!=0u;
+    let model_draw=(vertex_lighting_flags(input)&(LIGHTING_STATIC_PROP|LIGHTING_MODEL_DRAW))!=0u;
+    let draw_opacity=clamp(select(input.opacity,vertex_draw_opacity(input),model_draw),0.0,1.0);
+    let model=surface.flags.x==SURFACE_VERTEX_LIT || explicit_lighting || static_prop || model_draw;
+    var modulation=surface_modulation(model,vec3<f32>(1.0),model_draw);
+    if explicit_lighting {modulation=vec4<f32>(input.color,modulation.a);}
+    let world=surface.flags.x==SURFACE_LIGHTMAPPED || surface.flags.x==SURFACE_TRANSITION;
+    if !world {
+        if surface.state.z!=0u {
+            let tinted=mix(albedo.rgb*modulation.rgb,modulation.rgb,surface.misc.y);
+            albedo=vec4<f32>(mix(albedo.rgb,tinted,base_alpha),albedo.a);
+        } else {albedo=vec4<f32>(albedo.rgb*modulation.rgb,albedo.a);}
+    }
+    var opacity=albedo.a;
+    if material.texture_alpha_opaque!=0u || (surface.flags.x!=SURFACE_NONE && surface.misc.w<0.5) {opacity=1.0;}
+    opacity*=select(modulation.a,modulation.a*modulation.a,world);
+    if material.vertex_alpha!=0u || explicit_lighting || model_draw {opacity*=draw_opacity;}
+    if material.vertex_alpha!=0u {opacity*=quantized_vertex_alpha(mark_fade);}
+    let alpha_test=select(material.alpha_test!=0u,surface.state.x!=0u,surface.flags.x!=SURFACE_NONE);
+    if alpha_test && opacity<surface.misc.x {discard;}
+    if material.alpha_test!=0u {opacity=1.0;}
+    if surface.state.w!=0u && modulation.a==1.0 && (!model_draw || draw_opacity==1.0) {
+        opacity=select(1.0,draw_opacity,model_draw);
+    }
+    var lit:vec3<f32>;
+    if material.unlit!=0u {
+        lit=albedo.rgb;
+        if material.vertex_color!=0u && !explicit_lighting {lit*=input.color;}
+    } else if (vertex_lighting_flags(input)&LIGHTING_RUNTIME_CONTEXT)!=0u {
+        if model_pixel_lighting_enabled() {
+            lit=albedo.rgb*model_diffuse_lighting(input,base_alpha);
+        } else {lit=albedo.rgb*input.illumination;}
+    } else if explicit_lighting {
+        lit=albedo.rgb*input.illumination;
+    } else if (vertex_lighting_flags(input)&(LIGHTING_RECEIVER_CONSTANT|LIGHTING_WORLD_CONSTANT))!=0u {
+        lit=albedo.rgb*input.illumination;
+        if material.bump_mode!=BUMP_NONE && (vertex_lighting_flags(input)&LIGHTING_DIRECTIONAL_LIGHTMAP_BLACK)!=0u {
+            lit=vec3<f32>(0.0);
+        } else if material.bump_mode==BUMP_SSBUMP {
+            let normal=surface_bump_normal(input,weight);
+            lit*=dot(bump_lightmap_weights(normal,true,detail_color.rgb),vec3<f32>(1.0));
+        }
+    } else if (vertex_lighting_flags(input)&(LIGHTING_LIGHTMAP|LIGHTING_RECEIVER_LIGHTMAP))!=0u {
+        var lightmap=textureSample(lightmap_texture,lightmap_sampler,input.lightmap_uv).rgb*lightmap_scale();
+        if material.bump_mode!=BUMP_NONE {
+            let normal=surface_bump_normal(input,weight);
+            if input.lightmap_bump_step>0.0 {
+                lightmap=bumped_lightmap(input.lightmap_uv,input.lightmap_bump_step,normal,material.bump_mode==BUMP_SSBUMP,detail_color.rgb);
+            } else {
+                if material.bump_mode==BUMP_SSBUMP {lightmap*=dot(bump_lightmap_weights(normal,true,detail_color.rgb),vec3<f32>(1.0));}
+            }
+        }
+        lit=albedo.rgb*lightmap;
+    } else if (vertex_lighting_flags(input)&LIGHTING_PREVIEW)!=0u {
+        let ambient=uniforms.light.w;
+        let diffuse=max(dot(normalize(input.normal),normalize(uniforms.light.xyz)),0.0);
+        lit=albedo.rgb*min(ambient+diffuse*(1.0-ambient),1.0);
+    } else if (vertex_lighting_flags(input)&LIGHTING_LEGACY_VERTEX_COLOR)!=0u {
+        lit=albedo.rgb*input.color*2.0;
+    } else {lit=albedo.rgb;}
+    if uniforms.shading_mode==SHADING_FULLBRIGHT && material.unlit==0u
+        && ((vertex_lighting_flags(input)&(LIGHTING_RECEIVER_LIGHTMAP|LIGHTING_RECEIVER_CONSTANT))==0u
+            || (vertex_lighting_flags(input)&LIGHTING_BATCHED_STATIC_DECAL)!=0u) {
+        lit=albedo.rgb;
+        if (vertex_lighting_flags(input)&(LIGHTING_LIGHTMAP|LIGHTING_WORLD_CONSTANT|LIGHTING_BATCHED_STATIC_DECAL))!=0u && material.bump_mode==BUMP_SSBUMP {
+            let normal=surface_bump_normal(input,weight);
+            lit*=dot(bump_lightmap_weights(normal,true,detail_color.rgb),vec3<f32>(1.0));
+        }
+    }
+    let skin_emission_order=!world && model_material.skin!=0u;
+    if world {
+        lit*=modulation.rgb;
+        if material.vertex_color!=0u {lit*=input.color;}
+    } else if !skin_emission_order {lit=surface_detail_post(lit,detail_color);}
+    let emission_alpha=select(albedo.a,base_alpha,world);
+    lit=surface_emission(lit,albedo.rgb,emission_alpha,uv,input.normal_vertex_unit,input.eye_vertex_unit);
+    if skin_emission_order {lit=surface_detail_post(lit,detail_color);}
+    if (vertex_lighting_flags(input)&LIGHTING_RUNTIME_CONTEXT)!=0u {lit+=model_specular_lighting(input,unmodulated_albedo,emission_alpha);}
+    lit+=surface_environment_lighting(input,weight,select(emission_alpha,environment_alpha,world),world);
+    lit=mix(lit,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w));
+    if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
+    return vec4<f32>(lit,opacity);
+}
+
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    var albedo = textureSample(base_texture, base_sampler, input.uv);
-    if input.blend_alpha > 0.0 {
-        let albedo2 = textureSample(base_texture2, base_sampler, input.uv);
-        albedo = mix(albedo, albedo2, clamp(input.blend_alpha, 0.0, 1.0));
+fn fs_main(input:VertexOutput) -> @location(0) vec4<f32> { return shade(input); }
+
+@fragment
+fn fs_refraction(input:VertexOutput) -> @location(0) vec4<f32> {
+    let colour=shade(input);
+    let fog=select(1.0,view_fog_factor(input.world_position_clip.xyz,1.0/input.clip_position.w),uniforms.fog.mode==FOG_HEIGHT);
+    return vec4<f32>(colour.rgb,fog);
+}
+
+@fragment
+fn fs_additive(input:VertexOutput) -> @location(0) vec4<f32> {
+    let colour=shade(input);
+    let fog=view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w);
+    return vec4<f32>(max(colour.rgb-uniforms.fog_color.rgb*fog,vec3<f32>(0.0))*colour.a,colour.a);
+}
+
+fn surface_bump_normal(input:VertexOutput,weight:f32)->vec3<f32> {
+    let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
+    let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
+    let first=textureSample(normal_texture,normal_sampler,uv,layer).xyz;
+    let second=textureSample(normal_texture2,normal2_sampler,uv,i32(surface.alpha_state.z%max(textureNumLayers(normal_texture2),1u))).xyz;
+    let encoded=mix(first,second,weight);
+    return select(encoded*2.0-1.0,encoded,material.bump_mode==BUMP_SSBUMP);
+}
+
+fn bump_lightmap_weights(tangent_normal:vec3<f32>,ssbump:bool,detail_color:vec3<f32>)->vec3<f32> {
+    var weights = tangent_normal;
+    if !ssbump {
+        weights = clamp(vec3<f32>(dot(tangent_normal,vec3<f32>(0.81649658,0.0,0.57735027)),
+            dot(tangent_normal,vec3<f32>(-0.40824829,0.70710678,0.57735027)),
+            dot(tangent_normal,vec3<f32>(-0.40824829,-0.70710678,0.57735027))),vec3<f32>(0.0),vec3<f32>(1.0));
+        weights *= weights;
+        if surface.flags.y==11u {weights*=2.0*detail_color;}
+        weights /= max(dot(weights,vec3<f32>(1.0)),0.000001);
     }
-    if material.flags.x != 0u {
-        albedo.a = 1.0;
-    } else if material.flags.y != 0u && albedo.a < 0.5 {
-        discard;
+    return weights;
+}
+
+fn bumped_lightmap(uv:vec2<f32>, step:f32, tangent_normal:vec3<f32>, ssbump:bool, detail_color:vec3<f32>) -> vec3<f32> {
+    if step <= 0.0 { return textureSample(lightmap_texture, lightmap_sampler, uv).rgb * lightmap_scale(); }
+    let weights=bump_lightmap_weights(tangent_normal,ssbump,detail_color);
+    let a=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step,0.0)).rgb;
+    let b=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step*2.0,0.0)).rgb;
+    let c=textureSample(lightmap_texture,lightmap_sampler,uv+vec2<f32>(step*3.0,0.0)).rgb;
+    return (a*weights.x+b*weights.y+c*weights.z)*lightmap_scale();
+}
+
+fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bool)->vec3<f32> {
+    if surface.env_flags.x==0u {return vec3<f32>(0.0);}
+    if !world && model_material.skin!=0u {
+        let sampled=model_sampled_normal(input,alpha);
+        let normal=sampled.xyz;
+        let eye=normalize(input.eye_vertex_unit);
+        let invert=(model_material.features&MODEL_INVERT_MASK)!=0u;
+        var mask=alpha;
+        if surface.env_flags.y==ENV_MASK_NORMAL_ALPHA {
+            mask=sampled.a;
+            if surface.flags.z==EMISSION_FRESNEL {mask=select(0.0,1.0,invert);}
+        }
+        mask=select(mask,1.0-mask,invert);
+        let fresnel=source_model_phong_fresnel(normal,eye,model_material.fresnel.xyz);
+        let direction=2.0*normal*dot(normal,eye)-eye;
+        return textureSample(surface_environment,surface_env_sampler,direction).rgb
+            *surface.env_tint.rgb*surface.env_params.z*mask*mix(1.0,fresnel,surface.env_params.w);
     }
-    var lit: vec3<f32>;
-    if input.lightmap_uv.x != 0.0 || input.lightmap_uv.y != 0.0 {
-        let lightmap = textureSample(lightmap_texture, lightmap_sampler, input.lightmap_uv).rgb;
-        // Source applies a 2x overbright factor to baked lightmaps.
-        lit = albedo.rgb * lightmap * 2.0;
-    // Vertex colors are byte-quantized (1/255 steps), and attribute
-    // interpolation is not exact on every GPU: an exact `== 1.0` compare
-    // flickers per fragment on NVIDIA, dithering every textured surface.
-    // Half a quantization step of tolerance keeps "no vertex color" stable
-    // without absorbing real vertex colors.
-    } else if all(abs(input.color - vec3<f32>(1.0)) < vec3<f32>(0.5 / 255.0)) {
-        let ambient = uniforms.light.w;
-        let diffuse = max(dot(normalize(input.normal), normalize(uniforms.light.xyz)), 0.0);
-        lit = albedo.rgb * min(ambient + diffuse * (1.0 - ambient), 1.0);
-    } else {
-        lit = albedo.rgb * input.color * 2.0;
+    var normal=input.normal;
+    if surface.flags.x==SURFACE_VERTEX_LIT || (surface.flags.x==SURFACE_UNLIT && (surface.env_flags.w&ENV_VERTEX_MODULATION)==0u) {
+        normal=input.normal_vertex_unit;
     }
-    if uniforms.fog_params.w > 0.5 && uniforms.fog_params.y > uniforms.fog_params.x {
-        let fog_distance = distance(input.world_position, uniforms.camera_position.xyz);
-        let fog_factor = clamp(
-            (fog_distance - uniforms.fog_params.x) / (uniforms.fog_params.y - uniforms.fog_params.x),
-            0.0,
-            uniforms.fog_params.z,
-        );
-        lit = mix(lit, uniforms.fog_color.rgb, fog_factor);
+    var normal_alpha=1.0;
+    if (surface.env_flags.w&ENV_BUMP)!=0u {
+        let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
+        let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
+        let first=textureSample(normal_texture,normal_sampler,uv,layer);
+        var encoded=first.xyz;
+        normal_alpha=first.a;
+        if (surface.env_flags.w&ENV_SECOND_NORMAL)!=0u {
+            let second=textureSample(normal_texture2,normal2_sampler,uv,i32(surface.alpha_state.z%max(textureNumLayers(normal_texture2),1u)));
+            encoded=mix(encoded,second.xyz,weight);
+            if surface_uses_blend_modulation(uniforms.fog.mode==FOG_HEIGHT) {normal_alpha=mix(first.a,second.a,weight);}
+        }
+        var tangent_normal=encoded*2.0-1.0;
+        if (surface.env_flags.w&ENV_SSBUMP)!=0u {
+            tangent_normal=normalize(encoded.x*vec3<f32>(0.81649658,0.0,0.57735027)
+                +encoded.y*vec3<f32>(-0.40824829,0.70710678,0.57735027)
+                +encoded.z*vec3<f32>(-0.40824829,-0.70710678,0.57735027));
+        }
+        if world {
+            normal=input.tangent_s*tangent_normal.x+input.tangent_t*tangent_normal.y+input.normal*tangent_normal.z;
+        } else {
+            let binormal=cross(input.normal_vertex_unit,input.tangent_vertex_unit.xyz)*input.tangent_vertex_unit.w;
+            normal=normalize(input.tangent_vertex_unit.xyz*tangent_normal.x+binormal*tangent_normal.y+input.normal_vertex_unit*tangent_normal.z);
+        }
     }
-    return vec4<f32>(lit, albedo.a);
+    var mask=vec3<f32>(1.0);
+    if surface.env_flags.y==ENV_MASK_BASE_ALPHA {mask=vec3<f32>(1.0-alpha);}
+    if surface.env_flags.y==ENV_MASK_NORMAL_ALPHA {mask=vec3<f32>(normal_alpha);}
+    if surface.env_flags.y==ENV_MASK_TEXTURE {
+        let layer=i32(surface.env_flags.z%max(textureNumLayers(surface_envmask),1u));
+        mask=textureSample(surface_envmask,surface_envmask_sampler,surface_scroll_uv(input.uv,surface.env_mask_s,surface.env_mask_t,surface.env_mask_scroll),layer).rgb;
+    }
+    var eye=uniforms.camera_position.xyz-input.world_position_clip.xyz;
+    if !world && (surface.env_flags.w&ENV_BUMP)!=0u {eye=input.eye_vertex_unit;}
+    let direction=source_cube_reflection(normal,eye);
+    let radiance=textureSample(surface_environment,surface_env_sampler,direction).rgb*surface.env_params.z;
+    var result=source_cube_specular(radiance,mask,surface.env_tint.rgb,surface.env_params.x,surface.env_params.y);
+    if world {result*=source_world_cube_fresnel(normal,eye,surface.env_params.w);}
+    return result;
+}
+
+fn model_sampled_normal(input:VertexOutput,base_alpha:f32)->vec4<f32> {
+    let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
+    var texel=vec4<f32>(0.5,0.5,1.0,1.0);
+    if model_material.normal!=0u {texel=textureSample(normal_texture,normal_sampler,uv,0);}
+    let base_mask=model_material.skin!=0u && (model_material.features&MODEL_BASE_ALPHA_MASK)!=0u;
+    let tangent_normal=source_model_phong_tangent_normal(texel.xyz,base_mask);
+    var tangent_t=cross(input.normal_vertex_unit,input.tangent_vertex_unit.xyz)*input.tangent_vertex_unit.w;
+    if model_material.skin!=0u {tangent_t=input.tangent_t;}
+    let normal=normalize(input.tangent_vertex_unit.xyz*tangent_normal.x+tangent_t*tangent_normal.y+input.normal_vertex_unit*tangent_normal.z);
+    return vec4<f32>(normal,source_model_phong_mask(texel.a,base_alpha,base_mask));
+}
+
+fn model_ambient_cube(context:ModelLightingState)->array<vec3<f32>,6> {
+    var cube:array<vec3<f32>,6>;
+    for(var i=0u;i<6u;i+=1u) {cube[i]=context.ambient[i].rgb;}
+    return cube;
+}
+
+fn model_pixel_lighting_enabled()->bool {
+    return (model_material.lighting&MODEL_MATERIAL_PIXEL_LIGHTING)!=0u;
+}
+
+fn model_vertex_lighting(position:vec3<f32>,normal:vec3<f32>,attenuation:vec4<f32>,context:ModelLightingState)->vec3<f32> {
+    var result=source_model_ambient(normal,model_ambient_cube(context));
+    for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
+        let light=context.lights[i];
+        var direction=model_light_direction(light,position);
+        if light.position_kind.w<0.5 {direction=-light.direction.xyz;}
+        let cosine=dot(normal,direction);
+        let half_term=cosine*0.5+0.5;
+        let response=select(max(cosine,0.0),half_term*half_term,(model_material.features&MODEL_HALF_LAMBERT)!=0u);
+        result+=light.color.rgb*response*attenuation[i];
+    }
+    return result;
+}
+
+fn model_diffuse_lighting(input:VertexOutput,base_alpha:f32)->vec3<f32> {
+    let context=model_lighting_state(vertex_lighting_context(input),vertex_lighting_flags(input));
+    let normal=model_sampled_normal(input,base_alpha).xyz;
+    var result=source_model_ambient(normal,model_ambient_cube(context));
+    let warp=(model_material.features&MODEL_DIFFUSE_WARP)!=0u;
+    for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
+        let light=context.lights[i];
+        let direction=model_light_direction(light,input.world_position_clip.xyz);
+        let coordinate=source_model_diffuse_coordinate(normal,direction,(model_material.features&MODEL_HALF_LAMBERT)!=0u,warp);
+        var texel=vec3<f32>(1.0);
+        if warp {texel=textureSample(model_diffuse_warp,model_diffuse_warp_sampler,source_model_diffuse_warp_uv(coordinate,1.0),0).rgb;}
+        result+=source_model_diffuse_term(coordinate,1.0,warp,texel)*light.color.rgb*input.light_attenuation[i];
+    }
+    return result;
+}
+
+fn model_specular_lighting(input:VertexOutput,base_linear:vec3<f32>,base_alpha:f32)->vec3<f32> {
+    if model_material.skin==0u {return vec3<f32>(0.0);}
+    let context=model_lighting_state(vertex_lighting_context(input),vertex_lighting_flags(input));
+    let sampled=model_sampled_normal(input,base_alpha);
+    let normal=sampled.xyz;
+    let eye=normalize(input.eye_vertex_unit);
+    let fresnel=source_model_phong_fresnel(normal,eye,model_material.fresnel.xyz);
+    let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
+    let exponent_texel=textureSample(model_exponent,model_exponent_sampler,uv,0);
+    let exponent=source_model_phong_exponent(model_material.exponent,exponent_texel.r);
+    let warp=(model_material.features&MODEL_SPECULAR_WARP)!=0u;
+    var specular=vec3<f32>(0.0);
+    var rim=vec3<f32>(0.0);
+    for(var i=0u;i<min(context.counts.x,4u);i+=1u) {
+        let light=context.lights[i];
+        let direction=model_light_direction(light,input.world_position_clip.xyz);
+        let lobe=source_model_phong_lobe(normal,direction,eye,exponent);
+        var texel=vec3<f32>(1.0);
+        if warp {texel=textureSample(model_specular_warp,model_specular_warp_sampler,source_model_phong_warp_uv(lobe,fresnel),0).rgb;}
+        specular+=source_model_phong_light(normal,direction,lobe,light.color.rgb,input.light_attenuation[i],1.0,warp,texel);
+        if (model_material.lighting&MODEL_MATERIAL_RIM)!=0u {rim+=source_model_rim_light(normal,direction,eye,model_material.rim.x,light.color.rgb,input.light_attenuation[i]);}
+    }
+    specular=source_model_phong_finish(specular,sampled.a,model_material.boost,fresnel,warp);
+    if (model_material.lighting&MODEL_MATERIAL_RIM)!=0u {
+        let mask=select(1.0,exponent_texel.a,model_material.rim.z>0.5);
+        specular=source_model_rim_finish(specular,rim,source_model_ambient(eye,model_ambient_cube(context)),normal,eye,mask,model_material.rim.y);
+    }
+    return specular*source_model_phong_tint(model_material.tint.xyz,base_linear,exponent_texel.g);
+}
+
+// Refract draws bind their scene snapshot at group 2 in place of the
+// lighting page. The glass entry point does not read baked lighting.
+@group(1) @binding(30) var glass_tint_texture:texture_2d_array<f32>;
+@group(1) @binding(31) var glass_tint_sampler:sampler;
+
+fn glass_background(uv:vec2<f32>)->vec4<f32> {
+    if (surface.refraction_flags.w&4u)!=0u {return textureSample(base_texture,base_sampler,uv);}
+    return textureSample(lightmap_texture,lightmap_sampler,uv);
+}
+
+@fragment
+fn fs_glass(input:VertexOutput)->@location(0) vec4<f32> {
+    if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
+    let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
+    let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
+    let texel=textureSample(normal_texture,normal_sampler,uv,layer);
+    var tangent_normal=texel.xyz*2.0-1.0;
+    if surface.refraction_flags.y!=0u {
+        let second_uv=surface_uv(input.uv,surface.normal2_s,surface.normal2_t);
+        let second_layer=i32(u32(max(surface.refraction_params.w,0.0))%max(textureNumLayers(normal_texture2),1u));
+        let second=textureSample(normal_texture2,normal2_sampler,second_uv,second_layer).xyz*2.0-1.0;
+        tangent_normal=normalize(tangent_normal+second);
+    }
+    let original=input.clip_position.xy/vec2<f32>(textureDimensions(lightmap_texture));
+    var tint=surface.refraction_tint.rgb;
+    if surface.refraction_flags.z!=0u {
+        let tint_layer=i32(u32(max(surface.refraction_params.z,0.0))%max(textureNumLayers(glass_tint_texture),1u));
+        tint*=2.0*textureSample(glass_tint_texture,glass_tint_sampler,uv,tint_layer).rgb;
+    }
+    var scale=texel.a*surface.refraction_tint.a;
+    if (surface.refraction_flags.w&2u)!=0u {tint*=input.color;scale*=input.opacity;}
+    let warped=original+tangent_normal.xy*scale;
+    var color=glass_background(warped);
+    if surface.refraction_params.x!=0.0 {
+        let fraction=1.0/512.0;
+        color=glass_background(warped-vec2<f32>(0.5*fraction))*(4.0/9.0)
+            +glass_background(warped+vec2<f32>(fraction,-0.5*fraction))*(2.0/9.0)
+            +glass_background(warped+vec2<f32>(-0.5*fraction,fraction))*(2.0/9.0)
+            +glass_background(warped+vec2<f32>(fraction))*(1.0/9.0);
+    }
+    if (surface.refraction_flags.w&1u)!=0u && surface.refraction_params.x==0.0 {
+        return vec4<f32>(mix(color.rgb,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w)),color.a);
+    }
+    var silhouette=1.0;
+    if surface.refraction_params.y!=0.0 {
+        let facing=clamp(dot(input.eye_vertex_unit,input.normal_vertex_unit),0.0,1.0);
+        silhouette=facing*facing*facing;
+    }
+    var result=mix(glass_background(original).rgb,color.rgb*tint,silhouette);
+    if surface.refraction_flags.x!=0u {
+        let world_normal=input.tangent_s*tangent_normal.x+input.tangent_t*tangent_normal.y+input.normal_vertex_unit*tangent_normal.z;
+        let direction=source_cube_reflection(world_normal,input.eye_vertex_unit);
+        let radiance=textureSample(surface_environment,surface_env_sampler,direction).rgb;
+        result+=source_cube_specular(radiance,vec3<f32>(texel.a),surface.env_tint.rgb,surface.env_params.x,surface.env_params.y);
+    }
+    result=mix(result,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w));
+    var alpha=texel.a;
+    if (surface.refraction_flags.w&2u)!=0u {alpha*=input.opacity;}
+    return vec4<f32>(result,alpha);
 }

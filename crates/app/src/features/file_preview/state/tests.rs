@@ -22,6 +22,7 @@ fn archive() -> Arc<PreviewArchiveSource> {
 
 fn request(path: &str) -> PreviewRequest {
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: archive(),
         entry_path: path.to_owned(),
@@ -29,6 +30,7 @@ fn request(path: &str) -> PreviewRequest {
         size_bytes: 12,
         crc32: 0xABCD_EF01,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -87,11 +89,29 @@ fn render_scene(
 
 fn empty_map(scene: Arc<RenderScene>) -> MapPreview {
     MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
+        surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
+        water_volumes: None,
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
         scene,
         mesh_visibility: Vec::new(),
         map_skybox_meshes: Vec::new(),
+        model_lighting: Vec::new(),
+        model_lighting_inputs: None,
         lightmap: None,
         skybox: None,
+        suns: Vec::new(),
+        cubemap_probes: Vec::new(),
+        sun_material_slots: Vec::new(),
         detail_sprites: Vec::new(),
         map_skybox_detail_sprites: Vec::new(),
         overlays: Vec::new(),
@@ -360,9 +380,11 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
                 start: 256.0,
                 end: 2048.0,
                 max_density: 0.75,
+                radial: false,
             }),
             sky_camera: None,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 4,
                 displacement_count: 1,
                 entity_count: 2,
@@ -372,6 +394,7 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 1,
                 skybox_prop_count: 0,
@@ -410,6 +433,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
         PreviewContent::Map {
             scene,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,
@@ -419,6 +443,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -448,6 +473,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
         Vec::new(),
         Vec::new(),
         vec![MeshData {
+            geometry: crate::media::preview_model::MeshGeometry::Model,
             vertices: Vec::new(),
             indices: Vec::new(),
             material_index: 0,
@@ -460,6 +486,8 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
     );
     let scene = Arc::new(empty_map(Arc::clone(&render_scene)));
     let model_scene = Arc::new(ModelPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         scene: render_scene,
         skin_tables: vec![vec![0]],
         bodygroups: Vec::new(),
@@ -469,6 +497,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
         PreviewContent::Map {
             scene,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,
@@ -478,6 +507,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -511,6 +541,8 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Model(Arc::new(ModelPreview {
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             scene: blank_scene(),
             skin_tables: vec![vec![0], vec![0]],
             bodygroups: vec![3],

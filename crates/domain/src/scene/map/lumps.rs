@@ -52,6 +52,10 @@ impl MapEntity {
 
 pub(super) struct MapBsp {
     pub(super) vertices: Vec<Vec3>,
+    pub(super) vertex_normals: Vec<Vec3>,
+    pub(super) vertex_normal_indices: Vec<u16>,
+    pub(super) face_normal_offsets: Vec<usize>,
+    pub(super) displacement_normals: Vec<super::frames::DisplacementNormalGrid>,
     pub(super) planes: Vec<Plane>,
     pub(super) edges: Vec<[u16; 2]>,
     pub(super) surfedges: Vec<i32>,
@@ -61,28 +65,31 @@ pub(super) struct MapBsp {
     pub(super) texdata_strings: Vec<String>,
     pub(super) models: Vec<BspModel>,
     pub(super) brushes: Vec<Brush>,
+    pub(super) physics: Vec<u8>,
     pub(super) brush_sides: Vec<BrushSide>,
     pub(super) nodes: Vec<Node>,
     pub(super) leaves: Vec<Leaf>,
+    pub(super) leaf_water_data: Vec<bsp::LeafWaterData>,
     pub(super) leaf_faces: Vec<u16>,
     pub(super) leaf_brushes: Vec<u16>,
     pub(super) displacements: Vec<DispInfo>,
     pub(super) displacement_verts: Vec<DispVert>,
     pub(super) lighting: Vec<ColorRgbExp>,
     pub(super) lighting_hdr: Vec<ColorRgbExp>,
+    pub(super) world_lights: Result<Vec<bsp::WorldLight>, bsp::WorldLightError>,
+    pub(super) world_lights_hdr: Result<Vec<bsp::WorldLight>, bsp::WorldLightError>,
     pub(super) leaf_ambient_lighting: Vec<LeafAmbientSample>,
     pub(super) leaf_ambient_lighting_hdr: Vec<LeafAmbientSample>,
     pub(super) leaf_ambient_indices: Vec<LeafAmbientIndex>,
     pub(super) leaf_ambient_indices_hdr: Vec<LeafAmbientIndex>,
     pub(super) overlays: Vec<Overlay>,
+    pub(super) overlay_fades: Vec<bsp::OverlayFade>,
     pub(super) entities: Vec<MapEntity>,
     pub(super) visibility: Option<Visibility<'static>>,
     pub(super) static_props: Option<StaticProps>,
     pub(super) detail_props: Option<DetailProps>,
-    /// The raw pakfile lump bytes; parsed on demand via
-    /// [`ZipReader`](vformats::bsp::ZipReader)
-    /// (its reader borrows, so it cannot be stored on `Self`).
-    pub(super) pakfile_bytes: Vec<u8>,
+    pub(super) cubemap_samples: Vec<bsp::CubemapSample>,
+    pub(super) pakfile_bytes: std::sync::Arc<[u8]>,
 }
 
 impl MapBsp {
@@ -96,7 +103,16 @@ impl MapBsp {
 
         let raw_len = |id: usize| bsp.lump(id).map_or(0, <[u8]>::len);
         let use_ldr_lightmap = raw_len(ids::LIGHTING) > 0;
-        let want_lighting_hdr = !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0;
+        let hdr_faces = raw_len(ids::FACES_HDR) > 0;
+        let want_lighting_hdr = !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0 && hdr_faces;
+        if !use_ldr_lightmap && raw_len(ids::LIGHTING_HDR) > 0 && !hdr_faces {
+            log::warn!("map HDR lighting ignored: matching HDR face records are missing");
+        }
+        if want_lighting_hdr {
+            log::warn!(
+                "map HDR-only lightmaps use a display fallback until HDR exposure and targets are supported"
+            );
+        }
         let ldr_ambient =
             raw_len(ids::LEAF_AMBIENT_LIGHTING) > 0 && raw_len(ids::LEAF_AMBIENT_INDEX) > 0;
         let want_ambient_hdr = !ldr_ambient
@@ -120,33 +136,41 @@ impl MapBsp {
         decode_lumps! {
             entities = bsp.entities(limits);
             visibility = bsp.visibility(limits);
-            faces = bsp.faces(limits);
+            faces = if want_lighting_hdr { bsp.faces_hdr(limits) } else { bsp.faces(limits) };
             edges = bsp.edges(limits);
             surfedges = bsp.surfedges(limits);
             vertices = bsp.vertices(limits);
+            vertex_normals = bsp.vertex_normals(limits);
+            vertex_normal_indices = bsp.vertex_normal_indices(limits);
             planes = bsp.planes(limits);
             texinfos = bsp.texinfos(limits);
             texdatas = bsp.texdatas(limits);
             texdata_strings = bsp.texdata_strings(limits);
             models = bsp.models(limits);
             brushes = bsp.brushes(limits);
+            physics = bsp.lump_data(29, limits).map(Cow::into_owned);
             brush_sides = bsp.brush_sides(limits);
             nodes = bsp.nodes(limits);
             leaves = bsp.leafs(limits);
+            leaf_water_data = bsp.leaf_water_data(limits);
             leaf_faces = bsp.leaf_faces(limits);
             leaf_brushes = bsp.leaf_brushes(limits);
             displacements = bsp.displacement_infos(limits);
             displacement_verts = bsp.displacement_verts(limits);
             lighting = if use_ldr_lightmap { bsp.lighting(limits) } else { Ok(Vec::new()) };
             lighting_hdr = if want_lighting_hdr { bsp.lighting_hdr(limits) } else { Ok(Vec::new()) };
+            world_lights = bsp.world_lights(limits);
+            world_lights_hdr = bsp.world_lights_hdr(limits);
             leaf_ambient_lighting = if ldr_ambient { bsp.leaf_ambient_lighting(limits) } else { Ok(Vec::new()) };
             leaf_ambient_indices = if ldr_ambient { bsp.leaf_ambient_indices(limits) } else { Ok(Vec::new()) };
             leaf_ambient_lighting_hdr = if want_ambient_hdr { bsp.leaf_ambient_lighting_hdr(limits) } else { Ok(Vec::new()) };
             leaf_ambient_indices_hdr = if want_ambient_hdr { bsp.leaf_ambient_indices_hdr(limits) } else { Ok(Vec::new()) };
             overlays = bsp.overlays(limits);
+            overlay_fades = bsp.overlay_fades(limits);
             static_props = bsp.static_props(limits);
             detail_props = bsp.detail_props(limits);
-            pakfile_bytes = Ok::<_, BspError>(bsp.lump(ids::PAKFILE).unwrap_or_default().to_vec());
+            cubemap_samples = bsp.cubemap_samples(limits);
+            pakfile_bytes = Ok::<_, BspError>(std::sync::Arc::from(bsp.lump(ids::PAKFILE).unwrap_or_default()));
         }
 
         let entities = entities
@@ -161,9 +185,19 @@ impl MapBsp {
         let edges = edges.map_err(decode_error)?;
         let surfedges = surfedges.map_err(decode_error)?;
         let vertices = vertices.map_err(decode_error)?;
-        discard_faces_with_invalid_vertices(&mut faces, &surfedges, &edges, vertices.len());
 
-        Ok(Self {
+        let mut normal_offset = 0_usize;
+        let face_normal_offsets = faces
+            .iter()
+            .map(|face| {
+                let offset = normal_offset;
+                normal_offset =
+                    normal_offset.saturating_add(usize::try_from(face.edge_count).unwrap_or(0));
+                offset
+            })
+            .collect();
+        discard_faces_with_invalid_vertices(&mut faces, &surfedges, &edges, vertices.len());
+        let mut result = Self {
             planes: planes.map_err(decode_error)?,
             texinfos: texinfos.map_err(decode_error)?,
             texdatas: texdatas.map_err(decode_error)?,
@@ -174,30 +208,57 @@ impl MapBsp {
                 .collect(),
             models: models.map_err(decode_error)?,
             brushes: brushes.map_err(decode_error)?,
+            physics: physics.map_err(decode_error)?,
             brush_sides: brush_sides.map_err(decode_error)?,
             nodes: nodes.map_err(decode_error)?,
             leaves: leaves.map_err(decode_error)?,
+            leaf_water_data: leaf_water_data.map_err(decode_error)?,
             leaf_faces: leaf_faces.map_err(decode_error)?,
             leaf_brushes: leaf_brushes.map_err(decode_error)?,
             displacements: displacements.map_err(decode_error)?,
             displacement_verts: displacement_verts.map_err(decode_error)?,
             lighting: lighting.map_err(decode_error)?,
             lighting_hdr: lighting_hdr.map_err(decode_error)?,
+            world_lights,
+            world_lights_hdr,
             leaf_ambient_lighting: leaf_ambient_lighting.map_err(decode_error)?,
             leaf_ambient_lighting_hdr: leaf_ambient_lighting_hdr.map_err(decode_error)?,
             leaf_ambient_indices: leaf_ambient_indices.map_err(decode_error)?,
             leaf_ambient_indices_hdr: leaf_ambient_indices_hdr.map_err(decode_error)?,
             overlays: overlays.map_err(decode_error)?,
+            overlay_fades: overlay_fades.map_err(decode_error)?,
             static_props: static_props.map_err(decode_error)?,
             detail_props: detail_props.map_err(decode_error)?,
+            cubemap_samples: cubemap_samples.map_err(decode_error)?,
             vertices: vertices.into_iter().map(Vec3::from).collect(),
+            vertex_normals: vertex_normals
+                .map_err(decode_error)?
+                .into_iter()
+                .map(Vec3::from)
+                .collect(),
+            vertex_normal_indices: vertex_normal_indices.map_err(decode_error)?,
+            face_normal_offsets,
+            displacement_normals: Vec::new(),
             faces,
             edges,
             surfedges,
             entities,
             visibility,
             pakfile_bytes: pakfile_bytes.map_err(pakfile_error)?,
-        })
+        };
+        if normal_offset != result.vertex_normal_indices.len()
+            || (normal_offset > 0 && result.vertex_normals.is_empty())
+            || result
+                .vertex_normal_indices
+                .iter()
+                .any(|&index| usize::from(index) >= result.vertex_normals.len())
+        {
+            log::warn!(
+                "map compiled corner-normal data incomplete; missing entries use authored plane normals"
+            );
+        }
+        result.displacement_normals = super::frames::displacement_normals(&result)?;
+        Ok(result)
     }
 
     pub(super) fn face(&self, index: usize) -> Option<&Face> {

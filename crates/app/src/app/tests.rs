@@ -2316,6 +2316,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
     )
     .expect("fixture archive should load");
     preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "lua/autorun/init.lua".to_owned(),
@@ -2323,6 +2324,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
         size_bytes: 12,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -2560,5 +2562,26 @@ fn selected_interface_language_updates_workshop_query_language_at_runtime() {
         !app.environment
             .ctx
             .set_workshop_language(WorkshopLanguage::English)
+    );
+}
+
+#[test]
+fn captured_map_escape_releases_mouse_without_requesting_modal_close() {
+    let message = super::map_mouse_capture_shortcut(
+        &keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::default(),
+    );
+    assert!(matches!(
+        message,
+        Some(RootMessage::FilePreview(
+            file_preview::Message::MouseCaptureRequested(false)
+        ))
+    ));
+    assert!(
+        super::map_mouse_capture_shortcut(
+            &keyboard::Key::Character("v".into()),
+            keyboard::Modifiers::default()
+        )
+        .is_none()
     );
 }

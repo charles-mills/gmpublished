@@ -15,6 +15,24 @@ impl App {
 
     fn run_file_preview_effect(&mut self, effect: file_preview::Effect) -> Task<RootMessage> {
         match effect {
+            file_preview::Effect::MouseCaptureChanged { captured, epoch } => {
+                let Some(id) = self.window_id else {
+                    return Task::done(RootMessage::FilePreview(
+                        file_preview::Message::MouseCaptureFailed(epoch),
+                    ));
+                };
+                iced::window::capture_cursor(id, captured).map(move |result| {
+                    if let Err(error) = result {
+                        log::warn!("Failed to change map mouse capture: {error}");
+                        if captured {
+                            return RootMessage::FilePreview(
+                                file_preview::Message::MouseCaptureFailed(epoch),
+                            );
+                        }
+                    }
+                    RootMessage::Noop
+                })
+            }
             file_preview::Effect::ModalCloseRequested => self.file_preview_close_finished_task(),
             file_preview::Effect::LoadRequested(request) => self.file_preview_load_task(request),
             file_preview::Effect::ExtractRequested { entry_path } => self
@@ -71,6 +89,9 @@ impl App {
                     gmod_dir,
                     app.cpu_executor(),
                     &mut |stage| {
+                        if request.cancellation.is_cancelled() {
+                            return;
+                        }
                         let _ = send_root_message(
                             &mut stage_output,
                             RootMessage::FilePreview(file_preview::Message::LoadStageChanged(
@@ -79,6 +100,9 @@ impl App {
                         );
                     },
                 );
+                if request.cancellation.is_cancelled() {
+                    return;
+                }
                 let _ = send_root_message(
                     &mut output,
                     RootMessage::FilePreview(file_preview::Message::Loaded(

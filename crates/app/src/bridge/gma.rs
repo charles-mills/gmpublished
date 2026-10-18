@@ -211,7 +211,6 @@ pub struct PreviewEntry {
     data_offset: u64,
 }
 
-/// The view is shared for cloning, but does not participate in archive identity or equality.
 #[derive(Clone)]
 pub struct PreviewArchive {
     gma: GmaFile,
@@ -237,6 +236,22 @@ impl PartialEq for PreviewArchive {
 impl Eq for PreviewArchive {}
 
 impl PreviewArchive {
+    pub(crate) fn index_cost_with_limits(
+        &self,
+        limits: vformats::ArchiveIndexLimits,
+    ) -> Result<vformats::ArchiveIndexCost, GmaError> {
+        let mut cost = self.view.index_cost_with_limits(limits)?;
+        let entry_bytes = std::mem::size_of::<gmpublished_backend::GmaIndexedEntry>()
+            + std::mem::size_of::<PreviewEntry>()
+            + std::mem::size_of::<String>();
+        cost.record_bytes = cost
+            .record_bytes
+            .saturating_add((cost.entries as u64).saturating_mul(entry_bytes as u64));
+        cost.string_bytes = cost.string_bytes.saturating_mul(2);
+        limits.check(cost).map_err(GmaError::IndexLimit)?;
+        Ok(cost)
+    }
+
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, GmaError> {
         Self::open_with_workshop_id(path, None)
     }
@@ -300,6 +315,32 @@ impl PreviewArchive {
             .binary_search_by(|entry| entry.path.as_str().cmp(path))
             .map(|index| &self.entries[index])
             .map_err(|_| GmaError::EntryNotFound)
+    }
+
+    pub(crate) fn texture_source_unchanged(&self) -> std::io::Result<bool> {
+        self.view.source_unchanged()
+    }
+    pub(crate) fn entry_range(
+        &self,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, GmaError> {
+        let entry = self.entry(path)?;
+        if range.start > range.end || range.end > entry.size {
+            return Err(GmaError::FormatError);
+        }
+        let offset = entry
+            .data_offset
+            .checked_add(range.start)
+            .ok_or(GmaError::FormatError)?;
+        self.view
+            .read_payload_bytes(offset, range.end - range.start)
+    }
+
+    pub(crate) fn entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, GmaError> {
+        let entry = self.entry(path)?;
+        self.view
+            .read_payload_bytes(entry.data_offset, entry.size.min(max_bytes as u64))
     }
 
     pub(crate) fn entry_bytes(&self, entry_path: &str) -> Result<Vec<u8>, GmaError> {
@@ -432,7 +473,6 @@ pub struct FixtureGmaFile {
 
 #[cfg(test)]
 fn preview_archive_from_fixture(gma: FixtureGmaFile) -> Result<PreviewArchive, GmaError> {
-    // Use real archive bytes so this fixture also exercises unsafe-path filtering.
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"GMAD");
     bytes.push(gma.header.version);

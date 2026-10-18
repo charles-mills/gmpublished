@@ -17,12 +17,14 @@ use iced::widget::image as iced_image;
 use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
 
-use crate::bridge::materials::{MaterialResolver, RenderMode, ResolvedMaterialTextures};
+use crate::bridge::materials::{
+    MaterialResolution, MaterialResolver, RenderMode, ResolvedMaterialTextures,
+};
 use crate::media::preview_model::{
     DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot, ModelPreview, ModelStats,
-    OverlayPrimitive, OverlayVertex, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot,
-    ParticlePreview, ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError,
-    PreviewLoadStage, PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
+    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot, ParticlePreview,
+    ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage,
+    PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
 };
 use crate::theme::Tokens;
 
@@ -30,13 +32,16 @@ mod map_preview;
 mod materials;
 mod routing;
 mod syntax;
+mod texture_preparation;
+use texture_preparation::TexturePreparationResources;
+pub use texture_preparation::{MapTextureResidency, TextureResourcePolicy};
 
 #[cfg(test)]
 use crate::media::preview_model::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
 #[cfg(test)]
 use map_preview::{
-    LoadedPropModel, LoadedPropPhysics, MaterialTable, PropBakeSkipStats, PropModelAsset,
-    PropPlacementLighting, PropSunLighting, StaticPropLightingInputs,
+    LegacyPropLightingFallback, LoadedPropModel, LoadedPropPhysics, MaterialTable,
+    PropBakeSkipStats, PropModelAsset, PropSunLighting, StaticPropLightingInputs,
     bake_map_doors_with_prop_model_loader, bake_prop_placement, bake_static_props,
     bake_static_props_with_loaded_model_cache, bake_static_props_with_loader,
     bake_static_props_with_loader_serial, map_preview_data_with_prop_model_loader,
@@ -66,14 +71,10 @@ const FONT_TOO_LARGE_BYTES: usize = 8 * 1024 * 1024;
 const AUDIO_TOO_LARGE_BYTES: usize = 64 * 1024 * 1024;
 const MAP_TOO_LARGE_BYTES: usize = gmpublished_domain::scene::map::MAX_BSP_BYTES;
 const PARTICLE_TOO_LARGE_BYTES: usize = 16 * 1024 * 1024;
-const MAP_TEXTURE_DECODE_BUDGET_BYTES: usize = 1024 * 1024 * 1024;
-const MAP_TEXTURE_MAX_DIMENSION: u32 = 512;
-const MAP_FALLBACK_TEXTURE_DIMENSION: u32 = MAP_TEXTURE_MAX_DIMENSION;
 const MAP_PROP_PLACEMENT_CAP: usize = 65_536;
 const MAP_PROP_TRIANGLE_CAP: usize = 7_000_000;
 const PHY_DEBUG_TRIANGLE_CAP: usize = 1_000_000;
 const MAP_DETAIL_SPRITE_PLACEMENT_CAP: usize = 65_536;
-const SKYBOX_FACE_DIMENSION_CAP: u32 = 2048;
 const PHY_DEBUG_VERTEX_COLOR: Vec3 = Vec3::new(0.5, 0.5, 0.5);
 
 pub fn load_preview(
@@ -83,7 +84,9 @@ pub fn load_preview(
     cpu: &gmpublished_backend::CpuExecutor,
     on_stage: &mut (dyn FnMut(PreviewLoadStage) + Send),
 ) -> Result<PreviewData, PreviewLoadError> {
+    request.cancellation.check()?;
     cpu.install(|| {
+        request.cancellation.check()?;
         catch_preview_build_result(request, || {
             load_preview_data(
                 request.clone(),
@@ -118,14 +121,16 @@ fn load_preview_data(
             PreviewClass::Model
         }
     };
-    on_stage(initial_load_stage(entry_class));
+    emit_checked_stage(&request, initial_load_stage(entry_class), on_stage)?;
+    request.cancellation.check()?;
     let bytes = request.archive.entry_bytes(&request.entry_path)?;
+    request.cancellation.check()?;
     // Loose-folder CRCs are zero; hash the bytes to distinguish same-size files.
     if request.crc32 == 0 {
         request.crc32 = crc32fast::hash(&bytes);
     }
 
-    Ok(preview_data_from_bytes_with_stages(
+    preview_data_from_bytes_with_stages(
         &request,
         &bytes,
         tokens,
@@ -133,7 +138,17 @@ fn load_preview_data(
         entry_class,
         map_pool,
         on_stage,
-    ))
+    )
+}
+
+fn emit_checked_stage(
+    request: &PreviewRequest,
+    stage: PreviewLoadStage,
+    emit: &mut dyn FnMut(PreviewLoadStage),
+) -> Result<(), crate::preparation::Cancelled> {
+    request.cancellation.check()?;
+    emit(stage);
+    request.cancellation.check()
 }
 
 const fn initial_load_stage(entry_class: PreviewClass) -> PreviewLoadStage {
@@ -157,6 +172,7 @@ fn catch_preview_build_result(
         .unwrap_or_else(|| Ok(info_preview_data(request, InfoReason::DecodeFailed)))
 }
 
+#[cfg(test)]
 fn catch_preview_build_data(
     request: &PreviewRequest,
     build: impl FnOnce() -> PreviewData,
@@ -203,6 +219,7 @@ pub fn preview_data_from_bytes(
             None,
             &mut |_| {},
         )
+        .expect("test preview remains active")
     })
 }
 
@@ -214,8 +231,8 @@ fn preview_data_from_bytes_with_stages(
     entry_class: PreviewClass,
     map_pool: Option<&rayon::ThreadPool>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
-) -> PreviewData {
-    catch_preview_build_data(request, || {
+) -> Result<PreviewData, PreviewLoadError> {
+    catch_preview_build_result(request, || {
         preview_data_from_bytes_inner(
             request,
             bytes,
@@ -236,20 +253,22 @@ fn preview_data_from_bytes_inner(
     entry_class: PreviewClass,
     map_pool: Option<&rayon::ThreadPool>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
-) -> PreviewData {
+) -> Result<PreviewData, PreviewLoadError> {
+    request.cancellation.check()?;
     let mut data = match entry_class {
         PreviewClass::Code { syntax } => code_preview_data(request, bytes, syntax, tokens),
         PreviewClass::Image(ImageClass::Encoded) => encoded_image_preview_data(request, bytes),
         PreviewClass::Image(ImageClass::Vtf) => vtf_preview_data(request, bytes),
         PreviewClass::Font => font_preview_data(request, bytes, tokens),
         PreviewClass::Audio => audio_preview_data(request, bytes),
-        PreviewClass::Model => model_preview_data(request, bytes, gmod_dir),
-        PreviewClass::Map => map_preview_data(request, bytes, gmod_dir, map_pool, emit_stage),
-        PreviewClass::Particle => particle_preview_data(request, bytes, gmod_dir, emit_stage),
+        PreviewClass::Model => model_preview_data(request, bytes, gmod_dir)?,
+        PreviewClass::Map => map_preview_data(request, bytes, gmod_dir, map_pool, emit_stage)?,
+        PreviewClass::Particle => particle_preview_data(request, bytes, gmod_dir, emit_stage)?,
         PreviewClass::Info => info_preview_data(request, InfoReason::Binary),
     };
+    request.cancellation.check()?;
     data.related_preview = related_preview_target(request, bytes);
-    data
+    Ok(data)
 }
 
 fn code_preview_data(
@@ -459,12 +478,13 @@ fn particle_preview_data(
     bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
     emit_stage: &mut dyn FnMut(PreviewLoadStage),
-) -> PreviewData {
+) -> Result<PreviewData, PreviewLoadError> {
+    request.cancellation.check()?;
     use gmpublished_domain::particles::ParticleEngine;
     use gmpublished_domain::scene::pcf;
 
     if !request.bypass_size_limits && bytes.len() > PARTICLE_TOO_LARGE_BYTES {
-        return info_preview_data(request, InfoReason::TooLarge);
+        return Ok(info_preview_data(request, InfoReason::TooLarge));
     }
     let file = match pcf::parse_pcf(bytes) {
         Ok(file) => file,
@@ -473,14 +493,15 @@ fn particle_preview_data(
                 "file preview particle parse failed for {}: {error}",
                 request.entry_path
             );
-            return info_preview_data(request, InfoReason::DecodeFailed);
+            return Ok(info_preview_data(request, InfoReason::DecodeFailed));
         }
     };
     if file.systems.is_empty() {
-        return info_preview_data(request, InfoReason::DecodeFailed);
+        return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     }
 
     let systems: Vec<ParticleSystemInfo> = (0..file.systems.len())
+        .take_while(|_| !request.cancellation.is_cancelled())
         .filter_map(|index| {
             let engine = ParticleEngine::new(&file, index, 0)?;
             Some(ParticleSystemInfo {
@@ -491,10 +512,10 @@ fn particle_preview_data(
         })
         .collect();
     if systems.is_empty() {
-        return info_preview_data(request, InfoReason::DecodeFailed);
+        return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     }
 
-    emit_stage(PreviewLoadStage::ResolvingMaterials);
+    emit_checked_stage(request, PreviewLoadStage::ResolvingMaterials, emit_stage)?;
     let mut material_names: Vec<String> = file
         .systems
         .iter()
@@ -505,116 +526,153 @@ fn particle_preview_data(
     material_names.sort();
     material_names.dedup();
 
-    let resolver =
-        MaterialResolver::new(request.archive.clone(), gmod_dir).with_bc_textures_disabled();
+    let preparation = TexturePreparationResources::for_archive_cancellable(
+        request.archive.clone(),
+        gmod_dir,
+        &TextureResourcePolicy::default(),
+        request.cancellation.clone(),
+    )?;
+    let resolver = preparation.resolver.with_bc_textures_disabled();
     let materials = material_names
         .into_iter()
         .map(|name| {
-            let resolved = resolver.resolve_primary(&[], &name);
-            let sheet = resolved
-                .as_ref()
-                .and_then(|_| particle_sprite_sheet(&resolver, &name));
-            ParticleMaterialSlot {
-                name,
-                texture: resolved
-                    .as_ref()
-                    .map(|material| Arc::clone(&material.texture)),
-                additive: resolved
-                    .as_ref()
-                    .is_some_and(|material| material.render_mode == RenderMode::Additive),
-                sheet,
-            }
+            request.cancellation.check()?;
+            Ok(resolve_particle_material(&resolver, name))
         })
-        .collect();
+        .collect::<Result<Vec<_>, crate::preparation::Cancelled>>()?;
 
-    PreviewData::from_request(
+    request.cancellation.check()?;
+    Ok(PreviewData::from_request(
         request,
         PreviewContent::Particle(Arc::new(ParticlePreview {
             file,
             systems,
             materials,
+            sheet_stats: preparation.sheet_budget.stats(),
+            source_discovery: resolver.source_discovery_stats().clone(),
         })),
-    )
+    ))
 }
 
-fn particle_sprite_sheet(
-    resolver: &MaterialResolver,
-    material: &str,
-) -> Option<Arc<vformats::vtf::SpriteSheet>> {
-    let vmt_bytes = resolver.entry_bytes(&format!("materials/{material}.vmt"))?;
-    let vmt_text = String::from_utf8_lossy(&vmt_bytes);
-    let document = vformats::vmt::parse(&vmt_text, &vformats::Limits::default()).ok()?;
-    let base = document.basetexture()?;
-    let vtf_bytes = resolver.entry_bytes(&format!("materials/{base}.vtf"))?;
-    let texture = vformats::vtf::parse(&vtf_bytes, &vformats::Limits::default()).ok()?;
-    texture
-        .sprite_sheet(&vformats::Limits::default())
-        .map(Arc::new)
+fn resolve_particle_material(resolver: &MaterialResolver, name: String) -> ParticleMaterialSlot {
+    let resolved = resolver.resolve_primary(&[], &name);
+    let resolution = resolved.outcome();
+    let material = resolved.material();
+    let (sheet, sheet_error) = material
+        .filter(|material| material.render_mode.draws())
+        .map_or((None, None), |_| {
+            match resolver.resolve_particle_sprite_sheet(&name) {
+                Ok(sheet) => (sheet, None),
+                Err(error) => {
+                    log::debug!("particle sheet {name}: {error}");
+                    (None, Some(error))
+                }
+            }
+        });
+    ParticleMaterialSlot {
+        name,
+        resolution,
+        texture: material.and_then(|material| material.texture.as_ref().map(Arc::clone)),
+        additive: material.is_some_and(|material| material.render_mode == RenderMode::Additive),
+        sheet,
+        sheet_error,
+    }
 }
 
 fn model_preview_data(
     request: &PreviewRequest,
     mdl_bytes: &[u8],
     gmod_dir: Option<std::path::PathBuf>,
-) -> PreviewData {
+) -> Result<PreviewData, PreviewLoadError> {
+    request.cancellation.check()?;
     let Some(stem) = entry_stem(&request.entry_path) else {
-        return info_preview_data(request, InfoReason::DecodeFailed);
+        return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     };
     let Some((vvd_bytes, vtx_bytes)) = load_model_companions(stem, "file preview model", |path| {
+        request.cancellation.check().ok()?;
         request.archive.entry_bytes(path).ok()
     }) else {
-        return info_preview_data(request, InfoReason::DecodeFailed);
+        return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     };
 
+    request.cancellation.check()?;
     let Some(model) = load_model_catching_panic(
         &format!("model {}", request.entry_path),
         mdl_bytes,
         &vvd_bytes,
         &vtx_bytes,
     ) else {
-        return info_preview_data(request, InfoReason::DecodeFailed);
+        return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     };
 
-    let resolver = MaterialResolver::new(request.archive.clone(), gmod_dir);
-    let mut resolved_material_count = 0_u32;
+    let resolver = TexturePreparationResources::for_archive_cancellable(
+        request.archive.clone(),
+        gmod_dir,
+        &TextureResourcePolicy::default(),
+        request.cancellation.clone(),
+    )?
+    .resolver;
     let mut materials = model
         .material_names
         .iter()
         .map(|name| {
+            request.cancellation.check()?;
             let resolved = resolver.resolve_primary(&model.material_dirs, name);
             let texture = resolved
-                .as_ref()
-                .map(|material| Arc::clone(&material.texture));
-            if texture.is_some() {
-                resolved_material_count = resolved_material_count.saturating_add(1);
-            }
-            MaterialSlot {
+                .material()
+                .and_then(|material| material.texture.as_ref().map(Arc::clone));
+            Ok(MaterialSlot {
+                resolution: resolved.outcome(),
+                canonical_name: resolved.canonical_name().map(str::to_owned),
+                shader: resolved
+                    .material()
+                    .map_or_else(Default::default, |material| material.shader.clone()),
                 name: name.clone(),
                 texture,
-                texture2: None,
-                force_opaque: resolved
-                    .as_ref()
-                    .is_none_or(|material| material.force_opaque),
+                texture2: resolved
+                    .material()
+                    .and_then(|material| material.texture2.as_ref().map(Arc::clone)),
                 render_mode: resolved
-                    .as_ref()
+                    .material()
                     .map_or(RenderMode::Opaque, |material| material.render_mode),
-            }
+                alpha_policy: resolved
+                    .material()
+                    .map_or(RenderMode::Opaque, |material| material.render_mode)
+                    .texture_alpha_policy(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, crate::preparation::Cancelled>>()?;
+    let resolved_material_count = u32::try_from(
+        materials
+            .iter()
+            .filter(|slot| slot.has_resolved_base())
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
     let phy_debug_meshes = model_phy_debug_mesh(stem, &resolver, materials.len());
     if phy_debug_meshes.is_some() {
         materials.push(MaterialSlot {
+            resolution: Default::default(),
+            canonical_name: None,
+            shader: Default::default(),
             name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,
-            force_opaque: false,
             render_mode: RenderMode::Translucent,
+            alpha_policy: RenderMode::Translucent.texture_alpha_policy(),
         });
     }
 
-    PreviewData::from_request(
+    request.cancellation.check()?;
+    let (model_animations, model_animation_issues) =
+        crate::media::preview_model::model_preview_animations(&model, &request.entry_path);
+    let (bounds_min, bounds_max) = crate::media::preview_model::animation_local_bounds(&model)
+        .unwrap_or((model.bounds_min, model.bounds_max));
+    Ok(PreviewData::from_request(
         request,
         PreviewContent::Model(std::sync::Arc::new(ModelPreview {
+            model_animations,
+            model_animation_issues,
             scene: std::sync::Arc::new(RenderScene {
                 stats: ModelStats {
                     bone_count: model.bone_count,
@@ -628,13 +686,13 @@ fn model_preview_data(
                 meshes: model.meshes,
                 materials,
                 phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
-                bounds_min: model.bounds_min,
-                bounds_max: model.bounds_max,
+                bounds_min,
+                bounds_max,
             }),
             skin_tables: model.skin_tables,
             bodygroups: model.bodygroups,
         })),
-    )
+    ))
 }
 
 fn load_model_companions(
@@ -676,14 +734,37 @@ fn model_phy_debug_mesh(
     builder.finish(material_index)
 }
 
+const SOURCE_MODEL_ASSEMBLY: vformats::mdl::ModelAssemblyOptions =
+    vformats::mdl::ModelAssemblyOptions {
+        vertex_compression: vformats::mdl::VertexCompression::SourceUbyte4,
+    };
+
 fn load_model_catching_panic(
     context: &str,
     mdl_bytes: &[u8],
     vvd_bytes: &[u8],
     vtx_bytes: &[u8],
 ) -> Option<ModelData> {
+    load_model_catching_panic_with_options(
+        context,
+        mdl_bytes,
+        vvd_bytes,
+        vtx_bytes,
+        SOURCE_MODEL_ASSEMBLY,
+    )
+}
+
+fn load_model_catching_panic_with_options(
+    context: &str,
+    mdl_bytes: &[u8],
+    vvd_bytes: &[u8],
+    vtx_bytes: &[u8],
+    options: vformats::mdl::ModelAssemblyOptions,
+) -> Option<ModelData> {
     match catch_asset_decode(context, || {
-        gmpublished_domain::scene::model::load_model(mdl_bytes, vvd_bytes, vtx_bytes)
+        gmpublished_domain::scene::model::load_model_with_options(
+            mdl_bytes, vvd_bytes, vtx_bytes, options,
+        )
     }) {
         Some(Ok(model)) => Some(ModelData::from(model)),
         Some(Err(error)) => {

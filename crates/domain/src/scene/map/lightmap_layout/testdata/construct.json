@@ -1,0 +1,17 @@
+{
+  "format": "SLL1",
+  "map": "gm_construct",
+  "face_count": 9460,
+  "physical_page_count": 19,
+  "profile": [
+    512,
+    256
+  ],
+  "bsp_sha256": "4d1c027f2b93fa9100bcc4cb08b1dfdda437cadf4cf7d01d4b515dc2caa5a6a2",
+  "oracle_sha256": "30e0ff176c74aec782223cd13bfd54b20c593de4e31b7b570826289834ac0ccb",
+  "fixture_sha256": "ac329412e755479dff50426081e8dfa22212e965ef3b2e061cec4998b3744777",
+  "engine_sha256": "72528485332ebfb8de4afd5e3a07b09b42e4e44fd659f063d31803a05731fa16",
+  "module_sha256": "e251a9005099ed11700a6add6791ffa178c019d04a650cb9bb61d8ce90792f24",
+  "inputs": "BSP texdata order, raw face extents/flags/styles; native canonical material and effective lightmap requirements.",
+  "expected": "Native signed lightmap page identity for every BSP face."
+}

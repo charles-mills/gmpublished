@@ -565,7 +565,6 @@ fn model_preview<'a>(
 ) -> Element<'a, Message> {
     let tokens = *ctx.tokens;
     let viewer = || {
-        // Content-addressed: reopening the same entry reuses the GPU upload.
         let skin_remap = model
             .skin_tables
             .get(state.selected_skin())
@@ -573,7 +572,11 @@ fn model_preview<'a>(
             .unwrap_or_default();
         container(
             iced::widget::shader(super::viewer3d::Viewer3d {
+                cpu_executor: ctx.cpu_executor.cloned(),
                 model: std::sync::Arc::clone(model),
+                render_feedback: std::sync::Arc::clone(
+                    state.render_feedback().expect("model render feedback"),
+                ),
                 content_id: data.content_id(),
                 skin_remap,
                 bodygroup_choices: state.bodygroup_choices().to_vec(),
@@ -599,7 +602,7 @@ fn model_preview<'a>(
             scrollable(
                 column![
                     model_selectors(state, model, ctx),
-                    model_inspector_rows(data, model, ctx)
+                    model_inspector_rows(state, data, model, ctx)
                 ]
                 .spacing(tokens.spacing.gap_sm),
             )
@@ -735,7 +738,28 @@ fn selector_row<'a>(
     .into()
 }
 
+fn gpu_status_warning<'a>(state: &State, ctx: ViewCtx<'a>) -> Option<Element<'a, Message>> {
+    use super::viewer3d::feedback::RenderStatus;
+    let key = match state.render_status() {
+        Some(
+            RenderStatus::Ready { unavailable_images }
+            | RenderStatus::Retiring { unavailable_images },
+        ) if unavailable_images > 0 => "file-preview-gpu-textures-unavailable",
+        Some(RenderStatus::Rejected { .. } | RenderStatus::RetirementTimedOut) => {
+            "file-preview-gpu-rejected"
+        }
+        _ => return None,
+    };
+    Some(
+        text(ctx.i18n.tr(key))
+            .size(ctx.tokens.typography.body)
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .into(),
+    )
+}
+
 fn model_inspector_rows<'a>(
+    state: &State,
     data: &'a PreviewData,
     model: &'a ModelPreview,
     ctx: ViewCtx<'a>,
@@ -744,7 +768,7 @@ fn model_inspector_rows<'a>(
     let i18n = ctx.i18n;
     let stats = model.scene.stats;
     let material_status = material_status_text(stats.resolved_material_count, stats.material_count);
-    let rows = column![
+    let mut rows = column![
         info_row(
             i18n.tr("file-preview-path"),
             data.entry_path.as_str(),
@@ -805,6 +829,59 @@ fn model_inspector_rows<'a>(
     ]
     .spacing(tokens.spacing.gap_sm)
     .width(Length::Fill);
+
+    if let Some(warning) = gpu_status_warning(state, ctx) {
+        rows = rows.push(warning);
+    }
+
+    if !model.model_animation_issues.is_empty() {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-animation-unavailable"),
+            count_text(u32::try_from(model.model_animation_issues.len()).unwrap_or(u32::MAX)),
+            &tokens,
+        ));
+    }
+
+    if model.scene.materials.iter().any(|slot| {
+        matches!(
+            slot.resolution,
+            crate::bridge::materials::MaterialResolutionOutcome::SourceUnavailable
+                | crate::bridge::materials::MaterialResolutionOutcome::IndexUnavailable
+        ) || slot
+            .texture
+            .iter()
+            .chain(slot.texture2.iter())
+            .any(|texture| {
+                texture.load_outcome()
+                    == crate::bridge::materials::TextureLoadOutcome::SourceUnavailable
+            })
+    }) {
+        rows = rows.push(
+            text(i18n.tr("file-preview-map-content-sources-unavailable"))
+                .size(tokens.typography.body)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    let budget_rejections = model
+        .scene
+        .materials
+        .iter()
+        .flat_map(|slot| slot.texture.iter().chain(slot.texture2.iter()))
+        .filter(|texture| {
+            matches!(
+                texture.load_outcome(),
+                crate::bridge::materials::TextureLoadOutcome::QualityRejected
+                    | crate::bridge::materials::TextureLoadOutcome::SourceBudgetRejected
+            )
+        })
+        .count();
+    if budget_rejections != 0 {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-map-texture-budget-rejections"),
+            budget_rejections.to_string(),
+            &tokens,
+        ));
+    }
 
     rows.into()
 }
@@ -946,7 +1023,7 @@ fn particle_inspector_rows<'a>(
     let resolved = preview
         .materials
         .iter()
-        .filter(|slot| slot.texture.is_some())
+        .filter(|slot| slot.texture.is_some() && !slot.is_unavailable())
         .count();
     let mut rows = column![
         info_row(
@@ -972,6 +1049,14 @@ fn particle_inspector_rows<'a>(
     ]
     .spacing(tokens.spacing.gap_sm)
     .width(Length::Fill);
+
+    if preview.has_unavailable_content() {
+        rows = rows.push(
+            text(i18n.tr("file-preview-map-content-sources-unavailable"))
+                .size(tokens.typography.body)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
 
     if let Some(coverage) = preview
         .systems
@@ -1072,6 +1157,8 @@ fn map_preview<'a>(
     let viewer = || {
         let viewer = container(
             iced::widget::shader(super::viewer3d::FlyViewer {
+                cpu_executor: ctx.cpu_executor.cloned(),
+                render_feedback: state.render_feedback().cloned().unwrap_or_default(),
                 scene: std::sync::Arc::clone(map.scene),
                 content_id: data.content_id(),
                 fog: map.fog,
@@ -1084,6 +1171,7 @@ fn map_preview<'a>(
                 pose: state.fly_pose(),
                 movement_mode: state.fly_movement_mode(),
                 requested_movement_mode: state.requested_movement_mode(),
+                mouse_captured: state.mouse_captured(),
             })
             .width(Length::Fill)
             .height(Length::Fill),
@@ -1111,7 +1199,7 @@ fn map_preview<'a>(
                             .wrapping(text::Wrapping::WordOrGlyph),
                     )
                     .width(Length::Fill),
-                    map_inspector_rows(state, data, map.stats, ctx)
+                    map_inspector_rows(state, data, map, ctx)
                 ]
                 .spacing(tokens.spacing.gap_sm),
             )
@@ -1201,7 +1289,7 @@ fn map_viewer_with_overlays<'a>(
             .height(Length::Fill)
             .into();
     }
-    if scene_supports_walk(map.scene) {
+    if !state.mouse_captured() && scene_supports_walk(map.scene) {
         let active_mode = active_movement_mode(state, map.spawn);
         layered = iced::widget::stack![layered, mode_pill_overlay(active_mode, ctx)]
             .width(Length::Fill)
@@ -1357,13 +1445,68 @@ fn format_fly_speed(speed: f32) -> String {
 fn map_inspector_rows<'a>(
     state: &'a State,
     data: &'a PreviewData,
-    stats: MapStats,
+    map: MapPreviewParts<'a>,
     ctx: ViewCtx<'a>,
 ) -> Element<'a, Message> {
+    let stats = map.stats;
     let tokens = *ctx.tokens;
     let i18n = ctx.i18n;
     let material_status = material_status_text(stats.resolved_material_count, stats.material_count);
     let mut rows = column![].spacing(tokens.spacing.gap_sm).width(Length::Fill);
+    rows = rows.push(
+        checkbox(map.scene.texture_preparation.max_dimension.is_some())
+            .label(i18n.tr("file-preview-map-reduced-textures"))
+            .on_toggle(Message::MapReducedTextureDetailToggled)
+            .text_size(tokens.typography.body)
+            .style(move |_, status| theme::styles::checkbox(&tokens, status)),
+    );
+    let preparation = &map.scene.texture_preparation;
+    if !map.scene.model_animation_issues.is_empty() {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-animation-unavailable"),
+            count_text(u32::try_from(map.scene.model_animation_issues.len()).unwrap_or(u32::MAX)),
+            &tokens,
+        ));
+    }
+    if let Some(warning) = gpu_status_warning(state, ctx) {
+        rows = rows.push(warning);
+    }
+    if preparation.archive_indexes.rejected_archives != 0 {
+        rows = rows.push(
+            text(i18n.tr("file-preview-map-archive-index-rejected"))
+                .size(tokens.typography.body)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    if !preparation.source_discovery.failures.is_empty() {
+        rows = rows.push(
+            text(i18n.tr("file-preview-map-content-sources-unavailable"))
+                .size(tokens.typography.body)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    let rejected = preparation.source_rejections + preparation.resident_rejections;
+    if rejected != 0 {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-map-texture-budget-rejections"),
+            count_text(u32::try_from(rejected).unwrap_or(u32::MAX)),
+            &tokens,
+        ));
+    }
+    if stats.skipped_prop_count != 0 {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-map-skipped-props"),
+            count_text(stats.skipped_prop_count),
+            &tokens,
+        ));
+    }
+    if stats.invalid_detail_leaves != 0 {
+        rows = rows.push(info_row(
+            i18n.tr("file-preview-map-invalid-detail-leaves"),
+            count_text(stats.invalid_detail_leaves),
+            &tokens,
+        ));
+    }
     if state.map_visibility_control_visible() {
         rows = rows.push(
             checkbox(state.map_visibility_enabled())
@@ -1542,6 +1685,7 @@ fn capture_file_preview_display_fixtures() {
     )
     .unwrap();
     let request = PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::INITIAL,
         archive: Arc::new(PreviewArchiveSource::Gma(Arc::new(archive))),
         entry_path: "lua/radio/client.lua".into(),
@@ -1549,6 +1693,7 @@ fn capture_file_preview_display_fixtures() {
         size_bytes: 2048,
         crc32: 1234,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     };
     let mut state = State::default();
     let request = state.begin_open(request);

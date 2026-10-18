@@ -148,7 +148,7 @@ impl App {
             }
             window::Event::Unfocused => {
                 self.state.set_window_focused(false);
-                Task::none()
+                self.apply_file_preview_message(file_preview::Message::MouseCaptureRequested(false))
             }
             // Resize layout runs natively; an async reposition would arrive a frame late.
             window::Event::Closed

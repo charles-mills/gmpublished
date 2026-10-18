@@ -70,6 +70,8 @@ impl OrbitPose {
 #[derive(Debug)]
 pub struct State {
     open: bool,
+    mouse_captured: bool,
+    mouse_capture_epoch: Generation,
     expanded: bool,
     load: LoadState,
     request_id: Generation,
@@ -90,8 +92,6 @@ enum LoadState {
     Failed(PreviewLoadError),
 }
 
-/// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
-/// along +X so two-point effects (beams, tracers) are visible immediately.
 const fn default_particle_control_points() -> [Vec3; MAX_CONTROL_POINTS] {
     let mut points = [Vec3::splat(0.0); MAX_CONTROL_POINTS];
     let mut index = 1;
@@ -128,6 +128,7 @@ struct AudioUiState {
 
 #[derive(Debug, Default)]
 struct ModelUiState {
+    render_feedback: std::sync::Arc<super::viewer3d::feedback::RenderFeedback>,
     selected_skin: usize,
     bodygroup_choices: Vec<usize>,
     orbit_pose: Option<OrbitPose>,
@@ -137,6 +138,7 @@ struct ModelUiState {
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct MapUiState {
+    render_feedback: std::sync::Arc<super::viewer3d::feedback::RenderFeedback>,
     fog_enabled: bool,
     skybox_enabled: bool,
     visibility_enabled: bool,
@@ -170,6 +172,7 @@ impl Default for AudioUiState {
 impl Default for MapUiState {
     fn default() -> Self {
         Self {
+            render_feedback: Default::default(),
             fog_enabled: true,
             skybox_enabled: true,
             visibility_enabled: true,
@@ -218,6 +221,7 @@ impl ContentUiState {
                 ..AudioUiState::default()
             }),
             PreviewContent::Model(model) => Self::Model(ModelUiState {
+                render_feedback: Default::default(),
                 bodygroup_choices: vec![0; model.bodygroups.len()],
                 ..ModelUiState::default()
             }),
@@ -250,6 +254,8 @@ impl Default for State {
     fn default() -> Self {
         Self {
             open: false,
+            mouse_captured: false,
+            mouse_capture_epoch: Generation::INITIAL,
             expanded: false,
             load: LoadState::Idle,
             request_id: Generation::INITIAL,
@@ -265,9 +271,38 @@ impl Default for State {
     }
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        if let Some(request) = &self.request {
+            request.cancellation.cancel();
+        }
+    }
+}
+
 impl State {
     pub(crate) const fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub(crate) const fn mouse_captured(&self) -> bool {
+        self.mouse_captured
+    }
+
+    pub(super) const fn mouse_capture_epoch(&self) -> Generation {
+        self.mouse_capture_epoch
+    }
+
+    pub(super) fn set_mouse_captured(&mut self, captured: bool) {
+        let captured = captured
+            && self.open
+            && matches!(
+                self.current().map(|data| &data.content),
+                Some(PreviewContent::Map { .. })
+            );
+        if self.mouse_captured != captured {
+            self.mouse_captured = captured;
+            self.mouse_capture_epoch.bump();
+        }
     }
 
     pub(crate) const fn expanded(&self) -> bool {
@@ -347,7 +382,6 @@ impl State {
         }
     }
 
-    /// Only loaded audio has a playback identity; ignore callbacks while a request is loading.
     pub(crate) fn current_audio_request_id(&self) -> Option<Generation> {
         matches!(
             self.current().map(|data| &data.content),
@@ -370,6 +404,7 @@ impl State {
         let archive = &self.request.as_ref()?.archive;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {
+            cancellation: Default::default(),
             request_id: Generation::INITIAL,
             archive: std::sync::Arc::clone(archive),
             entry_path: entry.path.to_owned(),
@@ -381,6 +416,7 @@ impl State {
             size_bytes: entry.size,
             crc32: entry.crc32,
             bypass_size_limits: false,
+            map_texture_quality: Default::default(),
         })
     }
 
@@ -390,7 +426,41 @@ impl State {
         Some(request)
     }
 
+    pub(crate) fn reload_map_texture_quality(&mut self, reduced: bool) -> Option<PreviewRequest> {
+        use crate::media::preview_model::MapTextureQuality;
+        if !matches!(self.current()?.content, PreviewContent::Map { .. }) {
+            return None;
+        }
+        let mut request = self.request.as_ref()?.clone();
+        let quality = if reduced {
+            MapTextureQuality::Reduced
+        } else {
+            MapTextureQuality::Native
+        };
+        if request.map_texture_quality == quality {
+            return None;
+        }
+        self.set_mouse_captured(false);
+        request.cancellation.cancel();
+        request.cancellation = Default::default();
+        self.request_id.bump();
+        request.request_id = self.request_id;
+        request.map_texture_quality = quality;
+        if let ContentUiState::Map(map) = &mut self.content_ui {
+            map.render_feedback = Default::default();
+        }
+        self.request = Some(request.clone());
+        self.load = LoadState::Loading { stage: None };
+        self.spinner.stop();
+        Some(request)
+    }
+
     pub(crate) fn begin_open(&mut self, mut request: PreviewRequest) -> PreviewRequest {
+        if let Some(previous) = &self.request {
+            previous.cancellation.cancel();
+        }
+        request.cancellation = Default::default();
+        self.set_mouse_captured(false);
         self.request_id.bump();
         request.request_id = self.request_id;
         self.open = true;
@@ -404,6 +474,41 @@ impl State {
 
     pub(crate) const fn spinner_visible(&self) -> bool {
         self.open && self.loading()
+    }
+
+    pub(crate) fn render_feedback(
+        &self,
+    ) -> Option<&std::sync::Arc<super::viewer3d::feedback::RenderFeedback>> {
+        match &self.content_ui {
+            ContentUiState::Map(map) => Some(&map.render_feedback),
+            ContentUiState::Model(model) => Some(&model.render_feedback),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn render_status(&self) -> Option<super::viewer3d::feedback::RenderStatus> {
+        match &self.content_ui {
+            ContentUiState::Map(map) => Some(map.render_feedback.snapshot()),
+            ContentUiState::Model(model) => Some(model.render_feedback.snapshot()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn render_feedback_subscription(&self) -> iced::Subscription<super::Message> {
+        if !self.open {
+            return iced::Subscription::none();
+        }
+        self.render_feedback()
+            .map_or_else(iced::Subscription::none, |feedback| {
+                super::viewer3d::feedback::subscription(
+                    std::sync::Arc::clone(feedback),
+                    self.request_id,
+                )
+            })
+    }
+
+    pub(super) fn accepts_render_feedback(&self, generation: Generation) -> bool {
+        self.open && self.request_id == generation
     }
 
     pub(crate) fn spinner_elapsed(&self) -> f32 {
@@ -791,6 +896,7 @@ impl State {
     }
 
     pub(super) fn toggle_expanded(&mut self) {
+        self.set_mouse_captured(false);
         if self.open {
             self.expanded = !self.expanded;
         }
@@ -831,8 +937,12 @@ impl State {
     }
 
     pub(crate) fn close(&mut self) {
+        self.set_mouse_captured(false);
         if !self.open && !self.loading() && self.current().is_none() && self.request.is_none() {
             return;
+        }
+        if let Some(request) = &self.request {
+            request.cancellation.cancel();
         }
         self.request_id.bump();
         self.open = false;

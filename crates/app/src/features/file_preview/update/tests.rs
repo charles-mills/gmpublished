@@ -23,6 +23,7 @@ fn request_for(entry_path: &str) -> crate::media::preview_model::PreviewRequest 
     .expect("fixture archive should load");
 
     crate::media::preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: entry_path.to_owned(),
@@ -34,6 +35,7 @@ fn request_for(entry_path: &str) -> crate::media::preview_model::PreviewRequest 
         size_bytes: 3,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -52,6 +54,7 @@ fn request_from_archive(
     crc32: u32,
 ) -> crate::media::preview_model::PreviewRequest {
     crate::media::preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: PreviewArchiveSource::from_gma(archive),
         entry_path: entry_path.to_owned(),
@@ -63,6 +66,7 @@ fn request_from_archive(
         size_bytes,
         crc32,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -502,4 +506,276 @@ fn inspector_ratio_clamps_to_layout_and_survives_modal_close() {
 
     let _effects = update(&mut state, Message::CloseFinished);
     assert!((state.inspector_ratio() - 0.58).abs() < f32::EPSILON);
+}
+
+fn loaded_map_state() -> State {
+    use crate::media::preview_model::{MapPreview, MapStats, ModelStats, RenderScene};
+    let mut state = State::default();
+    let request = state.begin_open(map_request());
+    let scene = Arc::new(MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
+        surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
+        scene: Arc::new(RenderScene {
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            phy_debug_meshes: Vec::new(),
+            stats: ModelStats {
+                bone_count: 0,
+                sequence_count: 0,
+                vertex_count: 0,
+                triangle_count: 0,
+                mesh_count: 0,
+                material_count: 0,
+                resolved_material_count: 0,
+            },
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::splat(1024.0),
+        }),
+        water_volumes: None,
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
+        mesh_visibility: Vec::new(),
+        map_skybox_meshes: Vec::new(),
+        model_lighting: Vec::new(),
+        model_lighting_inputs: None,
+        lightmap: None,
+        skybox: None,
+        suns: Vec::new(),
+        cubemap_probes: Vec::new(),
+        sun_material_slots: Vec::new(),
+        detail_sprites: Vec::new(),
+        map_skybox_detail_sprites: Vec::new(),
+        overlays: Vec::new(),
+        map_skybox_overlays: Vec::new(),
+        doors: Vec::new(),
+        visibility: None,
+        walk_collision: None,
+    });
+    let data = PreviewData::from_request(
+        &request,
+        PreviewContent::Map {
+            scene,
+            fog: None,
+            sky_camera: None,
+            spawn: None,
+            stats: MapStats {
+                lightmap: Default::default(),
+                face_count: 0,
+                displacement_count: 0,
+                entity_count: 0,
+                material_count: 0,
+                resolved_material_count: 0,
+                static_prop_count: 0,
+                placed_prop_count: 0,
+                skipped_prop_count: 0,
+                detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
+                overlay_count: 0,
+                skybox_face_count: 0,
+                skybox_prop_count: 0,
+                skybox_detail_sprite_count: 0,
+                skybox_overlay_count: 0,
+                cluster_count: 0,
+                version: 20,
+            },
+        },
+    );
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    state
+}
+
+#[test]
+fn texture_quality_reload_preserves_map_view_and_rejects_stale_completion() {
+    use crate::features::file_preview::state::{FlyPose, MovementMode};
+    use crate::media::preview_model::MapTextureQuality;
+    let mut state = loaded_map_state();
+    let old_request = state.request().unwrap().clone();
+    let old_data = state.current().unwrap().clone();
+    let pose = FlyPose {
+        position: Vec3::new(12.0, 24.0, 36.0),
+        yaw: 0.4,
+        pitch: -0.2,
+        speed: 2.0,
+    };
+    state.set_fly_camera(pose, MovementMode::Fly);
+    state.set_map_fog_enabled(false);
+    let effects = update(&mut state, Message::MapReducedTextureDetailToggled(true));
+    let [Effect::LoadRequested(request)] = effects.as_slice() else {
+        panic!("expected one reload")
+    };
+    assert_eq!(request.map_texture_quality, MapTextureQuality::Reduced);
+    assert_ne!(request.request_id, old_request.request_id);
+    assert_eq!(request.archive, old_request.archive);
+    assert_eq!(state.fly_pose(), Some(pose));
+    assert!(!state.map_fog_enabled());
+    assert!(!state.apply_loaded(old_request.request_id, Ok(old_data.clone())));
+    assert!(state.apply_loaded(request.request_id, Ok(old_data)));
+    assert!(update(&mut state, Message::MapReducedTextureDetailToggled(true)).is_empty());
+    assert!(
+        matches!(update(&mut state, Message::MapReducedTextureDetailToggled(false)).as_slice(),
+        [Effect::LoadRequested(request)] if request.map_texture_quality == MapTextureQuality::Native)
+    );
+    assert_eq!(state.fly_pose(), Some(pose));
+}
+
+#[test]
+fn render_feedback_notifications_are_generation_scoped_across_reload() {
+    use crate::features::file_preview::viewer3d::feedback::RenderStatus;
+    let mut state = loaded_map_state();
+    assert!(state.render_feedback().is_some());
+    let old_feedback = Arc::clone(state.render_feedback().unwrap());
+    old_feedback.set(RenderStatus::Ready {
+        unavailable_images: 3,
+    });
+    update(
+        &mut state,
+        Message::AnimationTick(std::time::Instant::now()),
+    );
+    assert!(state.render_feedback().is_some());
+    assert_eq!(
+        state.render_status(),
+        Some(RenderStatus::Ready {
+            unavailable_images: 3
+        })
+    );
+    let effects = update(&mut state, Message::MapReducedTextureDetailToggled(true));
+    let [Effect::LoadRequested(request)] = effects.as_slice() else {
+        panic!("expected reload")
+    };
+    let data = loaded_map_state().current().unwrap().clone();
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    assert!(state.accepts_render_feedback(request.request_id));
+    assert!(!state.accepts_render_feedback(Generation::INITIAL));
+    old_feedback.set(RenderStatus::Rejected {
+        reason: "old scene".to_owned(),
+    });
+    update(
+        &mut state,
+        Message::AnimationTick(std::time::Instant::now()),
+    );
+    assert_eq!(state.render_status(), Some(RenderStatus::Pending));
+    assert!(state.render_feedback().is_some());
+    state.render_feedback().unwrap().set(RenderStatus::Ready {
+        unavailable_images: 0,
+    });
+    update(
+        &mut state,
+        Message::AnimationTick(std::time::Instant::now()),
+    );
+    assert!(state.render_feedback().is_some());
+}
+
+#[test]
+fn mouse_capture_only_accepts_loaded_maps_and_escape_keeps_preview_open() {
+    let mut state = State::default();
+    assert!(update(&mut state, Message::MouseCaptureRequested(true)).is_empty());
+    state.begin_open(map_request());
+    assert!(update(&mut state, Message::MouseCaptureRequested(true)).is_empty());
+    let mut state = loaded_map_state();
+    let effects = update(&mut state, Message::MouseCaptureRequested(true));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MouseCaptureChanged { captured: true, .. }]
+    ));
+    assert!(state.mouse_captured());
+    assert!(update(&mut state, Message::MouseCaptureRequested(true)).is_empty());
+    let effects = update(&mut state, Message::MouseCaptureRequested(false));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MouseCaptureChanged {
+            captured: false,
+            ..
+        }]
+    ));
+    assert!(!state.mouse_captured());
+    assert!(state.is_open());
+    assert!(state.current().is_some());
+}
+
+#[test]
+fn mouse_capture_releases_when_preview_closes_changes_or_resizes() {
+    for message in [
+        Message::BackRequested,
+        Message::CloseFinished,
+        Message::OpenRequested(request()),
+        Message::ExpandToggled,
+    ] {
+        let mut state = loaded_map_state();
+        update(&mut state, Message::MouseCaptureRequested(true));
+        let effects = update(&mut state, message);
+        assert!(!state.mouse_captured());
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::MouseCaptureChanged {
+                captured: false,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn mouse_capture_failure_releases_input_and_stale_failures_are_ignored() {
+    let mut state = loaded_map_state();
+    update(&mut state, Message::MouseCaptureRequested(true));
+    let stale_epoch = state.mouse_capture_epoch();
+    update(&mut state, Message::MouseCaptureRequested(false));
+    update(&mut state, Message::MouseCaptureRequested(true));
+    assert!(update(&mut state, Message::MouseCaptureFailed(stale_epoch)).is_empty());
+    assert!(state.mouse_captured());
+    let epoch = state.mouse_capture_epoch();
+    let effects = update(&mut state, Message::MouseCaptureFailed(epoch));
+    assert!(!state.mouse_captured());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::MouseCaptureChanged {
+            captured: false,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn replaced_and_closed_preview_requests_cancel_work_without_cancelling_clones_on_drop() {
+    let mut state = State::default();
+    let first = state.begin_open(model_request());
+    let temporary = first.clone();
+    drop(temporary);
+    assert!(!first.cancellation.is_cancelled());
+    let second = state.begin_open(request_for("particles/test.pcf"));
+    assert!(first.cancellation.is_cancelled());
+    assert!(!second.cancellation.is_cancelled());
+    state.close();
+    assert!(second.cancellation.is_cancelled());
+}
+
+#[test]
+fn dropping_preview_state_cancels_its_active_preparation() {
+    let mut state = State::default();
+    let active = state.begin_open(model_request());
+    drop(state);
+    assert!(active.cancellation.is_cancelled());
+}
+
+#[test]
+fn quality_reload_cancels_old_preparation_and_uses_an_independent_lifetime() {
+    let mut state = loaded_map_state();
+    let previous = state.request().unwrap().clone();
+    let effects = update(&mut state, Message::MapReducedTextureDetailToggled(true));
+    let [Effect::LoadRequested(next)] = effects.as_slice() else {
+        panic!("reload");
+    };
+    assert!(previous.cancellation.is_cancelled());
+    assert!(!next.cancellation.is_cancelled());
+    assert_ne!(previous.cancellation, next.cancellation);
+    state.close();
+    assert!(next.cancellation.is_cancelled());
 }

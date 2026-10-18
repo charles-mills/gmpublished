@@ -15,29 +15,60 @@ use vformats::{
     bsp::{
         self, Brush, BrushSide, BspModel, ColorRgbExp, DetailProp, DetailProps, DispInfo, DispVert,
         Face, Leaf, LeafAmbientIndex, LeafAmbientSample, Node, Overlay, Plane, StaticProp,
-        StaticProps, TexData, TexInfo, Visibility, ZipReader, contents_flags, texture_flags,
+        StaticProps, TexData, TexInfo, Visibility, ZipArchive, contents_flags, texture_flags,
     },
     keyvalues::KvValue,
 };
 
 use crate::scene::QAngle;
 
+mod asset;
+pub use asset::{MapAsset, decode_map, decode_map_with_pool};
+mod brushes;
+mod cubemaps;
 mod data;
+pub use data::{MapPropAnimation, MapPropRandomAnimation};
+mod decals;
+pub use decals::{
+    MapDecal, MapDecalDimensions, MapDecalPermanence, MapDecalPosition, MapSurfaceProjector,
+};
 mod doors;
 mod entities;
+mod frames;
 mod lighting;
+mod lightmap_layout;
+pub use lightmap_layout::{
+    SourceLightmapAllocation, SourceLightmapLayout, SourceLightmapLayoutError,
+    SourceLightmapMaterial, SourceLightmapPage, SourceLightmapPageProfile,
+    SourceLightmapRequirement, SourceLightmapSurface,
+};
+mod lighting_trace;
 mod lumps;
 mod mesh;
+mod overlays;
 mod pakfile;
 mod paths;
+mod physics;
 mod placements;
+mod projection;
+mod radiosity;
+mod sky;
+mod spatial;
 mod visibility;
 mod walk;
+mod water;
+mod world_lights;
+pub use water::{MapWaterBody, MapWaterSample, MapWaterVolumes};
+use world_lights::map_world_lighting;
+pub use world_lights::{MapLightStyleEntity, MapWorldLight, MapWorldLightSet, MapWorldLighting};
 
+pub use cubemaps::MapCubemapProbe;
 pub use data::{
-    MapBounds, MapData, MapMesh, MapMeshClusterRanges, MapMeshIndexRange, MapMeshVisibility,
-    MapPropSolid, MapPropVisibility, MapSkyboxPartitionStats, MapStatsRaw, MapVertex,
-    MapVisibilityBucket, StaticPropPlacement,
+    MapBounds, MapData, MapDisplacementProjection, MapLightmapStats, MapMesh, MapMeshClusterRanges,
+    MapMeshIndexRange, MapMeshSurfaceOwner, MapMeshVisibility, MapPropLeafMembership, MapPropSolid,
+    MapPropVisibility, MapReceiverMesh, MapSkyboxPartitionStats, MapStatsRaw, MapSurfaceOwner,
+    MapSurfaceOwnerId, MapSurfaceTextureProjection, MapVertex, MapVisibilityBucket,
+    StaticPropPlacement,
 };
 #[cfg(test)]
 use doors::linear_door_distance;
@@ -51,20 +82,21 @@ use entities::{
     parse_entity_i32, parse_entity_vec3, worldspawn_detail_material_name, worldspawn_skyname,
 };
 pub use lighting::{
-    AmbientCube, AmbientLightSource, LightmapAtlas, LightmapSource, MapAmbientLighting,
+    AmbientCube, AmbientLightSource, LIGHTMAP_PAGE_SIZE, LightmapPage, LightmapPageError,
+    LightmapPageId, LightmapSet, LightmapSource, MapAmbientLighting, MapAmbientSample,
     MapEnvironmentLighting, MapSunLighting,
 };
 #[cfg(test)]
 use lighting::{
-    AmbientSampleRange, MapAmbientSample, brush_lightmap_uv_from_transforms,
-    decode_ambient_sample_linear, decode_light_sample, decode_light_sample_linear,
-    pack_lightmap_blocks,
+    AmbientSampleRange, brush_lightmap_uv_from_transforms, decode_ambient_sample_linear,
+    decode_light_sample, decode_light_sample_linear,
 };
 use lighting::{
-    PendingLightmapBlock, bake_lightmap_atlas, brush_lightmap_uv, displacement_lightmap_uv,
+    PendingLightmapBlock, bake_lightmap_set, brush_lightmap_uv, displacement_lightmap_uv,
     extract_face_lightmap, map_ambient_lighting, map_environment_lighting,
     selected_lightmap_samples,
 };
+pub use lighting_trace::{MASK_OPAQUE, MapLightingCollision, MapLightingTrace};
 pub use lumps::{BrushIndex, ModelIndex};
 use lumps::{
     MapBsp, MapEntity, MapLeaf, MapNode, MapPlane, NodeChild, brush_indices_for_model, bsp_version,
@@ -78,26 +110,43 @@ use mesh::{
 use mesh::{
     DisplacementGridVertex, displacement_blend_alpha, fan_indices, tessellate_displacement_grid,
 };
+use overlays::partitioned_map_overlays;
+pub use overlays::{MapOverlay, MapSurfaceMarkSource};
+#[cfg(test)]
+use overlays::{OverlayBasis, overlay_quad_positions};
 use pakfile::pakfile_error;
 pub use pakfile::{MAX_PAKFILE_ENTRY_BYTES, MapPakFile, MapPakFileEntry};
 #[cfg(test)]
-use pakfile::{is_pakfile_entry_oversized, is_pakfile_retained_entry, normalize_pakfile_path};
+use pakfile::{is_pakfile_retained_entry, normalize_pakfile_path};
 use paths::{
     is_preview_material_visible, normalize_entity_prop_model_path, normalize_material_name,
     normalize_skyname, normalize_source_path, normalize_static_prop_model_path,
 };
-pub use placements::{MapDetailSprite, MapOverlay};
 #[cfg(test)]
-use placements::{OverlayBasis, overlay_quad_positions, parse_entity_prop_model_scale};
+use placements::parse_entity_prop_model_scale;
+pub use placements::{MapDetailSprite, MapLightingOriginReference};
 use placements::{
     partitioned_detail_sprite_placements, partitioned_entity_prop_placements,
-    partitioned_map_overlays, partitioned_static_prop_placements,
+    partitioned_static_prop_placements,
 };
-pub use visibility::MapVisibility;
+pub use projection::{MapSurfacePlane, MapSurfaceReceiver, MapSurfaceVertex};
+pub use radiosity::{
+    MapRadiosityDisplacement, MapRadiosityHit, MapRadiosityMaterialFlags, MapRadiosityStyles,
+    MapRadiositySurfaces, MapRadiosityTraceError,
+};
+pub use sky::{MapSkyPaint, MapSun};
+use sky::{map_sky_paint, map_suns};
+pub use vformats::bsp::OverlayFade as MapOverlayFade;
 use visibility::{
     FaceAttributions, MapFaceVisibility, PROP_AABB_MAX_DEPTH, PROP_AABB_MAX_EXTENT,
     PROP_AABB_MAX_LEAVES, SkyboxPartition, cluster_in_range, model_face_range,
     point_visibility_bucket,
+};
+pub use visibility::{
+    MapBoundsCullMask, MapBoundsCulling, MapBrushModelRendering, MapBrushSurfaceGroup,
+    MapDecalProjection, MapDisplacementRendering, MapPreparedBounds, MapVisibility,
+    MapWorldMaterialGroup, MapWorldSurfaceGroup, MapWorldSurfaceGroupRef, MapWorldSurfaceGroups,
+    MapWorldSurfaceRendering, MapWorldTraversal,
 };
 use walk::{
     BoundsBuilder, MapLeafLocator, SKYBOX_COMPLETION_AABB_EXPANSION,
@@ -105,8 +154,8 @@ use walk::{
     bounds_volume, bsp_world_bounds, expand_bounds,
 };
 pub use walk::{
-    ConvexHull, MapTrace, MapWalkCollision, MapWalkPropCollisionSource, MapWalkPropModel,
-    MapWalkPropModelPlacement, WaterVolume,
+    ConvexHull, MapBrushCollision, MapTrace, MapWalkCollision, MapWalkPropCollisionSource,
+    MapWalkPropModel, MapWalkPropModelPlacement, WaterVolume,
 };
 #[cfg(test)]
 use walk::{
@@ -130,6 +179,8 @@ pub enum BspError {
     UnsupportedVersion { version: u32 },
     #[error("BSP {item} exceeds the supported limit")]
     TooLarge { item: &'static str },
+    #[error("map material requirements have {actual} entries; expected {expected}")]
+    MaterialRequirementCount { expected: usize, actual: usize },
 }
 
 pub fn load_map(bytes: &[u8]) -> Result<MapData, BspError> {
@@ -152,16 +203,27 @@ fn load_map_impl(
     partition_skybox: bool,
     pool: Option<&rayon::ThreadPool>,
 ) -> Result<MapData, BspError> {
-    let version = bsp_version(bytes)?;
-    if !matches!(version, 19 | 20) {
-        return Err(BspError::UnsupportedVersion { version });
-    }
-
-    let limits = Limits {
-        max_input_bytes: u64::MAX,
-        ..Limits::default()
+    let asset = match pool {
+        Some(pool) => decode_map_with_pool(bytes, pool)?,
+        None => decode_map(bytes)?,
     };
-    let bsp = MapBsp::parse(bytes, &limits, pool)?;
+    match pool {
+        Some(pool) => pool.install(|| prepare_map(asset, partition_skybox, None)),
+        None => prepare_map(asset, partition_skybox, None),
+    }
+}
+
+fn prepare_map(
+    asset: MapAsset,
+    partition_skybox: bool,
+    lightmap_requirements: Option<&[SourceLightmapRequirement]>,
+) -> Result<MapData, BspError> {
+    let MapAsset {
+        bsp,
+        version,
+        pakfile,
+    } = asset;
+    let lighting_source = selected_lightmap_samples(&bsp).1;
     let mut stats = MapStatsRaw {
         face_count: count_to_u32(bsp.faces.len()),
         displacement_count: count_to_u32(bsp.displacements.len()),
@@ -175,9 +237,13 @@ fn load_map_impl(
         skybox_entity_prop_count: 0,
         cluster_count: bsp.cluster_count(),
         version,
+        lightmap: MapLightmapStats::default(),
+        invalid_detail_leaves: 0,
     };
     let player_start = info_player_start(&bsp.entities);
     let sky_camera = map_sky_camera(&bsp.entities);
+    let suns = map_suns(&bsp.entities);
+    let sky_paint = map_sky_paint(&bsp.entities, &suns);
     let mut skybox_partition = partition_skybox
         .then(|| SkyboxPartition::from_bsp(&bsp, player_start.as_ref(), sky_camera))
         .flatten()
@@ -190,11 +256,13 @@ fn load_map_impl(
             player_start.as_ref(),
         );
     }
-    let face_attributions = FaceAttributions::from_bsp(&bsp, &skybox_partition);
+    let mut face_attributions = FaceAttributions::from_bsp(&bsp, &skybox_partition);
+    let brush_instances = brushes::brush_instances(&bsp);
+    let brush_locator = MapLeafLocator::from_bsp(&bsp);
     let pending_doors = pending_map_doors(&bsp);
-    let door_model_indices = pending_doors
+    let door_entity_indices = pending_doors
         .iter()
-        .filter_map(PendingMapDoor::brush_model_index)
+        .filter_map(PendingMapDoor::brush_entity_index)
         .collect::<BTreeSet<_>>();
 
     let mut material_names = Vec::<String>::new();
@@ -203,19 +271,51 @@ fn load_map_impl(
     let mut door_builds = Vec::<PendingDoorBuild>::new();
     let mut lightmap_blocks = Vec::<PendingLightmapBlock>::new();
     let (lightmap_samples, lightmap_source) = selected_lightmap_samples(&bsp);
+    let lightmap_sample_ends = lighting::lightmap_sample_ends(
+        &bsp.faces,
+        lightmap_samples.map_or(0, <[ColorRgbExp]>::len),
+    );
 
     {
         let mut face_context = FaceAppendContext {
+            entity: false,
+            receiver_owner: MapSurfaceOwner::World,
+            receiver_solid: true,
+            transform: brushes::BrushTransform::default(),
             meshes: &mut meshes,
             material_names: &mut material_names,
             material_indexes: &mut material_indexes,
             lightmap_samples,
+            lightmap_requirements,
+            lightmap_sample_ends: &lightmap_sample_ends,
             lightmap_blocks: &mut lightmap_blocks,
+            lightmap_stats: &mut stats.lightmap,
         };
-        for (model_index, model) in bsp.models.iter().enumerate() {
-            if door_model_indices.contains(&ModelIndex::new(model_index)) {
+        for instance in &brush_instances {
+            if !instance.visible
+                || instance
+                    .entity_index
+                    .is_some_and(|index| door_entity_indices.contains(&index))
+            {
                 continue;
             }
+            let model = &bsp.models[instance.model_index.get()];
+            face_context.transform = instance.transform;
+            face_context.entity = instance.model_index.get() != 0;
+            face_context.receiver_owner =
+                instance
+                    .entity_index
+                    .map_or(MapSurfaceOwner::World, |entity_index| {
+                        MapSurfaceOwner::Brush {
+                            entity_index,
+                            model_index: instance.model_index,
+                            origin: instance.transform.origin,
+                            angles: instance.transform.angles,
+                        }
+                    });
+            face_context.receiver_solid = instance.solid;
+            let attribution = (instance.model_index.get() != 0)
+                .then(|| instance.attribution(&bsp, &brush_locator, &skybox_partition));
             let Some(face_range) = model_face_range(model, bsp.faces.len()) else {
                 continue;
             };
@@ -223,21 +323,36 @@ fn load_map_impl(
                 let Some(face) = bsp.face(face_index) else {
                     continue;
                 };
+                let (partition, visibility) = attribution.clone().unwrap_or_else(|| {
+                    (
+                        face_attributions.partition(face_index),
+                        face_attributions.visibility(face_index),
+                    )
+                });
+                if attribution.is_some() {
+                    face_attributions.partitions[face_index] = partition;
+                    face_attributions.visibility[face_index] = visibility.clone();
+                }
                 append_face(
                     &bsp,
                     face,
                     face_index,
-                    face_attributions.partition(face_index),
-                    &face_attributions.visibility(face_index),
+                    partition,
+                    &visibility,
                     &mut face_context,
                 )?;
             }
         }
         for pending in pending_doors {
+            let instance = brush_instances
+                .iter()
+                .find(|instance| instance.entity_index == Some(pending.entity_index))
+                .copied();
             door_builds.push(extract_pending_door_meshes(
                 pending,
                 &bsp,
                 &face_attributions,
+                instance,
                 &mut face_context,
             )?);
         }
@@ -256,21 +371,24 @@ fn load_map_impl(
     static_props.append(&mut entity_props);
     skybox_static_props.append(&mut skybox_entity_props);
     let detail_material_name = worldspawn_detail_material_name(&bsp.entities);
-    let (detail_sprites, skybox_detail_sprites) =
-        partitioned_detail_sprite_placements(&bsp, &skybox_partition);
-    let (overlays, skybox_overlays) = partitioned_map_overlays(&bsp, &skybox_partition);
+    let details = partitioned_detail_sprite_placements(&bsp, &skybox_partition);
+    stats.invalid_detail_leaves = details.invalid_leaves;
+    let detail_sprites = details.world;
+    let skybox_detail_sprites = details.skybox;
     let ambient = map_ambient_lighting(&bsp);
+    let world_lighting = map_world_lighting(&bsp, lightmap_source, ambient.source());
     let environment_lighting = map_environment_lighting(&bsp.entities);
     let skyname = worldspawn_skyname(&bsp.entities);
     let fog = map_fog(&bsp.entities);
-    let lightmap = bake_lightmap_atlas(
+    let lightmap = bake_lightmap_set(
         meshes.iter_mut().chain(
             door_builds
                 .iter_mut()
                 .flat_map(|door| door.meshes.iter_mut()),
         ),
-        &lightmap_blocks,
+        lightmap_blocks,
         lightmap_source,
+        &bsp.entities,
     );
     let doors = door_builds
         .into_iter()
@@ -280,6 +398,7 @@ fn load_map_impl(
     let meshes = meshes
         .into_iter()
         .map(|mesh| MapMesh {
+            entity: mesh.entity,
             vertices: mesh
                 .vertices
                 .into_iter()
@@ -288,11 +407,13 @@ fn load_map_impl(
             indices: mesh.indices,
             material_index: mesh.material_index,
             visibility: mesh.visibility.into_map_visibility(),
+            surface_owners: mesh.surface_owners,
         })
         .collect::<Vec<_>>();
     let skybox_meshes = skybox_meshes
         .into_iter()
         .map(|mesh| MapMesh {
+            entity: mesh.entity,
             vertices: mesh
                 .vertices
                 .into_iter()
@@ -301,19 +422,29 @@ fn load_map_impl(
             indices: mesh.indices,
             material_index: mesh.material_index,
             visibility: mesh.visibility.into_map_visibility(),
+            surface_owners: mesh.surface_owners,
         })
         .collect::<Vec<_>>();
+    let projector = MapSurfaceProjector::new(&meshes, &skybox_meshes, &doors);
+    let (overlays, skybox_overlays) = partitioned_map_overlays(&bsp, &projector)?;
+    let visibility = MapVisibility::from_bsp(&bsp, projector.displacement_bounds());
+    let decals = decals::map_decals(&bsp, &projector, &doors, visibility.as_ref());
     let MapBounds {
         min: bounds_min,
         max: bounds_max,
     } = bounds_from_meshes(&meshes);
-    let visibility = MapVisibility::from_bsp(&bsp);
-    let door_brush_indices = door_model_indices
-        .iter()
-        .flat_map(|model_index| brush_indices_for_model(&bsp, *model_index))
-        .collect::<BTreeSet<_>>();
-    let walk_collision = MapWalkCollision::from_bsp_excluding(&bsp, &door_brush_indices);
-    let pakfile = MapPakFile::from_pak_bytes(bsp.pakfile_bytes);
+    let walk_collision =
+        MapWalkCollision::from_bsp_instances(&bsp, &brush_instances, &door_entity_indices);
+    let water_volumes = MapWaterVolumes::from_bsp(&bsp);
+    let lighting_collision = MapLightingCollision::from_bsp(&bsp);
+    let radiosity_surfaces = MapRadiositySurfaces::from_bsp(&bsp);
+    if let Some(volumes) = &water_volumes {
+        for body in volumes.bodies.iter().flatten() {
+            if !material_names.contains(&body.material_name) {
+                material_names.push(body.material_name.clone());
+            }
+        }
+    }
     let skybox_completion_bounds = skybox_partition.completion_bounds();
     let skybox_partition = MapSkyboxPartitionStats {
         sky_camera_present: skybox_partition.sky_camera_present(),
@@ -323,10 +454,17 @@ fn load_map_impl(
         ),
         static_prop_count: count_to_u32(skybox_static_props.len()),
         detail_sprite_count: count_to_u32(skybox_detail_sprites.len()),
-        overlay_count: count_to_u32(skybox_overlays.len()),
+        overlay_count: count_to_u32(
+            skybox_overlays
+                .iter()
+                .map(|overlay| overlay.source)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+        ),
     };
 
     Ok(MapData {
+        lighting_source,
         meshes,
         skybox_meshes,
         material_names,
@@ -337,11 +475,20 @@ fn load_map_impl(
         detail_sprites,
         skybox_detail_sprites,
         overlays,
+        decals,
         skybox_overlays,
         ambient,
+        world_lighting,
         environment_lighting,
         player_start,
         skyname,
+        sky_paint,
+        suns,
+        cubemap_probes: bsp
+            .cubemap_samples
+            .iter()
+            .map(MapCubemapProbe::from)
+            .collect(),
         fog,
         sky_camera,
         skybox_completion_bounds,
@@ -352,6 +499,9 @@ fn load_map_impl(
         skybox_partition,
         visibility,
         walk_collision,
+        water_volumes,
+        lighting_collision,
+        radiosity_surfaces,
         pakfile,
     })
 }

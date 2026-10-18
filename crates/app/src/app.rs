@@ -49,6 +49,7 @@ const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
 mod display;
 mod drag;
+
 mod hidden_addons;
 mod routes;
 pub mod runners;
@@ -1587,7 +1588,8 @@ impl App {
 
     pub(crate) fn view(&self) -> Element<'_, RootMessage> {
         let tokens = self.state.tokens;
-        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let now = Instant::now();
         let route_body: Element<'_, RootMessage> = container(crate::widgets::settle::settle(
             self.active_route_view(),
@@ -1782,7 +1784,9 @@ impl App {
         }
 
         // Capture shortcuts before a focused text input can consume them.
-        let shortcuts = if self.global_shortcuts_enabled() {
+        let shortcuts = if self.state.features.file_preview.mouse_captured() {
+            Some(map_mouse_capture_shortcut as _)
+        } else if self.global_shortcuts_enabled() {
             Some(map_global_shortcut as _)
         } else if self.settings_shortcut_should_close() {
             Some(map_settings_toggle_shortcut as _)
@@ -1793,7 +1797,8 @@ impl App {
     }
 
     fn active_route_view(&self) -> Element<'_, RootMessage> {
-        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let route = self.state.features.shell.route();
         let blocker = prerequisites::blocker_for(
             route,
@@ -2046,7 +2051,9 @@ impl App {
         );
         // The context menu owns Escape while visible. Global shortcuts are
         // handled by `shortcut_capture` before the widget tree sees them.
-        if !self.state.features.context_menu.visible() {
+        if !self.state.features.context_menu.visible()
+            && !self.state.features.file_preview.mouse_captured()
+        {
             streams.push(
                 modal_stack::subscription(&self.state.features.modal_stack)
                     .map(RootMessage::ModalStack),
@@ -2111,6 +2118,15 @@ fn addon_drag_cursor_overlay(
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+fn map_mouse_capture_shortcut(
+    key: &keyboard::Key,
+    _modifiers: keyboard::Modifiers,
+) -> Option<RootMessage> {
+    (*key == keyboard::Key::Named(keyboard::key::Named::Escape)).then_some(
+        RootMessage::FilePreview(file_preview::Message::MouseCaptureRequested(false)),
+    )
 }
 
 fn map_settings_toggle_shortcut(

@@ -1,38 +1,105 @@
 use gmpublished_domain::math::Vec3;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
+mod cubemap;
+mod decal_format;
+mod definition;
+use definition::MaterialDefinitionCache;
 mod discovery;
+mod frames;
+mod lightmap_layout;
+mod mirror;
+mod parameters;
+pub mod proxies;
+mod refract;
+use parameters::parse_material_color;
+pub use refract::RefractionMaterial;
+mod phong;
+mod profile;
+mod prop_lighting;
+mod radiosity;
+mod shader;
 mod sibling_gma;
+mod source_discovery;
+mod source_index;
+pub use source_discovery::{SourceDiscoveryFailure, SourceDiscoveryLimits, SourceDiscoveryStats};
+pub use source_index::ArchiveIndexStats;
+use source_index::SourceIndexBudget;
+mod sky;
+pub mod sprite_sheet;
+pub use sprite_sheet::{
+    DEFAULT_SPRITE_SHEET_FRAMES, DEFAULT_SPRITE_SHEET_METADATA_BYTES, SpriteSheetBudget,
+};
+mod surface;
 mod texture;
+mod texture_asset;
+mod texture_budget;
+pub use texture_budget::DecodedTextureBudget;
+mod reloadable;
+mod texture_plan;
+mod texture_source;
+use reloadable::TexturePage;
+mod page_cache;
+pub use page_cache::{
+    CachedTexturePage, PageCacheInitError, PageRetry, PageStatus, PageSubscription, PageTicket,
+    TexturePageCache,
+};
+pub use reloadable::{
+    ReloadableTextureSource, TextureFrameRequest, TexturePageCost, TexturePageIdentity,
+    TexturePageLimits, TextureSourceId,
+};
+mod texture_working;
+pub use texture_source::EncodedTextureBudget;
 
+pub use texture_working::TextureWorkingBudget;
+mod water;
+#[cfg(test)]
+pub use cubemap::ResolvedCubemap;
+pub use cubemap::{CubemapFailure, CubemapResolution};
+pub use cubemap::{EnvironmentMapMask, EnvironmentMapMaterial, EnvironmentMapSource};
+pub use decal_format::SourceDecalFormat;
+pub use lightmap_layout::ResolvedLightmapLayoutMaterial;
+pub use mirror::MirrorMaterial;
+pub use phong::{PhongMaterial, PhongTexture};
+pub use radiosity::ResolvedSurfaceLighting;
+pub use shader::MaterialShader;
+pub use sky::{PaintedSkyMaterial, SkyMaterial};
+#[cfg(test)]
+use surface::DecalParameters;
+#[cfg(test)]
+pub use surface::{AnimatedTexture, AnimationWrap};
+pub use surface::{
+    AnimationClock, AnimationError, FrameChannel, ModelShadingProfile, SourceSurfaceBaseBlend,
+    SurfaceFamily, SurfaceMaterial,
+};
+pub use water::{ScreenRefraction, WaterMaterial};
+
+pub use frames::{DecodedTextureFrames, TextureReadTransfer, TextureRole};
 pub use texture::decode_vtf_rgba;
-use texture::{
-    bc_supported, decode_vtf_rgba_max, downscale_resolved_texture, force_opaque_alpha,
-    push_matching_path, resolved_bc_texture, with_generated_mip_chain,
-};
+use texture::push_matching_path;
 #[cfg(test)]
-use texture::{
-    downscaled_texture_dimensions, drop_bc_mips_to_max_dimension, generate_srgb_mip_chain,
+use texture::resolved_bc_texture;
+pub use texture_asset::{
+    ResidentTexture, ResidentTextureLayer, ResidentTextureMip, TextureAssetError, TextureBytes,
+    TextureMetadata, TextureResidency, TextureResidentId, TextureStorage,
 };
+use texture_asset::{TextureAssetCache, TextureSourceError};
+pub use texture_plan::{TextureAdmissions, TextureRequestCost, TextureRequestPlan};
+
+use sibling_gma::{SiblingGmaIndex, SiblingGmaPath};
+#[cfg(test)]
+use sibling_gma::{SiblingGmaPathKind, build_sibling_gma_index};
 
 #[cfg(test)]
-use sibling_gma::SiblingGmaPathKind;
-use sibling_gma::{SiblingGmaIndex, SiblingGmaPath, build_sibling_gma_index};
-
+use discovery::discover_sibling_gma_paths;
 #[cfg(test)]
 use discovery::normalize_source_path;
-use discovery::{
-    discover_loose_source_dirs, discover_mounted_game_dirs, discover_sibling_gma_paths,
-    material_paths, normalize_texture_name, strip_prefix_ascii_case, texture_path,
-};
+use discovery::{material_paths, normalize_texture_name, strip_prefix_ascii_case, texture_path};
 
 use parking_lot::Mutex;
 
@@ -45,47 +112,66 @@ use vformats::vtf::BcFormat;
 use vformats::{Limits, soundscript};
 
 const PATCH_INCLUDE_LIMIT: usize = 4;
-const MAX_SIBLING_GMA_ARCHIVES: usize = 2048;
-const MAX_LEGACY_BIN_ENTRY_TABLE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LEGACY_BIN_FETCH_BYTES: u64 = 1024 * 1024 * 1024;
-/// Must match the shader's default water fog tint when a material omits $fogcolor.
 pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
-const GMA_MAGIC: &[u8; 4] = b"GMAD";
-/// Use gray for envmaps without a basetexture, matching Source's reflective-metal fallback.
 const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
+const NATIVE_ERROR_TEXTURE_FLAGS: u32 = 0x0008_0000;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedTexture {
-    payload: ResolvedTexturePayload,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    original_width: u32,
-    original_height: u32,
-    water_fallback: bool,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextureLoading {
+    #[default]
+    Resident,
+    OnDemand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureLoadOutcome {
+    Loaded,
+    Generated,
+    MissingSource,
+    InvalidSource,
+    InvalidPayload,
+    QualityRejected,
+    SourceBudgetRejected,
+    SourceUnavailable,
+    Unsupported,
+    Deferred,
+    Unplanned,
+}
+
+impl TextureLoadOutcome {
+    pub(crate) const fn is_unavailable(self) -> bool {
+        matches!(
+            self,
+            Self::QualityRejected
+                | Self::SourceBudgetRejected
+                | Self::SourceUnavailable
+                | Self::Unsupported
+                | Self::Deferred
+                | Self::Unplanned
+        )
+    }
+
+    const fn uses_native_error_texture(self) -> bool {
+        matches!(
+            self,
+            Self::MissingSource | Self::InvalidSource | Self::InvalidPayload
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResolvedTexturePayload {
-    Rgba {
-        rgba: Vec<u8>,
-        mip_chain: Vec<ResolvedTextureMip>,
-    },
-    Bc {
-        format: BcFormat,
-        mips: Vec<ResolvedBcMip>,
-    },
+pub struct ResolvedTexture {
+    resident: TextureResidency,
+    source_metadata: Option<Arc<TextureMetadata>>,
+    mapping_dimensions: Option<[u32; 2]>,
+    load_outcome: TextureLoadOutcome,
+    water_fallback: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTextureMip {
     pub(crate) rgba: Vec<u8>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedBcMip {
-    pub(crate) data: Vec<u8>,
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
@@ -106,187 +192,394 @@ impl ResolvedTexture {
         original_height: u32,
         water_fallback: bool,
     ) -> Self {
-        Self {
-            payload: ResolvedTexturePayload::Rgba {
+        let resident = texture_asset::generated_rgba(
+            "material-fallback",
+            None,
+            vec![vec![ResolvedTextureMip {
                 rgba,
-                mip_chain: Vec::new(),
-            },
-            width,
-            height,
-            original_width,
-            original_height,
+                width,
+                height,
+            }]],
+        )
+        .expect("generated material image has valid dimensions");
+        let source_metadata =
+            if [original_width, original_height] == resident.metadata().original_dimensions {
+                resident.metadata_arc()
+            } else {
+                let mut metadata = resident.metadata().clone();
+                metadata.original_dimensions = [original_width, original_height];
+                Arc::new(metadata)
+            };
+        Self {
+            resident: TextureResidency::Resident(resident),
+            source_metadata: Some(source_metadata),
+            mapping_dimensions: (!water_fallback).then_some([original_width, original_height]),
+            load_outcome: TextureLoadOutcome::Generated,
             water_fallback,
         }
     }
 
-    fn bc(
-        format: BcFormat,
-        mips: Vec<ResolvedBcMip>,
-        original_width: u32,
-        original_height: u32,
-    ) -> Option<Self> {
-        let (width, height) = mips
-            .first()
-            .map(|base| (base.width.max(1), base.height.max(1)))?;
-        Some(Self {
-            payload: ResolvedTexturePayload::Bc { format, mips },
-            width,
-            height,
-            original_width,
-            original_height,
+    fn from_resident(resident: TextureResidency, source_metadata: Arc<TextureMetadata>) -> Self {
+        let load_outcome = resident.load_outcome();
+        Self {
+            mapping_dimensions: Some(source_metadata.original_dimensions),
+            resident,
+            source_metadata: Some(source_metadata),
+            load_outcome,
             water_fallback: false,
-        })
+        }
     }
 
+    fn unavailable(
+        source_metadata: Option<Arc<TextureMetadata>>,
+        load_outcome: TextureLoadOutcome,
+    ) -> Self {
+        let error_texture = load_outcome.uses_native_error_texture();
+        let resident = if error_texture {
+            texture_asset::native_error_resident()
+        } else {
+            texture_asset::generated_rgba(
+                "unavailable-resident-base",
+                None,
+                vec![vec![ResolvedTextureMip {
+                    rgba: vec![
+                        255, 0, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 255, 255,
+                    ],
+                    width: 2,
+                    height: 2,
+                }]],
+            )
+            .expect("fallback image has valid dimensions")
+        };
+        let mapping_dimensions = if error_texture {
+            Some(resident.metadata().original_dimensions)
+        } else {
+            source_metadata
+                .as_ref()
+                .map(|metadata| metadata.original_dimensions)
+        };
+        Self {
+            resident: TextureResidency::Resident(resident),
+            source_metadata,
+            mapping_dimensions,
+            load_outcome,
+            water_fallback: false,
+        }
+    }
+
+    pub(crate) fn on_demand(
+        &self,
+    ) -> Option<(&Arc<ReloadableTextureSource>, &TextureFrameRequest)> {
+        self.resident.on_demand()
+    }
+    pub(crate) fn resident(&self) -> Option<&Arc<ResidentTexture>> {
+        self.resident.resident()
+    }
+    pub(crate) fn source_metadata(&self) -> Option<&TextureMetadata> {
+        self.source_metadata.as_deref()
+    }
+    pub(crate) fn effective_frame_count(&self) -> u32 {
+        if self.load_outcome.uses_native_error_texture() {
+            1
+        } else {
+            self.source_metadata()
+                .map_or(1, |metadata| metadata.frame_count)
+        }
+    }
+
+    pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
+        self.load_outcome
+    }
+    #[cfg(test)]
+    pub(crate) fn width(&self) -> u32 {
+        self.dimensions()[0]
+    }
+    #[cfg(test)]
+    pub(crate) fn height(&self) -> u32 {
+        self.dimensions()[1]
+    }
+    #[cfg(test)]
+    fn dimensions(&self) -> [u32; 2] {
+        match &self.resident {
+            TextureResidency::Resident(resident) => resident.layers()[0].mips[0].dimensions,
+            TextureResidency::Deferred(_) | TextureResidency::OnDemand { .. } => {
+                self.resident.dimensions(
+                    self.source_metadata()
+                        .expect("deferred image retains source metadata"),
+                )
+            }
+        }
+    }
+    pub(crate) fn flags(&self) -> Option<u32> {
+        if self.load_outcome.uses_native_error_texture() {
+            Some(NATIVE_ERROR_TEXTURE_FLAGS)
+        } else {
+            self.source_metadata().and_then(|metadata| metadata.flags)
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn reflectivity_bits(&self) -> Option<[u32; 3]> {
+        if self.load_outcome.uses_native_error_texture() {
+            Some([0.5_f32.to_bits(); 3])
+        } else {
+            self.source_metadata()
+                .and_then(|metadata| metadata.reflectivity_bits)
+        }
+    }
+    pub(crate) fn has_effective_base_texture(&self) -> bool {
+        !self.water_fallback
+    }
+    #[cfg(test)]
     pub(crate) fn is_water_fallback(&self) -> bool {
         self.water_fallback
     }
-
+    #[cfg(test)]
     pub(crate) fn rgba_bytes(&self) -> Option<&[u8]> {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, .. } => Some(rgba),
-            ResolvedTexturePayload::Bc { .. } => None,
+        let resident = self.resident()?;
+        matches!(resident.id().storage, TextureStorage::Rgba8)
+            .then(|| resident.layers()[0].mips[0].bytes.as_slice())
+    }
+    pub(crate) fn bc_payload(&self) -> Option<(BcFormat, &[ResidentTextureMip])> {
+        let resident = self.resident()?;
+        if let TextureStorage::Bc(format) = resident.id().storage {
+            Some((format, &resident.layers()[0].mips))
+        } else {
+            None
         }
     }
-
-    pub(crate) fn bc_payload(&self) -> Option<(BcFormat, &[ResolvedBcMip])> {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { .. } => None,
-            ResolvedTexturePayload::Bc { format, mips } => Some((*format, mips)),
-        }
-    }
-
     pub(crate) fn is_bc(&self) -> bool {
-        matches!(self.payload, ResolvedTexturePayload::Bc { .. })
+        matches!(self.resident.id().storage, TextureStorage::Bc(_))
+    }
+    #[cfg(test)]
+    pub(crate) fn mip_level_count(&self) -> u32 {
+        u32::from(self.resident.id().mip_count)
+    }
+    pub(crate) fn mip_chain(&self) -> impl Iterator<Item = ResolvedTextureMipRef<'_>> {
+        self.resident()
+            .into_iter()
+            .flat_map(|resident| resident.layers()[0].mips.iter())
+            .filter(|_| matches!(self.resident.id().storage, TextureStorage::Rgba8))
+            .map(|mip| ResolvedTextureMipRef {
+                rgba: mip.bytes.as_slice(),
+                width: mip.dimensions[0],
+                height: mip.dimensions[1],
+            })
+    }
+    #[cfg(test)]
+    pub(crate) fn original_dimensions(&self) -> (u32, u32) {
+        let [width, height] = self
+            .source_metadata()
+            .unwrap_or_else(|| {
+                self.resident()
+                    .expect("generated image has residency")
+                    .metadata()
+            })
+            .original_dimensions;
+        (width.max(1), height.max(1))
+    }
+
+    pub(crate) fn mapping_dimensions(&self) -> Option<(u32, u32)> {
+        self.mapping_dimensions
+            .map(|[width, height]| (width.max(1), height.max(1)))
+    }
+
+    fn unmapped(mut self) -> Self {
+        self.mapping_dimensions = None;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedMaterialTextures {
+    pub(crate) shader: MaterialShader,
+    pub(crate) texture: Option<Arc<ResolvedTexture>>,
+    pub(crate) texture2: Option<Arc<ResolvedTexture>>,
+    pub(crate) render_mode: RenderMode,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedPrimaryMaterial {
+    pub(crate) shader: MaterialShader,
+    pub(crate) texture: Option<Arc<ResolvedTexture>>,
+    pub(crate) texture2: Option<Arc<ResolvedTexture>>,
+    pub(crate) render_mode: RenderMode,
+}
+
+fn canonical_error_primary() -> ResolvedPrimaryMaterial {
+    static MATERIAL: OnceLock<ResolvedPrimaryMaterial> = OnceLock::new();
+    MATERIAL
+        .get_or_init(|| ResolvedPrimaryMaterial {
+            shader: MaterialShader::Surface(Arc::new(SurfaceMaterial {
+                shader: "UnlitGeneric".to_owned(),
+                family: SurfaceFamily::Unlit,
+                diffuse_bump: false,
+                ..Default::default()
+            })),
+            texture: Some(Arc::new(ResolvedTexture {
+                resident: TextureResidency::Resident(texture_asset::missing_material_resident()),
+                source_metadata: None,
+                mapping_dimensions: Some([32, 32]),
+                load_outcome: TextureLoadOutcome::Generated,
+                water_fallback: false,
+            })),
+            texture2: None,
+            render_mode: RenderMode::Opaque,
+        })
+        .clone()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MaterialResolutionOutcome {
+    Loaded,
+    Missing,
+    Malformed,
+    IndexUnavailable,
+    SourceUnavailable,
+    #[default]
+    Unresolved,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaterialResolution<T> {
+    Loaded { canonical_name: String, material: T },
+    Missing { fallback: T },
+    Malformed { path: ContentPath },
+    IndexUnavailable { error: vformats::ArchiveIndexLimit },
+    SourceUnavailable { error: SourceDiscoveryFailure },
+    Unresolved { canonical_name: String },
+}
+
+impl<T> MaterialResolution<T> {
+    pub(crate) fn material(&self) -> Option<&T> {
+        match self {
+            Self::Loaded { material, .. } => Some(material),
+            Self::Missing { fallback } => Some(fallback),
+            Self::Malformed { .. }
+            | Self::SourceUnavailable { .. }
+            | Self::IndexUnavailable { .. }
+            | Self::Unresolved { .. } => None,
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn mip_level_count(&self) -> u32 {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { mip_chain, .. } => u32::try_from(mip_chain.len())
-                .unwrap_or(u32::MAX)
-                .saturating_add(1),
-            ResolvedTexturePayload::Bc { mips, .. } => {
-                u32::try_from(mips.len()).unwrap_or(u32::MAX)
+    pub(crate) fn into_material(self) -> Option<T> {
+        match self {
+            Self::Loaded { material, .. } => Some(material),
+            Self::Missing { fallback } => Some(fallback),
+            Self::Malformed { .. }
+            | Self::SourceUnavailable { .. }
+            | Self::IndexUnavailable { .. }
+            | Self::Unresolved { .. } => None,
+        }
+    }
+
+    pub(crate) fn outcome(&self) -> MaterialResolutionOutcome {
+        match self {
+            Self::Loaded { .. } => MaterialResolutionOutcome::Loaded,
+            Self::Missing { .. } => MaterialResolutionOutcome::Missing,
+            Self::Malformed { .. } => MaterialResolutionOutcome::Malformed,
+            Self::IndexUnavailable { .. } => MaterialResolutionOutcome::IndexUnavailable,
+            Self::SourceUnavailable { .. } => MaterialResolutionOutcome::SourceUnavailable,
+            Self::Unresolved { .. } => MaterialResolutionOutcome::Unresolved,
+        }
+    }
+
+    pub(crate) fn canonical_name(&self) -> Option<&str> {
+        match self {
+            Self::Loaded { canonical_name, .. } | Self::Unresolved { canonical_name } => {
+                Some(canonical_name)
             }
+            Self::Missing { .. } => Some("___error"),
+            Self::Malformed { .. }
+            | Self::SourceUnavailable { .. }
+            | Self::IndexUnavailable { .. } => None,
         }
     }
-
-    pub(crate) fn mip_chain(&self) -> impl Iterator<Item = ResolvedTextureMipRef<'_>> {
-        let (base_rgba, mip_chain) = match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, mip_chain } => {
-                (rgba.as_slice(), mip_chain.as_slice())
-            }
-            ResolvedTexturePayload::Bc { .. } => (&[][..], &[][..]),
-        };
-        std::iter::once(ResolvedTextureMipRef {
-            rgba: base_rgba,
-            width: self.width.max(1),
-            height: self.height.max(1),
-        })
-        .filter(|mip| !mip.rgba.is_empty())
-        .chain(mip_chain.iter().map(|mip| ResolvedTextureMipRef {
-            rgba: mip.rgba.as_slice(),
-            width: mip.width.max(1),
-            height: mip.height.max(1),
-        }))
-    }
-
-    pub(crate) fn mip_chain_byte_len(&self) -> usize {
-        match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, mip_chain } => rgba
-                .len()
-                .saturating_add(mip_chain.iter().map(|mip| mip.rgba.len()).sum::<usize>()),
-            ResolvedTexturePayload::Bc { mips, .. } => mips.iter().map(|mip| mip.data.len()).sum(),
-        }
-    }
-
-    pub(crate) fn without_mip_chain(&self) -> Self {
-        let payload = match &self.payload {
-            ResolvedTexturePayload::Rgba { rgba, .. } => ResolvedTexturePayload::Rgba {
-                rgba: rgba.clone(),
-                mip_chain: Vec::new(),
-            },
-            ResolvedTexturePayload::Bc { format, mips } => ResolvedTexturePayload::Bc {
-                format: *format,
-                mips: mips.first().cloned().into_iter().collect(),
-            },
-        };
-        Self {
-            payload,
-            width: self.width,
-            height: self.height,
-            original_width: self.original_width,
-            original_height: self.original_height,
-            water_fallback: self.water_fallback,
-        }
-    }
-
-    /// Pre-downscale dimensions: BSP texel UVs normalize against the source
-    /// texture size, not whatever the preview uploaded.
-    pub(crate) fn original_dimensions(&self) -> (u32, u32) {
-        (self.original_width.max(1), self.original_height.max(1))
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedMaterialTextures {
-    pub(crate) texture: Option<Arc<ResolvedTexture>>,
-    pub(crate) texture2: Option<Arc<ResolvedTexture>>,
-    pub(crate) force_opaque: bool,
-    pub(crate) render_mode: RenderMode,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedPrimaryMaterial {
-    pub(crate) texture: Arc<ResolvedTexture>,
-    pub(crate) force_opaque: bool,
-    pub(crate) render_mode: RenderMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenderMode {
+    NoDraw,
     Opaque,
     Cutout,
     Translucent,
     Additive,
+    Modulate,
 }
 
-impl RenderMode {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureAlphaPolicy {
+    Opaque,
+    Sampled,
+}
+
+impl TextureAlphaPolicy {
     pub(crate) const fn force_opaque(self) -> bool {
         matches!(self, Self::Opaque)
     }
+}
 
-    const fn preserves_texture_alpha(self) -> bool {
-        !matches!(self, Self::Opaque)
+impl RenderMode {
+    pub(crate) const fn draws(self) -> bool {
+        !matches!(self, Self::NoDraw)
+    }
+
+    pub(crate) const fn texture_alpha_policy(self) -> TextureAlphaPolicy {
+        if matches!(self, Self::Opaque | Self::NoDraw) {
+            TextureAlphaPolicy::Opaque
+        } else {
+            TextureAlphaPolicy::Sampled
+        }
     }
 }
 
 #[derive(Clone)]
 struct ResolverConfig {
+    cancellation: crate::preparation::PreparationCancellation,
+    hardware_profile: profile::HardwareProfile,
     pakfile: Option<Arc<PakSource>>,
     decoded_texture_max_dimension: Option<u32>,
     decoded_texture_budget: Option<Arc<DecodedTextureBudget>>,
+    encoded_texture_budget: Option<Arc<EncodedTextureBudget>>,
+    texture_working_budget: Option<Arc<TextureWorkingBudget>>,
+    texture_source_working_budget: Option<Arc<TextureWorkingBudget>>,
+    texture_decoder_limit: Option<usize>,
+    texture_resource_limit: Option<usize>,
+    sprite_sheet_budget: Arc<SpriteSheetBudget>,
     bc_textures: BcTextures,
+    texture_access: texture_plan::TextureAccess,
+    texture_loading: TextureLoading,
+    single_texture_mip: bool,
+}
+
+#[derive(Debug)]
+struct IndexedVpks {
+    archives: Vec<Arc<VpkArchive>>,
+    _reservations: Vec<source_index::IndexReservation>,
 }
 
 #[derive(Debug)]
 struct ResolverShared {
     addon: Arc<PreviewArchiveSource>,
+    addon_index_error: OnceLock<Option<vformats::ArchiveIndexLimit>>,
+    index_budget: Arc<SourceIndexBudget>,
+    discovery_stats: SourceDiscoveryStats,
+    discovery_failures: BTreeMap<ContentSourceTier, SourceDiscoveryFailure>,
     loose_source_dirs: Vec<LooseSourceDir>,
     sibling_gma_paths: Vec<SiblingGmaPath>,
     game_vpk_paths: Vec<PathBuf>,
-    sibling_gmas: OnceLock<SiblingGmaIndex>,
-    game_vpks: OnceLock<Vec<VpkArchive>>,
-    decoded_texture_cache: Mutex<HashMap<DecodedTextureCacheKey, Arc<ResolvedTexture>>>,
-    sound_scripts: OnceLock<SoundScriptLibrary>,
+    sibling_gmas: crate::preparation::FlightCell<Arc<SiblingGmaIndex>>,
+    game_vpks: crate::preparation::FlightCell<Arc<IndexedVpks>>,
+    material_definitions: MaterialDefinitionCache,
+    texture_assets: TextureAssetCache,
+    reloadable_sources: reloadable::TextureSourceCache,
+    sound_scripts: crate::preparation::FlightCell<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BcTextures {
-    IfGpuSupports,
-    /// Skybox and PHY uploads require RGBA, even when the GPU supports BC textures.
+    RetainAuthored,
     Never,
     #[cfg(test)]
     Forced(bool),
@@ -368,68 +661,23 @@ struct SoundScriptLibrary {
     script_files: Vec<String>,
 }
 
-#[derive(Debug)]
-pub struct DecodedTextureBudget {
-    budget_bytes: usize,
-    decoded_bytes: AtomicUsize,
-    rejected_textures: AtomicUsize,
-    exhausted: AtomicBool,
-}
-
-impl DecodedTextureBudget {
-    pub(crate) fn new(budget_bytes: usize) -> Self {
-        Self {
-            budget_bytes,
-            decoded_bytes: AtomicUsize::new(0),
-            rejected_textures: AtomicUsize::new(0),
-            exhausted: AtomicBool::new(false),
-        }
-    }
-
-    pub(crate) fn decoded_bytes(&self) -> usize {
-        self.decoded_bytes.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn rejected_textures(&self) -> usize {
-        self.rejected_textures.load(Ordering::Acquire)
-    }
-
-    fn try_reserve(&self, byte_len: usize) -> bool {
-        if byte_len > self.budget_bytes {
-            self.rejected_textures.fetch_add(1, Ordering::AcqRel);
-            self.exhausted.store(true, Ordering::Release);
-            return false;
-        }
-        let reserved = self
-            .decoded_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(byte_len)
-                    .filter(|total| *total <= self.budget_bytes)
-            })
-            .is_ok();
-        if !reserved {
-            self.rejected_textures.fetch_add(1, Ordering::AcqRel);
-            self.exhausted.store(true, Ordering::Release);
-        }
-        reserved
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum DecodedTextureCacheKey {
-    Rgba {
-        path: ContentPath,
-        preserve_alpha: bool,
-        max_dimension: Option<u32>,
-    },
-    Bc {
-        path: ContentPath,
-        max_dimension: Option<u32>,
-    },
-}
-
 impl MaterialResolver {
+    #[cfg(test)]
+    pub(crate) fn with_cancellation(
+        &self,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Self {
+        self.variant(ResolverConfig {
+            cancellation,
+            ..self.config.clone()
+        })
+    }
+    pub(crate) fn check_cancelled(&self) -> Result<(), crate::preparation::Cancelled> {
+        self.config.cancellation.check()
+    }
+    pub(crate) fn default_archive_index_working_budget() -> Arc<TextureWorkingBudget> {
+        source_index::SourceIndexBudget::default_working()
+    }
     fn variant(&self, config: ResolverConfig) -> Self {
         Self {
             config,
@@ -437,69 +685,276 @@ impl MaterialResolver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new(addon: impl IntoPreviewArchiveSource, gmod_dir: Option<PathBuf>) -> Self {
+        Self::new_with_index_limits(
+            addon,
+            gmod_dir,
+            vformats::ArchiveIndexLimits::default(),
+            SourceIndexBudget::default_working(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_index_limits(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+    ) -> Self {
+        Self::new_with_index_limits_cancellable(
+            addon,
+            gmod_dir,
+            limits,
+            working,
+            crate::preparation::PreparationCancellation::default(),
+        )
+        .expect("uncancelled source construction")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_index_limits_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        Self::new_with_source_policy_cancellable(
+            addon,
+            gmod_dir,
+            limits,
+            working,
+            SourceDiscoveryLimits::default(),
+            cancellation,
+        )
+    }
+
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "gmod_dir is threaded by value through many preview-pipeline call sites upstream of this leaf consumer"
+        reason = "Preview callers own the content-root configuration"
     )]
-    pub(crate) fn new(addon: impl IntoPreviewArchiveSource, gmod_dir: Option<PathBuf>) -> Self {
-        let mounted_game_dirs = gmod_dir
-            .as_deref()
-            .map(discover_mounted_game_dirs)
-            .unwrap_or_default();
-        let game_vpk_paths = gmod_dir
-            .as_deref()
-            .map(|dir| {
-                gmpublished_backend::vpk::discover_game_vpks_with_mounts(dir, &mounted_game_dirs)
-            })
-            .unwrap_or_default();
-        let mut loose_source_dirs = gmod_dir
-            .as_deref()
-            .map(discover_loose_source_dirs)
-            .unwrap_or_default();
-        // Only explicit mount.cfg targets join the loose tier: sibling Steam
-        // games ship their content entirely in the VPKs discovered above, and
-        // a mount.cfg target is routinely a loose models/materials tree.
-        loose_source_dirs.extend(
-            gmod_dir
-                .as_deref()
-                .map(discovery::existing_mount_cfg_dirs)
-                .unwrap_or_default()
-                .into_iter()
-                .map(LooseSourceDir::new),
-        );
-        let sibling_gma_paths = gmod_dir
-            .as_deref()
-            .map(discover_sibling_gma_paths)
-            .unwrap_or_default();
-        Self {
+    pub(crate) fn new_with_source_policy_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        discovery_limits: SourceDiscoveryLimits,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        use gmpublished_backend::source_discovery::{SourceCategory, SourceDiscoveryBudget};
+        cancellation.check()?;
+        let scratch_bytes = if gmod_dir.is_some() {
+            discovery_limits
+                .metadata_bytes
+                .min(working.capacity() as u64) as usize
+        } else {
+            0
+        };
+        let scratch = if scratch_bytes == 0 {
+            None
+        } else {
+            Some(
+                working
+                    .request(scratch_bytes)
+                    .expect("discovery reservation fits working capacity")
+                    .acquire_cancellable(&cancellation)?,
+            )
+        };
+        let mut budget = SourceDiscoveryBudget::new(discovery_limits, scratch_bytes as u64);
+        let mut failures = BTreeMap::new();
+        let mut ctx = source_discovery::Discovery {
+            budget: &mut budget,
+            cancellation: &cancellation,
+            category: SourceCategory::MountedGames,
+        };
+        let explicit = source_discovery::category_result(
+            gmod_dir.as_deref().map_or_else(
+                || Ok(Vec::new()),
+                |dir| discovery::mount_cfg_dirs_checked(dir, &mut ctx),
+            ),
+            ctx.budget,
+            &mut failures,
+            &[ContentSourceTier::Loose, ContentSourceTier::GameVpk],
+        )?;
+        let mounted = if failures.contains_key(&ContentSourceTier::GameVpk) {
+            Vec::new()
+        } else {
+            source_discovery::category_result(
+                gmod_dir.as_deref().map_or_else(
+                    || Ok(Vec::new()),
+                    |dir| discovery::discover_mounted_game_dirs_checked(dir, &explicit, &mut ctx),
+                ),
+                ctx.budget,
+                &mut failures,
+                &[ContentSourceTier::GameVpk],
+            )?
+        };
+        ctx.category = SourceCategory::Loose;
+        let loose_source_dirs = if failures.contains_key(&ContentSourceTier::Loose) {
+            Vec::new()
+        } else {
+            source_discovery::category_result(
+                gmod_dir.as_deref().map_or_else(
+                    || Ok(Vec::new()),
+                    |dir| discovery::discover_loose_source_dirs_checked(dir, &explicit, &mut ctx),
+                ),
+                ctx.budget,
+                &mut failures,
+                &[ContentSourceTier::Loose],
+            )?
+        };
+        ctx.category = SourceCategory::SiblingGma;
+        let sibling_gma_paths = source_discovery::category_result(
+            gmod_dir.as_deref().map_or_else(
+                || Ok(Vec::new()),
+                |dir| discovery::discover_sibling_gma_paths_checked(dir, &mut ctx),
+            ),
+            ctx.budget,
+            &mut failures,
+            &[ContentSourceTier::SiblingGma],
+        )?;
+        let game_vpk_paths = if failures.contains_key(&ContentSourceTier::GameVpk) {
+            Vec::new()
+        } else {
+            source_discovery::category_result(
+                gmod_dir.as_deref().map_or_else(
+                    || Ok(Vec::new()),
+                    |dir| {
+                        gmpublished_backend::vpk::discover_game_vpks_checked(
+                            dir,
+                            &mounted,
+                            ctx.budget,
+                            &|| cancellation.is_cancelled(),
+                        )
+                    },
+                ),
+                ctx.budget,
+                &mut failures,
+                &[ContentSourceTier::GameVpk],
+            )?
+        };
+        let discovery_stats = budget.stats().clone();
+        drop(scratch);
+        let index_budget = SourceIndexBudget::new(limits, working);
+        let addon = addon.into_preview_archive_source();
+        cancellation.check()?;
+        Ok(Self {
             config: ResolverConfig {
+                cancellation,
+                hardware_profile: profile::HardwareProfile::LDR,
                 pakfile: None,
                 decoded_texture_max_dimension: None,
                 decoded_texture_budget: None,
-                bc_textures: BcTextures::IfGpuSupports,
+                encoded_texture_budget: None,
+                texture_working_budget: None,
+                texture_source_working_budget: None,
+                texture_decoder_limit: None,
+                texture_resource_limit: None,
+                sprite_sheet_budget: Arc::new(SpriteSheetBudget::new(
+                    DEFAULT_SPRITE_SHEET_FRAMES,
+                    DEFAULT_SPRITE_SHEET_METADATA_BYTES,
+                )),
+                bc_textures: BcTextures::RetainAuthored,
+                texture_access: texture_plan::TextureAccess::Direct,
+                texture_loading: TextureLoading::Resident,
+                single_texture_mip: false,
             },
             shared: Arc::new(ResolverShared {
-                addon: addon.into_preview_archive_source(),
+                addon,
+                addon_index_error: OnceLock::new(),
+                index_budget,
+                discovery_stats,
+                discovery_failures: failures,
                 loose_source_dirs,
                 sibling_gma_paths,
                 game_vpk_paths,
-                sibling_gmas: OnceLock::new(),
-                game_vpks: OnceLock::new(),
-                decoded_texture_cache: Mutex::new(HashMap::new()),
-                sound_scripts: OnceLock::new(),
+                sibling_gmas: Default::default(),
+                game_vpks: Default::default(),
+                material_definitions: MaterialDefinitionCache::default(),
+                texture_assets: TextureAssetCache::default(),
+                reloadable_sources: Default::default(),
+                sound_scripts: Default::default(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
             }),
-        }
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn with_pakfile_source(
         addon: impl IntoPreviewArchiveSource,
         gmod_dir: Option<PathBuf>,
         pakfile: MapPakFile,
     ) -> Self {
-        let mut resolver = Self::new(addon, gmod_dir);
-        resolver.config.pakfile = PakSource::new(pakfile).map(Arc::new);
-        resolver
+        Self::with_pakfile_source_and_index_limits(
+            addon,
+            gmod_dir,
+            pakfile,
+            vformats::ArchiveIndexLimits::default(),
+            SourceIndexBudget::default_working(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pakfile_source_and_index_limits(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        pakfile: MapPakFile,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+    ) -> Self {
+        Self::with_pakfile_source_cancellable(
+            addon,
+            gmod_dir,
+            pakfile,
+            limits,
+            working,
+            crate::preparation::PreparationCancellation::default(),
+        )
+        .expect("uncancelled pak source construction")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pakfile_source_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        pakfile: MapPakFile,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        Self::with_pakfile_source_policy_cancellable(
+            addon,
+            gmod_dir,
+            pakfile,
+            limits,
+            working,
+            SourceDiscoveryLimits::default(),
+            cancellation,
+        )
+    }
+
+    pub(crate) fn with_pakfile_source_policy_cancellable(
+        addon: impl IntoPreviewArchiveSource,
+        gmod_dir: Option<PathBuf>,
+        pakfile: MapPakFile,
+        limits: vformats::ArchiveIndexLimits,
+        working: Arc<TextureWorkingBudget>,
+        discovery_limits: SourceDiscoveryLimits,
+        cancellation: crate::preparation::PreparationCancellation,
+    ) -> Result<Self, crate::preparation::Cancelled> {
+        let mut resolver = Self::new_with_source_policy_cancellable(
+            addon,
+            gmod_dir,
+            limits,
+            working,
+            discovery_limits,
+            cancellation,
+        )?;
+        resolver.config.pakfile =
+            PakSource::new_with_budget(pakfile, &resolver.shared.index_budget).map(Arc::new);
+        resolver.check_cancelled()?;
+        Ok(resolver)
     }
 
     pub(crate) fn with_decoded_texture_max_dimension(&self, max_dimension: u32) -> Self {
@@ -528,7 +983,7 @@ impl MaterialResolver {
         self.variant(ResolverConfig {
             bc_textures: match self.config.bc_textures {
                 BcTextures::Never => BcTextures::Never,
-                BcTextures::IfGpuSupports | BcTextures::Forced(_) => BcTextures::Forced(supported),
+                BcTextures::RetainAuthored | BcTextures::Forced(_) => BcTextures::Forced(supported),
             },
             ..self.config.clone()
         })
@@ -541,35 +996,86 @@ impl MaterialResolver {
         material_name: &str,
     ) -> Option<Arc<ResolvedTexture>> {
         let material_paths = material_paths(material_dirs, material_name);
-        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_primary_material_bytes(material_path, &vmt_bytes)
-                .map(|material| Arc::clone(&material.texture))
-        })
+        let definition = self.material_definition(&material_paths)?;
+        self.resolve_primary_material(&definition.material)
+            .and_then(|material| material.texture)
     }
 
     pub(crate) fn resolve_primary(
         &self,
         material_dirs: &[String],
         material_name: &str,
-    ) -> Option<ResolvedPrimaryMaterial> {
-        let material_paths = material_paths(material_dirs, material_name);
-        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_primary_material_bytes(material_path, &vmt_bytes)
-        })
+    ) -> MaterialResolution<ResolvedPrimaryMaterial> {
+        self.resolve_named_material(
+            material_dirs,
+            material_name,
+            |material| self.resolve_primary_material(material),
+            canonical_error_primary,
+        )
     }
 
     pub(crate) fn resolve_with_base2(
         &self,
         material_dirs: &[String],
         material_name: &str,
-    ) -> Option<ResolvedMaterialTextures> {
-        let material_paths = material_paths(material_dirs, material_name);
-        self.find_entry_by_source(&material_paths, |material_path, vmt_bytes| {
-            self.resolve_material_bytes(material_path, &vmt_bytes)
-        })
+    ) -> MaterialResolution<ResolvedMaterialTextures> {
+        self.resolve_named_material(
+            material_dirs,
+            material_name,
+            |material| self.resolve_material(material),
+            || {
+                let primary = canonical_error_primary();
+                ResolvedMaterialTextures {
+                    shader: primary.shader,
+                    texture: primary.texture,
+                    texture2: None,
+                    render_mode: primary.render_mode,
+                }
+            },
+        )
+    }
+
+    fn resolve_named_material<T>(
+        &self,
+        material_dirs: &[String],
+        material_name: &str,
+        resolve: impl FnOnce(&EffectiveMaterial) -> Option<T>,
+        missing: impl FnOnce() -> T,
+    ) -> MaterialResolution<T> {
+        let paths = material_paths(material_dirs, material_name);
+        self.material_definition(&paths).map_or_else(
+            || match self.material_source_failure(&paths) {
+                Some(definition::MaterialSourceFailure::Missing) => MaterialResolution::Missing {
+                    fallback: missing(),
+                },
+                Some(definition::MaterialSourceFailure::SourceUnavailable(error)) => {
+                    MaterialResolution::SourceUnavailable { error }
+                }
+                Some(definition::MaterialSourceFailure::IndexUnavailable(error)) => {
+                    MaterialResolution::IndexUnavailable { error }
+                }
+                Some(definition::MaterialSourceFailure::Malformed(path)) => {
+                    MaterialResolution::Malformed { path }
+                }
+                None => MaterialResolution::Unresolved {
+                    canonical_name: material_name.to_owned(),
+                },
+            },
+            |definition| {
+                let canonical_name = definition.canonical_name();
+                match resolve(&definition.material) {
+                    Some(material) => MaterialResolution::Loaded {
+                        canonical_name,
+                        material,
+                    },
+                    None => MaterialResolution::Unresolved { canonical_name },
+                }
+            },
+        )
     }
 
     pub(crate) fn entry_bytes(&self, path: &str) -> Option<Vec<u8>> {
+        self.check_cancelled().ok()?;
         self.entry_bytes_from_sources(&ContentPath::new(path)?)
     }
 
@@ -582,6 +1088,7 @@ impl MaterialResolver {
         &self,
         reference: &str,
     ) -> Option<ResolvedSoundReference> {
+        self.check_cancelled().ok()?;
         let key = Self::sound_reference_key(reference)?;
         {
             let cache = self.shared.resolved_sound_cache.lock();
@@ -591,6 +1098,7 @@ impl MaterialResolver {
         }
 
         let resolved = self.resolve_sound_reference_uncached(reference);
+        self.check_cancelled().ok()?;
         self.shared
             .resolved_sound_cache
             .lock()
@@ -600,251 +1108,215 @@ impl MaterialResolver {
 
     #[cfg(test)]
     pub(crate) fn sound_script_files(&self) -> Vec<String> {
-        self.sound_scripts().script_files.clone()
+        self.sound_scripts()
+            .map_or_else(Vec::new, |library| library.script_files.clone())
     }
 
-    pub(crate) fn resolve_base_texture_at_path(
-        &self,
-        material_path: &str,
-    ) -> Option<Arc<ResolvedTexture>> {
-        let material_path = ContentPath::new(material_path)?;
-        self.find_entry_by_source(std::slice::from_ref(&material_path), |path, vmt_bytes| {
-            self.resolve_base_texture_material_bytes(path, &vmt_bytes)
-        })
-    }
-
-    fn resolve_material_bytes(
-        &self,
-        material_path: &ContentPath,
-        vmt_bytes: &[u8],
-    ) -> Option<ResolvedMaterialTextures> {
-        let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.clone()];
-        let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
+    fn resolve_material(&self, material: &EffectiveMaterial) -> Option<ResolvedMaterialTextures> {
         let render_mode = material.render_mode();
+        if !render_mode.draws() {
+            return Some(ResolvedMaterialTextures {
+                shader: self.resolve_shader(material, false, false),
+                texture: None,
+                texture2: None,
+                render_mode,
+            });
+        }
         let texture = material
-            .base_texture
-            .as_deref()
-            .and_then(|base_texture| {
-                self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
+            .effective_base_texture()
+            .and_then(|base_texture| self.resolve_material_texture(material, base_texture))
+            .or_else(|| self.mirror_fallback_texture(material))
+            .or_else(|| self.water_fallback_texture(material))
+            .or_else(|| self.refract_fallback_texture(material))
+            .or_else(|| self.envmap_fallback_texture(material));
+        let has_base_texture = texture
+            .as_ref()
+            .is_some_and(|texture| texture.has_effective_base_texture());
+        let accepts_secondary_base = shader::surface_family(&material.shader)
+            .is_some_and(SurfaceFamily::accepts_secondary_base)
+            && material.effective_base_texture().is_some()
+            && has_base_texture;
+        let texture2 = accepts_secondary_base
+            .then(|| {
+                material
+                    .parameter("$basetexture2")
+                    .and_then(|base_texture| self.resolve_material_texture(material, base_texture))
             })
-            .or_else(|| self.water_fallback_texture(&material))
-            .or_else(|| self.envmap_fallback_texture(&material));
-        let texture2 = material.base_texture2.as_deref().and_then(|base_texture| {
-            self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-        });
+            .flatten();
 
-        (texture.is_some() || texture2.is_some()).then_some(ResolvedMaterialTextures {
-            texture,
-            texture2,
-            force_opaque: render_mode.force_opaque(),
-            render_mode,
-        })
+        let shader = self.resolve_shader(
+            material,
+            has_base_texture,
+            texture2
+                .as_ref()
+                .is_some_and(|texture| texture.has_effective_base_texture()),
+        );
+        let render_mode = shader.surface().map_or(render_mode, |surface| {
+            surface.draw_render_mode(
+                texture.as_ref().and_then(|texture| texture.flags()),
+                surface.alpha,
+            )
+        });
+        (texture.is_some() || texture2.is_some() || shader.surface().is_some()).then_some(
+            ResolvedMaterialTextures {
+                shader,
+                texture,
+                texture2,
+                render_mode,
+            },
+        )
     }
 
-    fn resolve_primary_material_bytes(
+    fn resolve_primary_material(
         &self,
-        material_path: &ContentPath,
-        vmt_bytes: &[u8],
+        material: &EffectiveMaterial,
     ) -> Option<ResolvedPrimaryMaterial> {
-        let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.clone()];
-        let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
-        let render_mode = material.render_mode();
-        let texture = material
-            .base_texture
-            .as_deref()
-            .and_then(|base_texture| {
-                self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-            })
-            .or_else(|| self.water_fallback_texture(&material))
-            .or_else(|| self.envmap_fallback_texture(&material))?;
+        let resolved = self.resolve_material(material)?;
+        if resolved.render_mode.draws() && resolved.texture.is_none() {
+            return None;
+        }
         Some(ResolvedPrimaryMaterial {
-            texture,
-            force_opaque: render_mode.force_opaque(),
-            render_mode,
+            shader: resolved.shader,
+            texture: resolved.texture,
+            texture2: resolved.texture2,
+            render_mode: resolved.render_mode,
         })
     }
 
-    fn resolve_base_texture_material_bytes(
+    fn resolve_texture(&self, base_texture: &str) -> Option<Arc<ResolvedTexture>> {
+        self.resolve_texture_with_policy(base_texture, TextureFailurePolicy::Unverified)
+    }
+
+    fn resolve_material_texture(
         &self,
-        material_path: &ContentPath,
-        vmt_bytes: &[u8],
+        material: &EffectiveMaterial,
+        name: &str,
     ) -> Option<Arc<ResolvedTexture>> {
-        let vmt_text = String::from_utf8_lossy(vmt_bytes);
-        let mut visited_includes = vec![material_path.clone()];
-        let material = self.effective_material(&vmt_text, 0, &mut visited_includes)?;
-        let render_mode = material.render_mode();
-        material.base_texture.as_deref().and_then(|base_texture| {
-            self.resolve_texture(base_texture, render_mode.preserves_texture_alpha())
-        })
+        self.resolve_texture_with_policy(name, texture_failure_policy(material))
     }
 
-    fn effective_material(
-        &self,
-        vmt_text: &str,
-        depth: usize,
-        visited_includes: &mut Vec<ContentPath>,
-    ) -> Option<EffectiveMaterial> {
-        let document = vformats::vmt::parse(vmt_text, &Limits::default()).ok()?;
-        if let Some(patch) = document.patch() {
-            let mut material = self
-                .effective_patch_include(&patch.include, depth, visited_includes)
-                .unwrap_or_else(|| EffectiveMaterial::from_document(&document));
-            material.apply_patch_values(&document, &patch);
-            return Some(material);
-        }
-
-        Some(EffectiveMaterial::from_document(&document))
-    }
-
-    fn effective_patch_include(
-        &self,
-        include: &str,
-        depth: usize,
-        visited_includes: &mut Vec<ContentPath>,
-    ) -> Option<EffectiveMaterial> {
-        if depth >= PATCH_INCLUDE_LIMIT {
-            log::debug!("material patch include recursion limit reached at {include}");
-            return None;
-        }
-        let Some(include_path) = ContentPath::new(include) else {
-            log::debug!("material patch include path rejected: {include}");
-            return None;
-        };
-        if visited_includes.contains(&include_path) {
-            log::debug!("material patch include cycle rejected at {include_path}");
-            return None;
-        }
-
-        visited_includes.push(include_path.clone());
-        let include_bytes = self.entry_bytes_from_sources(&include_path);
-        let material = include_bytes.and_then(|include_bytes| {
-            let include_text = String::from_utf8_lossy(&include_bytes);
-            self.effective_material(&include_text, depth + 1, visited_includes)
-        });
-        visited_includes.pop();
-        material
-    }
-
-    fn resolve_texture(
+    fn resolve_texture_with_policy(
         &self,
         base_texture: &str,
-        preserve_alpha: bool,
+        policy: TextureFailurePolicy,
     ) -> Option<Arc<ResolvedTexture>> {
-        let texture_path = texture_path(base_texture)?;
-        // Include the size cap in the shared cache key or a bounded resolver can receive
-        // an uncapped decode.
-        let max_dimension = self.config.decoded_texture_max_dimension;
-        let bc_cache_key = DecodedTextureCacheKey::Bc {
-            path: texture_path.clone(),
-            max_dimension,
-        };
-        if self.bc_textures_enabled()
-            && let Some(texture) = self.cached_decoded_texture(&bc_cache_key)
-        {
-            return Some(texture);
+        let path = texture_path(base_texture)?;
+        if self.config.texture_loading == TextureLoading::OnDemand {
+            return self.resolve_on_demand_texture(&path, policy);
         }
-
-        let rgba_cache_key = DecodedTextureCacheKey::Rgba {
-            path: texture_path.clone(),
-            preserve_alpha,
-            max_dimension,
-        };
-        if let Some(texture) = self.cached_decoded_texture(&rgba_cache_key) {
-            return Some(texture);
-        }
-
-        self.find_entry_by_source(std::slice::from_ref(&texture_path), |_, vtf_bytes| {
-            if self.bc_textures_enabled()
-                && let Some(texture) =
-                    resolved_bc_texture(&vtf_bytes, self.config.decoded_texture_max_dimension)
+        let selected = match self.selected_texture_asset(&path) {
+            Ok(selected) => selected,
+            Err(TextureSourceError::Missing) => {
+                return (policy == TextureFailurePolicy::NativeErrorTexture).then(|| {
+                    Arc::new(ResolvedTexture::unavailable(
+                        None,
+                        TextureLoadOutcome::MissingSource,
+                    ))
+                });
+            }
+            Err(TextureSourceError::SourceUnavailable(_)) => {
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    None,
+                    TextureLoadOutcome::SourceUnavailable,
+                )));
+            }
+            Err(TextureSourceError::Preparation { .. }) => {
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    None,
+                    TextureLoadOutcome::Unplanned,
+                )));
+            }
+            Err(
+                TextureSourceError::EncodedBudget { metadata, .. }
+                | TextureSourceError::WorkingBudget { metadata, .. },
+            ) => {
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    metadata,
+                    TextureLoadOutcome::SourceBudgetRejected,
+                )));
+            }
+            Err(TextureSourceError::Invalid {
+                error: TextureAssetError::Vtf(error),
+                ..
+            }) if policy == TextureFailurePolicy::NativeErrorTexture
+                && native_invalid_texture(&error) =>
             {
-                return self.cache_decoded_texture(bc_cache_key.clone(), texture);
+                log::warn!("texture {path}: {error}");
+                return Some(Arc::new(ResolvedTexture::unavailable(
+                    None,
+                    TextureLoadOutcome::InvalidSource,
+                )));
             }
-
-            match decode_vtf_rgba_max(&vtf_bytes, self.config.decoded_texture_max_dimension) {
-                Ok((decoded, source_width, source_height)) => {
-                    let mut rgba = decoded.rgba;
-                    if !preserve_alpha {
-                        force_opaque_alpha(&mut rgba);
+            Err(error) => {
+                log::warn!("texture {path}: {error}");
+                return None;
+            }
+        };
+        log::debug!("texture {path}: selected {:?}", selected.origin);
+        let source_metadata = selected.asset.metadata_arc();
+        let outcome = self.resident_texture(&selected, 0..1, !self.bc_textures_enabled());
+        let texture = match outcome {
+            Ok(resident) => ResolvedTexture::from_resident(resident, source_metadata),
+            Err(error) => {
+                log::warn!("texture {path}: {error}");
+                if matches!(&error,TextureAssetError::Vtf(error) if native_invalid_texture(error))
+                    && policy != TextureFailurePolicy::NativeErrorTexture
+                {
+                    return None;
+                }
+                let outcome = match &error {
+                    TextureAssetError::Vtf(error) if native_invalid_texture(error) => {
+                        TextureLoadOutcome::InvalidPayload
                     }
-                    let texture = with_generated_mip_chain(downscale_resolved_texture(
-                        ResolvedTexture::rgba(
-                            rgba,
-                            decoded.width,
-                            decoded.height,
-                            source_width,
-                            source_height,
-                            false,
-                        ),
-                        self.config.decoded_texture_max_dimension,
-                    ));
-                    self.cache_decoded_texture(rgba_cache_key.clone(), texture)
-                }
-                Err(error) => {
-                    log::debug!("material texture decode failed for {texture_path}: {error}");
-                    None
-                }
+                    TextureAssetError::DimensionLimit(_)
+                    | TextureAssetError::Budget
+                    | TextureAssetError::ResidentImageBudget { .. }
+                    | TextureAssetError::WorkingLimit { .. }
+                    | TextureAssetError::Vtf(vformats::vtf::VtfError::DecodedTooLarge { .. })
+                    | TextureAssetError::ImageCount(_) => TextureLoadOutcome::QualityRejected,
+                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
+                        TextureLoadOutcome::Unplanned
+                    }
+                    _ => TextureLoadOutcome::Unsupported,
+                };
+                ResolvedTexture::unavailable(Some(source_metadata), outcome)
             }
-        })
+        };
+        Some(Arc::new(texture))
     }
 
-    fn cached_decoded_texture(&self, key: &DecodedTextureCacheKey) -> Option<Arc<ResolvedTexture>> {
-        self.shared.decoded_texture_cache.lock().get(key).cloned()
-    }
-
-    fn cache_decoded_texture(
-        &self,
-        key: DecodedTextureCacheKey,
-        texture: ResolvedTexture,
-    ) -> Option<Arc<ResolvedTexture>> {
-        let texture = Arc::new(texture);
-        let byte_len = texture.mip_chain_byte_len();
-        let mut cache = self.shared.decoded_texture_cache.lock();
-        if let Some(cached) = cache.get(&key) {
-            return Some(Arc::clone(cached));
-        }
-        if let Some(budget) = &self.config.decoded_texture_budget
-            && !budget.try_reserve(byte_len)
-        {
-            return None;
-        }
-        cache.insert(key, Arc::clone(&texture));
-        drop(cache);
-        Some(texture)
-    }
-
-    /// An envmap without a basetexture is chrome, not a missing material.
-    /// Use the envmap if readable, else gray. A named but missing basetexture
-    /// still gets the error checkerboard.
     fn envmap_fallback_texture(
         &self,
         material: &EffectiveMaterial,
     ) -> Option<Arc<ResolvedTexture>> {
-        if material.base_texture.is_some() {
+        if material.parameter("$basetexture").is_some() {
             return None;
         }
-        let env_map = material.env_map.as_deref()?;
+        let env_map = material
+            .parameter("$envmap")
+            .and_then(normalize_texture_name)?;
         if env_map != "env_cubemap"
-            && let Some(texture) = self.resolve_texture(env_map, false)
+            && let Some(texture) = self.resolve_texture(&env_map)
         {
-            return Some(texture);
+            return Some(Arc::new((*texture).clone().unmapped()));
         }
-        Some(Arc::new(ResolvedTexture::rgba(
-            ENVMAP_FALLBACK_RGBA.to_vec(),
-            1,
-            1,
-            1,
-            1,
-            false,
-        )))
+        Some(Arc::new(
+            ResolvedTexture::rgba(ENVMAP_FALLBACK_RGBA.to_vec(), 1, 1, 1, 1, false).unmapped(),
+        ))
+    }
+
+    fn mirror_fallback_texture(
+        &self,
+        material: &EffectiveMaterial,
+    ) -> Option<Arc<ResolvedTexture>> {
+        mirror::is_mirror_shader(&material.shader)
+            .then(|| Arc::new(ResolvedTexture::rgba(vec![255; 4], 1, 1, 1, 1, false).unmapped()))
     }
 
     fn water_fallback_texture(&self, material: &EffectiveMaterial) -> Option<Arc<ResolvedTexture>> {
         is_water_shader(&material.shader).then(|| {
             Arc::new(ResolvedTexture::rgba(
-                water_fog_rgba(material.fog_color.as_deref()).to_vec(),
+                water_fog_rgba(material.parameter("$fogcolor")).to_vec(),
                 1,
                 1,
                 1,
@@ -856,36 +1328,116 @@ impl MaterialResolver {
 
     fn bc_textures_enabled(&self) -> bool {
         match self.config.bc_textures {
-            BcTextures::IfGpuSupports => bc_supported(),
+            BcTextures::RetainAuthored => true,
             BcTextures::Never => false,
             #[cfg(test)]
             BcTextures::Forced(supported) => supported,
         }
     }
 
-    fn game_vpks(&self) -> &[VpkArchive] {
-        self.shared
-            .game_vpks
-            .get_or_init(|| {
-                self.shared
-                    .game_vpk_paths
-                    .iter()
-                    .filter_map(|path| match VpkArchive::open(path) {
-                        Ok(archive) => Some(archive),
-                        Err(error) => {
-                            log::debug!("game VPK open failed for {}: {error}", path.display());
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .as_slice()
+    pub(crate) fn archive_index_stats(&self) -> ArchiveIndexStats {
+        self.shared.index_budget.stats()
     }
 
-    fn sibling_gmas(&self) -> &SiblingGmaIndex {
+    fn game_vpks(&self) -> Result<&Arc<IndexedVpks>, crate::preparation::Cancelled> {
+        self.shared
+            .game_vpks
+            .get_or_try_init_ref(&self.config.cancellation, || {
+                let mut archives = Vec::new();
+                let mut reservations = Vec::new();
+                for path in &self.shared.game_vpk_paths {
+                    self.check_cancelled()?;
+                    let result = (|| {
+                        let source = gmpublished_backend::vpk::VpkIndexSource::open(
+                            path,
+                            self.shared.index_budget.limits(),
+                        )?;
+                        let _working = self
+                            .shared
+                            .index_budget
+                            .working_request(source.prefix_bytes())
+                            .map_err(VpkError::IndexLimit)?;
+                        Ok::<_, VpkError>((source, _working))
+                    })();
+                    let (source, request) = match result {
+                        Ok(selected) => selected,
+                        Err(error @ VpkError::IndexLimit(_)) => {
+                            if let VpkError::IndexLimit(limit) = &error {
+                                self.shared.index_budget.reject(*limit);
+                            }
+                            archives.push(Arc::new(VpkArchive::unavailable(error)));
+                            break;
+                        }
+                        Err(error) => {
+                            log::debug!("game VPK open failed for {}: {error}", path.display());
+                            continue;
+                        }
+                    };
+                    let _working = request.acquire_cancellable(&self.config.cancellation)?;
+                    let result = (|| {
+                        let prepared = source.read()?;
+                        let mut cost = prepared.index_cost()?;
+                        cost.record_bytes = cost
+                            .record_bytes
+                            .checked_add(
+                                (size_of::<VpkArchive>()
+                                    + size_of::<source_index::IndexReservation>())
+                                    as u64,
+                            )
+                            .ok_or_else(|| {
+                                VpkError::IndexLimit(
+                                    vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                                )
+                            })?;
+                        cost.string_bytes = cost
+                            .string_bytes
+                            .checked_add(path.as_os_str().len() as u64)
+                            .ok_or_else(|| {
+                                VpkError::IndexLimit(
+                                    vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                                )
+                            })?;
+                        let reservation = self
+                            .shared
+                            .index_budget
+                            .reserve(cost)
+                            .map_err(VpkError::IndexLimit)?;
+                        let archive = VpkArchive::from_file(prepared.materialize()?);
+                        reservations.push(reservation);
+                        Ok(archive)
+                    })();
+                    match result {
+                        Ok(archive) => archives.push(Arc::new(archive)),
+                        Err(error @ VpkError::IndexLimit(_)) => {
+                            if let VpkError::IndexLimit(limit) = &error {
+                                self.shared.index_budget.reject(*limit);
+                            }
+                            archives.push(Arc::new(VpkArchive::unavailable(error)));
+                            break;
+                        }
+                        Err(error) => {
+                            log::debug!("game VPK open failed for {}: {error}", path.display());
+                        }
+                    }
+                }
+                Ok(Arc::new(IndexedVpks {
+                    archives,
+                    _reservations: reservations,
+                }))
+            })
+    }
+
+    fn sibling_gmas(&self) -> Result<&Arc<SiblingGmaIndex>, crate::preparation::Cancelled> {
         self.shared
             .sibling_gmas
-            .get_or_init(|| build_sibling_gma_index(&self.shared.sibling_gma_paths))
+            .get_or_try_init_ref(&self.config.cancellation, || {
+                sibling_gma::build_sibling_gma_index_cancellable(
+                    &self.shared.sibling_gma_paths,
+                    &self.shared.index_budget,
+                    &self.config.cancellation,
+                )
+                .map(Arc::new)
+            })
     }
 
     fn resolve_sound_reference_uncached(&self, reference: &str) -> Option<ResolvedSoundReference> {
@@ -900,7 +1452,7 @@ impl MaterialResolver {
         }
 
         let key = Self::sound_reference_key(reference)?;
-        let Some(script) = self.sound_scripts().scripts.get(&key) else {
+        let Some(script) = self.sound_scripts()?.scripts.get(&key) else {
             log::debug!("soundscript {reference:?} unresolved");
             return None;
         };
@@ -930,7 +1482,9 @@ impl MaterialResolver {
             log::debug!("sound wave {wave:?} treated as silent null.wav");
             return None;
         }
-        let resolved = self.find_content_bytes(std::slice::from_ref(&ContentPath::new(&path)?))?;
+        let resolved = self
+            .find_content_bytes(std::slice::from_ref(&ContentPath::new(&path)?))
+            .ok()??;
         Some(ResolvedSoundWave {
             path: resolved.path,
             source_tier: resolved.tier,
@@ -938,10 +1492,13 @@ impl MaterialResolver {
         })
     }
 
-    fn sound_scripts(&self) -> &SoundScriptLibrary {
+    fn sound_scripts(&self) -> Option<&SoundScriptLibrary> {
         self.shared
             .sound_scripts
-            .get_or_init(|| self.load_sound_script_library())
+            .get_or_try_init_ref(&self.config.cancellation, || {
+                Ok(self.load_sound_script_library())
+            })
+            .ok()
     }
 
     fn load_sound_script_library(&self) -> SoundScriptLibrary {
@@ -1001,20 +1558,72 @@ impl MaterialResolver {
         self.find_entry_by_source(std::slice::from_ref(path), |_, bytes| Some(bytes))
     }
 
-    /// Defer sibling GMA and VPK indexing until earlier sources miss.
+    fn addon_index_error(&self) -> Option<vformats::ArchiveIndexLimit> {
+        *self.shared.addon_index_error.get_or_init(|| {
+            match self
+                .shared
+                .addon
+                .index_cost_with_limits(self.shared.index_budget.limits())
+            {
+                Ok(Some(cost)) => match self.shared.index_budget.reserve(cost) {
+                    Ok(reservation) => {
+                        reservation.commit();
+                        None
+                    }
+                    Err(error) => Some(self.shared.index_budget.reject(error)),
+                },
+                Ok(None) => None,
+                Err(crate::bridge::gma::GmaError::IndexLimit(error)) => {
+                    Some(self.shared.index_budget.reject(error))
+                }
+                Err(error) => {
+                    log::debug!("primary GMA index unavailable: {error}");
+                    None
+                }
+            }
+        })
+    }
+
+    pub(crate) fn source_discovery_stats(&self) -> &SourceDiscoveryStats {
+        &self.shared.discovery_stats
+    }
+    fn discovery_barrier(&self, tier: ContentSourceTier) -> Option<SourceRef<'_>> {
+        self.shared
+            .discovery_failures
+            .get(&tier)
+            .map(|error| SourceRef::SourceUnavailable(tier, error))
+    }
+
     fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.config
             .pakfile
-            .as_deref()
+            .as_ref()
             .map(SourceRef::Pakfile)
             .into_iter()
-            .chain(std::iter::once(SourceRef::Addon(&self.shared.addon)))
-            .chain(self.shared.loose_source_dirs.iter().map(SourceRef::Loose))
             .chain(std::iter::once_with(|| {
-                SourceRef::SiblingGma(self.sibling_gmas())
+                self.addon_index_error()
+                    .map_or(SourceRef::Addon(&self.shared.addon), |error| {
+                        SourceRef::IndexUnavailable(ContentSourceTier::Addon, error)
+                    })
             }))
+            .chain(self.discovery_barrier(ContentSourceTier::Loose))
+            .chain(self.shared.loose_source_dirs.iter().map(SourceRef::Loose))
+            .chain(self.discovery_barrier(ContentSourceTier::SiblingGma))
             .chain(
-                std::iter::once_with(|| self.game_vpks().iter().map(SourceRef::GameVpk)).flatten(),
+                std::iter::once_with(|| self.sibling_gmas().ok().map(SourceRef::SiblingGma))
+                    .flatten(),
+            )
+            .chain(self.discovery_barrier(ContentSourceTier::GameVpk))
+            .chain(
+                std::iter::once_with(|| {
+                    self.game_vpks().ok().into_iter().flat_map(|catalog| {
+                        catalog
+                            .archives
+                            .iter()
+                            .map(move |archive| SourceRef::GameVpk(catalog, archive))
+                    })
+                })
+                .flatten(),
             )
     }
 
@@ -1031,40 +1640,72 @@ impl MaterialResolver {
         }
     }
 
-    fn find_content_bytes(&self, paths: &[ContentPath]) -> Option<ResolvedContentBytes> {
-        self.sources().find_map(|source| {
-            paths.iter().find_map(|path| {
-                Self::tier_bytes(&source, path).map(|bytes| ResolvedContentBytes {
-                    path: path.as_str().to_owned(),
-                    tier: source.tier(),
-                    bytes,
-                })
-            })
-        })
+    fn find_content_bytes(
+        &self,
+        paths: &[ContentPath],
+    ) -> Result<Option<ResolvedContentBytes>, ContentSourceFailure> {
+        for source in self.sources() {
+            if self.check_cancelled().is_err() {
+                return Ok(None);
+            }
+            for path in paths {
+                if self.check_cancelled().is_err() {
+                    return Ok(None);
+                }
+                if let Some(error) = source.index_error(Some(path)) {
+                    return Err(ContentSourceFailure::Index(error));
+                }
+                if let Some(error) = source.discovery_error() {
+                    return Err(ContentSourceFailure::Discovery(error.clone()));
+                }
+                if let Some(bytes) = Self::tier_bytes(&source, path) {
+                    return Ok(Some(ResolvedContentBytes {
+                        path: path.as_str().to_owned(),
+                        tier: source.tier(),
+                        bytes,
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn content_bytes_from_all_sources(&self, path: &str) -> Vec<ResolvedContentBytes> {
         let Some(path) = ContentPath::new(path) else {
             return Vec::new();
         };
-        self.sources()
-            .filter_map(|source| {
-                Self::tier_bytes(&source, &path).map(|bytes| ResolvedContentBytes {
+        let mut contents = Vec::new();
+        for source in self.sources() {
+            if self.check_cancelled().is_err() {
+                break;
+            }
+            if source.index_error(Some(&path)).is_some() || source.discovery_error().is_some() {
+                break;
+            }
+            if let Some(bytes) = Self::tier_bytes(&source, &path) {
+                contents.push(ResolvedContentBytes {
                     path: path.as_str().to_owned(),
                     tier: source.tier(),
                     bytes,
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        contents
     }
 
     fn source_paths_matching(&self, matches: impl Fn(&str) -> bool) -> Vec<String> {
         let mut paths = Vec::new();
         let mut seen = BTreeSet::new();
         for source in self.sources() {
+            if self.check_cancelled().is_err() {
+                break;
+            }
             source.for_each_path(&mut |path| {
                 push_matching_path(path, &matches, &mut seen, &mut paths);
             });
+            if source.index_error(None).is_some() || source.discovery_error().is_some() {
+                break;
+            }
         }
         paths
     }
@@ -1074,16 +1715,34 @@ impl MaterialResolver {
         paths: &[ContentPath],
         mut consume: impl FnMut(&ContentPath, Vec<u8>) -> Option<T>,
     ) -> Option<T> {
-        self.sources().find_map(|source| {
-            paths.iter().find_map(|path| {
-                Self::tier_bytes(&source, path).and_then(|bytes| consume(path, bytes))
-            })
-        })
+        for source in self.sources() {
+            for path in paths {
+                if source.index_error(Some(path)).is_some() || source.discovery_error().is_some() {
+                    return None;
+                }
+                if let Some(value) =
+                    Self::tier_bytes(&source, path).and_then(|bytes| consume(path, bytes))
+                {
+                    return Some(value);
+                }
+            }
+        }
+        None
     }
+}
+
+#[derive(Debug)]
+enum ContentSourceFailure {
+    Index(vformats::ArchiveIndexLimit),
+    Discovery(SourceDiscoveryFailure),
 }
 
 #[derive(Debug, thiserror::Error)]
 enum SourceError {
+    #[error(transparent)]
+    IndexLimit(vformats::ArchiveIndexLimit),
+    #[error(transparent)]
+    Discovery(SourceDiscoveryFailure),
     #[error("BSP pakfile: {0}")]
     Pakfile(String),
     #[error(transparent)]
@@ -1097,39 +1756,66 @@ enum SourceError {
 }
 
 enum SourceRef<'a> {
-    Pakfile(&'a PakSource),
-    Addon(&'a PreviewArchiveSource),
+    SourceUnavailable(ContentSourceTier, &'a SourceDiscoveryFailure),
+    IndexUnavailable(ContentSourceTier, vformats::ArchiveIndexLimit),
+    Pakfile(&'a Arc<PakSource>),
+    Addon(&'a Arc<PreviewArchiveSource>),
     Loose(&'a LooseSourceDir),
-    SiblingGma(&'a SiblingGmaIndex),
-    GameVpk(&'a VpkArchive),
+    SiblingGma(&'a Arc<SiblingGmaIndex>),
+    GameVpk(&'a Arc<IndexedVpks>, &'a Arc<VpkArchive>),
 }
 
 impl SourceRef<'_> {
+    fn discovery_error(&self) -> Option<&SourceDiscoveryFailure> {
+        match self {
+            Self::SourceUnavailable(_, error) => Some(error),
+            _ => None,
+        }
+    }
+
+    fn index_error(&self, path: Option<&ContentPath>) -> Option<vformats::ArchiveIndexLimit> {
+        match self {
+            Self::IndexUnavailable(_, error) => Some(*error),
+            Self::Pakfile(source) => source.index_error,
+            Self::GameVpk(_, source) => match source.index_error() {
+                Some(VpkError::IndexLimit(error)) => Some(*error),
+                _ => None,
+            },
+            Self::SiblingGma(source) => source.index_error(path),
+            Self::Addon(_) | Self::Loose(_) | Self::SourceUnavailable(_, _) => None,
+        }
+    }
+
     fn tier(&self) -> ContentSourceTier {
         match self {
+            Self::IndexUnavailable(tier, _) | Self::SourceUnavailable(tier, _) => *tier,
             Self::Pakfile(_) => ContentSourceTier::Pakfile,
             Self::Addon(_) => ContentSourceTier::Addon,
             Self::Loose(_) => ContentSourceTier::Loose,
             Self::SiblingGma(_) => ContentSourceTier::SiblingGma,
-            Self::GameVpk(_) => ContentSourceTier::GameVpk,
+            Self::GameVpk(..) => ContentSourceTier::GameVpk,
         }
     }
 
-    /// `Addon` and `GameVpk` take `&str`: both are lower-level archive readers
-    /// with their own path space and callers outside this resolver.
-    /// `Ok(None)` when this tier simply does not have the path; `Err` when it
-    /// has it and could not read it.
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
+        if let Some(error) = self.index_error(Some(path)) {
+            return Err(SourceError::IndexLimit(error));
+        }
         match self {
+            Self::SourceUnavailable(_, error) => Err(SourceError::Discovery((*error).clone())),
+            Self::IndexUnavailable(_, error) => Err(SourceError::IndexLimit(*error)),
             Self::Pakfile(pakfile) => pakfile.entry_bytes(path),
             Self::Addon(addon) => match addon.entry_bytes(path.as_str()) {
                 Ok(bytes) => Ok(Some(bytes)),
-                Err(PreviewArchiveSourceError::EntryNotFound(_)) => Ok(None),
+                Err(
+                    PreviewArchiveSourceError::EntryNotFound(_)
+                    | PreviewArchiveSourceError::Gma(crate::bridge::gma::GmaError::EntryNotFound),
+                ) => Ok(None),
                 Err(error) => Err(SourceError::Addon(error)),
             },
             Self::Loose(loose_dir) => loose_dir.entry_bytes(path),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.entry_bytes(path),
-            Self::GameVpk(vpk) => match vpk.entry_bytes(path.as_str()) {
+            Self::GameVpk(_, vpk) => match vpk.entry_bytes(path.as_str()) {
                 Ok(bytes) => Ok(Some(bytes)),
                 Err(VpkError::EntryNotFound) => Ok(None),
                 Err(error) => Err(SourceError::GameVpk(error)),
@@ -1139,119 +1825,142 @@ impl SourceRef<'_> {
 
     fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
         match self {
+            Self::IndexUnavailable(_, _) | Self::SourceUnavailable(_, _) => {}
             Self::Pakfile(pakfile) => pakfile.for_each_path(visit),
             Self::Addon(addon) => addon.for_each_path(visit),
             Self::Loose(loose_dir) => loose_dir.paths().iter().for_each(|path| visit(path)),
             Self::SiblingGma(sibling_gmas) => sibling_gmas.for_each_path(visit),
-            Self::GameVpk(vpk) => vpk.paths().iter().for_each(|path| visit(path)),
+            Self::GameVpk(_, vpk) => vpk.paths().iter().for_each(|path| visit(path)),
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EffectiveMaterial {
+    profile: profile::HardwareProfile,
+    source: vformats::keyvalues::KvDocument<'static>,
     shader: String,
-    base_texture: Option<String>,
-    base_texture2: Option<String>,
-    env_map: Option<String>,
-    fog_color: Option<String>,
-    alpha_test: bool,
-    translucent: bool,
-    additive: bool,
+    parameters: BTreeMap<String, String>,
+    proxies: Vec<parameters::MaterialProxy>,
 }
 
 impl EffectiveMaterial {
+    #[cfg(test)]
     fn from_document(document: &vformats::vmt::VmtDocument<'_>) -> Self {
+        Self::with_profile(document, profile::HardwareProfile::LDR)
+    }
+
+    fn with_profile(
+        document: &vformats::vmt::VmtDocument<'_>,
+        profile: profile::HardwareProfile,
+    ) -> Self {
+        let source = profile::owned(&document.kv);
+        let (parameters, proxies) = profile::resolve(&source, &document.shader, profile);
         Self {
+            profile,
+            source,
             shader: document.shader.to_string(),
-            base_texture: document
-                .value("$basetexture")
-                .and_then(normalize_texture_name),
-            base_texture2: document
-                .value("$basetexture2")
-                .and_then(normalize_texture_name),
-            env_map: document.value("$envmap").and_then(normalize_texture_name),
-            fog_color: document.value("$fogcolor").map(str::to_owned),
-            alpha_test: vmt_bool(document.value("$alphatest")),
-            translucent: vmt_bool(document.value("$translucent")),
-            additive: vmt_bool(document.value("$additive")),
+            parameters,
+            proxies,
         }
     }
 
+    fn parameter(&self, key: &str) -> Option<&str> {
+        self.parameters.get(key).map(String::as_str)
+    }
+
+    fn effective_base_texture(&self) -> Option<&str> {
+        let base = self.parameter("$basetexture")?;
+        let family = shader::surface_family(&self.shader);
+        let diffuse_bump = match family {
+            Some(SurfaceFamily::VertexLit) => true,
+            Some(SurfaceFamily::Lightmapped | SurfaceFamily::Transition) => {
+                !vmt_bool(self.parameter("$nodiffusebumplighting"))
+            }
+            _ => false,
+        };
+        if self.effective_bumpmap().is_some() && diffuse_bump {
+            return self.parameter("$albedo").or(Some(base));
+        }
+        Some(base)
+    }
+
+    fn effective_bumpmap(&self) -> Option<&str> {
+        if refract::is_refract(&self.shader) {
+            return self.parameter("$normalmap");
+        }
+        let family = shader::surface_family(&self.shader)?;
+        family
+            .accepts_primary_bumpmap(vmt_bool(self.parameter("$decal")))
+            .then(|| self.parameter("$bumpmap"))
+            .flatten()
+    }
+
+    fn effective_bumpmap2(&self) -> Option<&str> {
+        if refract::is_refract(&self.shader) {
+            return self.parameter("$normalmap2");
+        }
+        shader::surface_family(&self.shader)?
+            .accepts_secondary_bumpmap(
+                vmt_bool(self.parameter("$decal")),
+                self.parameter("$bumpmap").is_some(),
+            )
+            .then(|| self.parameter("$bumpmap2"))
+            .flatten()
+    }
+
+    fn effective_envmap_mask(&self) -> Option<&str> {
+        shader::surface_family(&self.shader)?
+            .accepts_envmap_mask(
+                vmt_bool(self.parameter("$decal")),
+                self.parameter("$bumpmap").is_some(),
+            )
+            .then(|| self.parameter("$envmapmask"))
+            .flatten()
+    }
+
     fn render_mode(&self) -> RenderMode {
-        if is_water_shader(&self.shader) {
-            if self.alpha_test {
+        if self.no_draw() {
+            RenderMode::NoDraw
+        } else if refract::is_refract(&self.shader) {
+            RenderMode::Translucent
+        } else if is_water_shader(&self.shader) {
+            if vmt_bool(self.parameter("$alphatest")) {
                 RenderMode::Cutout
             } else {
                 RenderMode::Opaque
             }
-        } else if self.additive {
+        } else if vmt_bool(self.parameter("$additive")) {
             RenderMode::Additive
-        } else if self.translucent {
+        } else if vmt_bool(self.parameter("$translucent"))
+            || vmt_bool(self.parameter("$vertexalpha"))
+            || parameters::scalar(self.parameter("$alpha"), 1.0) < 1.0
+        {
             RenderMode::Translucent
-        } else if self.alpha_test {
+        } else if vmt_bool(self.parameter("$alphatest")) {
             RenderMode::Cutout
         } else {
             RenderMode::Opaque
         }
     }
 
+    fn no_draw(&self) -> bool {
+        vmt_bool(self.parameter("$no_draw"))
+    }
+
     fn apply_patch_values(
         &mut self,
         document: &vformats::vmt::VmtDocument<'_>,
-        patch: &vformats::vmt::VmtPatch<'_>,
+        _patch: &vformats::vmt::VmtPatch<'_>,
     ) {
-        if let Some(value) = document
-            .value("$basetexture")
-            .and_then(normalize_texture_name)
-        {
-            self.base_texture = Some(value);
+        profile::merge(&mut self.source, &document.kv, false);
+        for (name, insert) in [("insert", true), ("replace", false)] {
+            for block in document.kv.blocks(name) {
+                profile::merge(&mut self.source, block, insert);
+            }
         }
-        if let Some(value) = patch.value("$basetexture").and_then(normalize_texture_name) {
-            self.base_texture = Some(value);
-        }
-        if let Some(value) = document
-            .value("$basetexture2")
-            .and_then(normalize_texture_name)
-        {
-            self.base_texture2 = Some(value);
-        }
-        if let Some(value) = patch
-            .value("$basetexture2")
-            .and_then(normalize_texture_name)
-        {
-            self.base_texture2 = Some(value);
-        }
-        if let Some(value) = document.value("$envmap").and_then(normalize_texture_name) {
-            self.env_map = Some(value);
-        }
-        if let Some(value) = patch.value("$envmap").and_then(normalize_texture_name) {
-            self.env_map = Some(value);
-        }
-        if let Some(value) = document.value("$fogcolor") {
-            self.fog_color = Some(value.to_owned());
-        }
-        if let Some(value) = patch.value("$fogcolor") {
-            self.fog_color = Some(value.to_owned());
-        }
-        if let Some(value) = document.value("$alphatest") {
-            self.alpha_test = vmt_bool(Some(value));
-        }
-        if let Some(value) = patch.value("$alphatest") {
-            self.alpha_test = vmt_bool(Some(value));
-        }
-        if let Some(value) = document.value("$translucent") {
-            self.translucent = vmt_bool(Some(value));
-        }
-        if let Some(value) = patch.value("$translucent") {
-            self.translucent = vmt_bool(Some(value));
-        }
-        if let Some(value) = document.value("$additive") {
-            self.additive = vmt_bool(Some(value));
-        }
-        if let Some(value) = patch.value("$additive") {
-            self.additive = vmt_bool(Some(value));
-        }
+        (self.parameters, self.proxies) =
+            profile::resolve(&self.source, &self.shader, self.profile);
     }
 }
 
@@ -1265,13 +1974,37 @@ fn vmt_bool(value: Option<&str>) -> bool {
             .is_ok_and(|number| number.is_finite() && number != 0.0)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextureFailurePolicy {
+    NativeErrorTexture,
+    Unverified,
+}
+
+fn texture_failure_policy(material: &EffectiveMaterial) -> TextureFailurePolicy {
+    if matches!(
+        shader::surface_family(&material.shader),
+        Some(SurfaceFamily::Lightmapped | SurfaceFamily::Unlit | SurfaceFamily::VertexLit)
+    ) {
+        TextureFailurePolicy::NativeErrorTexture
+    } else {
+        TextureFailurePolicy::Unverified
+    }
+}
+
+fn native_invalid_texture(error: &vformats::vtf::VtfError) -> bool {
+    matches!(
+        error,
+        vformats::vtf::VtfError::BadMagic | vformats::vtf::VtfError::Truncated { .. }
+    )
+}
+
 fn is_water_shader(shader: &str) -> bool {
     strip_prefix_ascii_case(shader, "water").is_some()
 }
 
 fn water_fog_rgba(value: Option<&str>) -> [u8; 4] {
     let linear = value
-        .and_then(parse_water_fog_color)
+        .and_then(parse_material_color)
         .unwrap_or(DEFAULT_WATER_FOG_LINEAR);
     [
         linear_to_srgb_byte(linear[0]),
@@ -1279,36 +2012,6 @@ fn water_fog_rgba(value: Option<&str>) -> [u8; 4] {
         linear_to_srgb_byte(linear[2]),
         255,
     ]
-}
-
-fn parse_water_fog_color(value: &str) -> Option<Vec3> {
-    let trimmed = value.trim();
-    let (inner, scale) = if let Some(inner) = bracketed_value(trimmed, '[', ']') {
-        (inner, 1.0)
-    } else if let Some(inner) = bracketed_value(trimmed, '{', '}') {
-        (inner, 1.0 / 255.0)
-    } else {
-        return None;
-    };
-
-    let mut components = inner
-        .split(|char: char| char.is_ascii_whitespace() || char == ',')
-        .filter(|component| !component.is_empty())
-        .map(str::parse::<f32>);
-    let red = components.next()?.ok()? * scale;
-    let green = components.next()?.ok()? * scale;
-    let blue = components.next()?.ok()? * scale;
-    [red, green, blue]
-        .into_iter()
-        .all(f32::is_finite)
-        .then_some(Vec3::new(red, green, blue))
-}
-
-fn bracketed_value(value: &str, open: char, close: char) -> Option<&str> {
-    value
-        .strip_prefix(open)
-        .and_then(|value| value.strip_suffix(close))
-        .map(str::trim)
 }
 
 fn linear_to_srgb_byte(linear: f32) -> u8 {
@@ -1333,27 +2036,63 @@ pub fn srgb_byte_to_linear(byte: u8) -> f32 {
 #[derive(Debug)]
 struct PakSource {
     pakfile: MapPakFile,
-    entries: HashMap<String, usize>,
+    entries: HashMap<String, (usize, u64)>,
+    index_error: Option<vformats::ArchiveIndexLimit>,
 }
 
 impl PakSource {
+    #[cfg(test)]
     fn new(pakfile: MapPakFile) -> Option<Self> {
-        if let Some(error) = pakfile.read_error() {
-            log::debug!("bsp pakfile source disabled: {error}");
-            return None;
-        }
-        let entries = match pakfile.indexed_entries() {
-            Ok(entries) => entries,
+        Self::new_with_budget(pakfile, &SourceIndexBudget::defaults())
+    }
+
+    fn new_with_budget(pakfile: MapPakFile, budget: &Arc<SourceIndexBudget>) -> Option<Self> {
+        let result = (|| {
+            let mut cost = pakfile.index_cost()?;
+            let overflow = || {
+                vformats::bsp::ZipError::IndexLimit(
+                    vformats::ArchiveIndexLimit::arithmetic_overflow(),
+                )
+            };
+            let per_entry = size_of::<(String, (usize, u64))>()
+                + size_of::<gmpublished_domain::scene::map::MapPakFileEntry>();
+            cost.record_bytes = cost
+                .record_bytes
+                .checked_add(
+                    (cost.entries as u64)
+                        .checked_mul(per_entry as u64)
+                        .ok_or_else(overflow)?,
+                )
+                .and_then(|bytes| bytes.checked_add(size_of::<Self>() as u64))
+                .ok_or_else(overflow)?;
+            cost.string_bytes = cost.string_bytes.checked_mul(2).ok_or_else(overflow)?;
+            let reservation = budget
+                .reserve(cost)
+                .map_err(vformats::bsp::ZipError::IndexLimit)?;
+            let entries = pakfile
+                .indexed_entries_with_limits(budget.limits())?
+                .into_iter()
+                .map(|entry| (entry.path, (entry.index, entry.size)))
+                .collect();
+            reservation.commit();
+            Ok(entries)
+        })();
+        match result {
+            Ok(entries) => Some(Self {
+                pakfile,
+                entries,
+                index_error: None,
+            }),
+            Err(vformats::bsp::ZipError::IndexLimit(error)) => Some(Self {
+                pakfile,
+                entries: HashMap::new(),
+                index_error: Some(budget.reject(error)),
+            }),
             Err(error) => {
-                log::debug!("bsp pakfile source index failed: {error}");
-                return None;
+                log::debug!("BSP pakfile source disabled: {error}");
+                None
             }
-        };
-        let entries = entries
-            .into_iter()
-            .map(|entry| (entry.path, entry.index))
-            .collect::<HashMap<_, _>>();
-        Some(Self { pakfile, entries })
+        }
     }
 
     fn for_each_path(&self, visit: &mut dyn FnMut(&str)) {
@@ -1361,7 +2100,7 @@ impl PakSource {
     }
 
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
-        let Some(index) = self.entries.get(path.as_str()).copied() else {
+        let Some((index, _)) = self.entries.get(path.as_str()).copied() else {
             return Ok(None);
         };
         self.pakfile
@@ -1382,7 +2121,6 @@ impl LooseSourceDir {
 
     fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
         let mut candidate = self.root.clone();
-        // Reject traversal here too, before turning a content path into a filesystem path.
         for segment in path.as_str().split('/') {
             if segment.is_empty() || segment == "." || segment == ".." {
                 return Ok(None);
@@ -1436,5 +2174,7 @@ fn collect_loose_script_paths(dir: &Path, prefix: &str, depth: usize, out: &mut 
     }
 }
 
+#[cfg(test)]
+mod nodraw_tests;
 #[cfg(test)]
 mod tests;

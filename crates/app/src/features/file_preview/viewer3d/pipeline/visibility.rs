@@ -1,23 +1,36 @@
-use super::upload::UploadedDetailSprites;
-use super::{DETAIL_VERTEX_FLOAT_COUNT, WorldVisibilityPlan, wgpu};
+use super::MapPreview;
+use super::geometry::ViewerScene;
+use super::{WorldVisibilityPlan, wgpu};
 use gmpublished_domain::math::Vec3;
+use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct UploadedVisibleIndices {
     pub buffer: Option<wgpu::Buffer>,
     pub index_count: u32,
+    pub(super) lightmaps: Vec<super::lightmap_ranges::PageRange>,
 }
 
-#[derive(Debug)]
-pub struct UploadedVisibleVertices {
-    pub buffer: Option<wgpu::Buffer>,
-    pub vertex_count: u32,
+impl UploadedVisibleIndices {
+    pub(super) fn with_lightmaps(
+        mut self,
+        mesh: &super::upload::UploadedMesh,
+        indices: &[u32],
+    ) -> Self {
+        self.lightmaps = mesh
+            .lightmaps
+            .select(indices)
+            .expect("visibility preserves admitted triangles");
+        self
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct UploadedVisibility {
     pub tracker: VisibilityClusterTracker,
     pub plan: Option<WorldVisibilityPlan>,
+    pub mesh_indices: HashMap<usize, UploadedVisibleIndices>,
+    pub revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -74,11 +87,12 @@ pub fn upload_visible_indices(
     queue: &wgpu::Queue,
     indices: &[u32],
 ) -> UploadedVisibleIndices {
-    let index_count = u32::try_from(indices.len()).unwrap_or(u32::MAX);
+    let index_count = u32::try_from(indices.len()).expect("admitted visibility index count");
     if indices.is_empty() {
         return UploadedVisibleIndices {
             buffer: None,
             index_count,
+            lightmaps: Vec::new(),
         };
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -91,47 +105,83 @@ pub fn upload_visible_indices(
     UploadedVisibleIndices {
         buffer: Some(buffer),
         index_count,
+        lightmaps: Vec::new(),
     }
 }
 
-pub fn upload_visible_detail_sprites(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    sprites: &UploadedDetailSprites,
-    plan: &WorldVisibilityPlan,
-) -> UploadedVisibleVertices {
-    let sprite_bytes = sprites.all_vertices.len() / sprites.sprite_count.max(1);
-    let mut bytes = Vec::with_capacity(sprites.all_vertices.len());
-    for (sprite_index, visible) in plan.detail_sprite_visible.iter().copied().enumerate() {
-        if !visible {
-            continue;
-        }
-        let start = sprite_index.saturating_mul(sprite_bytes);
-        let end = start.saturating_add(sprite_bytes);
-        if let Some(slice) = sprites.all_vertices.get(start..end) {
-            bytes.extend_from_slice(slice);
-        }
-    }
-    let vertex_count = u32::try_from(
-        bytes.len() / (DETAIL_VERTEX_FLOAT_COUNT as usize * std::mem::size_of::<f32>()),
-    )
-    .unwrap_or(u32::MAX);
-    if bytes.is_empty() {
-        return UploadedVisibleVertices {
-            buffer: None,
-            vertex_count,
+impl UploadedVisibility {
+    pub fn ensure_world_visibility(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &MapPreview,
+        upload: &ViewerScene,
+        enabled: bool,
+        camera_position: Vec3,
+    ) {
+        let Some(visibility) = scene.visibility.as_ref() else {
+            if self
+                .tracker
+                .set_state(VisibilityClusterState::Disabled)
+                .is_some()
+            {
+                self.apply_world_visibility_plan(device, queue, upload, None);
+            }
+            return;
         };
+        let Some(state) = self.tracker.update(enabled, camera_position, |point| {
+            visibility.cluster_at(point)
+        }) else {
+            return;
+        };
+
+        match state {
+            VisibilityClusterState::Disabled | VisibilityClusterState::StandDown => {
+                self.apply_world_visibility_plan(device, queue, upload, None);
+            }
+            VisibilityClusterState::Cluster(cluster) => {
+                if let Some(visible_clusters) = visibility.visible_clusters(cluster) {
+                    let plan = WorldVisibilityPlan::from_visible_clusters(scene, &visible_clusters);
+                    log::debug!(
+                        "map preview visibility rebuild cluster {cluster}: {} visible clusters",
+                        plan.visible_cluster_count
+                    );
+                    self.apply_world_visibility_plan(device, queue, upload, Some(plan));
+                } else {
+                    self.apply_world_visibility_plan(device, queue, upload, None);
+                }
+            }
+        }
     }
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("file_preview.model_viewer.visible_detail_vertices"),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, &bytes);
-    UploadedVisibleVertices {
-        buffer: Some(buffer),
-        vertex_count,
+
+    pub fn apply_world_visibility_plan(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        upload: &ViewerScene,
+        plan: Option<WorldVisibilityPlan>,
+    ) {
+        self.revision = self.revision.wrapping_add(1);
+        self.mesh_indices.clear();
+        if let Some(plan) = plan.as_ref() {
+            for (index, mesh) in upload.meshes.iter().enumerate() {
+                if mesh.map_skybox
+                    || mesh.door_index.is_some()
+                    || upload.assets.receiver_faces.canonical_world_mesh(index)
+                {
+                    continue;
+                }
+                let visible = plan
+                    .mesh_indices
+                    .get(mesh.scene_mesh_index)
+                    .map_or(&[][..], Vec::as_slice);
+                self.mesh_indices.insert(
+                    index,
+                    upload_visible_indices(device, queue, visible).with_lightmaps(mesh, visible),
+                );
+            }
+        }
+        self.plan = plan;
     }
 }
 
