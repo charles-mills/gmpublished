@@ -13,39 +13,11 @@ pub(super) fn resolve_texture_jobs<T: Sync + Send, R: Send>(
     resolver: &MaterialResolver,
     resolve: impl Fn(&T, &MaterialResolver) -> R + Sync,
 ) -> Vec<R> {
-    if resolver.texture_loading() == crate::bridge::materials::TextureLoading::OnDemand {
-        return parallel_collect(jobs, |job| {
-            resolver
-                .check_cancelled()
-                .is_ok()
-                .then(|| resolve(job, resolver))
-        })
-        .into_iter()
-        .flatten()
-        .collect();
-    }
-    let mut requests = crate::bridge::materials::TextureRequestPlan::default();
-    for job in jobs {
-        if resolver.check_cancelled().is_err() {
-            return Vec::new();
-        }
-        let (_, plan) = resolver.plan_texture_requests(|planning| resolve(job, planning));
-        requests.append(plan);
-    }
-    if resolver.check_cancelled().is_err() {
-        return Vec::new();
-    }
-    let cost = requests.cost();
-    let admissions = resolver.admit_texture_requests(requests);
-    debug_assert_eq!(cost, admissions.cost());
-    log::debug!("texture request plan: {cost:?}");
-    let admitted = resolver.with_texture_admissions(admissions);
     parallel_collect(jobs, |job| {
-        if admitted.check_cancelled().is_err() {
-            None
-        } else {
-            Some(resolve(job, &admitted))
-        }
+        resolver
+            .check_cancelled()
+            .is_ok()
+            .then(|| resolve(job, resolver))
     })
     .into_iter()
     .flatten()

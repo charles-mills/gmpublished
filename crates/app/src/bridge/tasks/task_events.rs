@@ -93,12 +93,32 @@ pub enum WorkshopDownloadTaskKind {
     Extract,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskIdentity {
+    Workshop {
+        kind: WorkshopDownloadTaskKind,
+        item_id: super::PublishedFileId,
+    },
+    LocalExtraction {
+        path: std::path::PathBuf,
+        total_bytes: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtractionOutput {
+    pub source_path: Option<std::path::PathBuf>,
+    pub extracted_path: std::path::PathBuf,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TaskUpdate {
     Started {
         kind: TaskKind,
         status: TransactionStatus,
+        identity: Option<TaskIdentity>,
     },
+    Extracted(ExtractionOutput),
     Status(TransactionStatus),
     Progress(f64),
     ProgressIncr(f64),
@@ -107,107 +127,6 @@ pub enum TaskUpdate {
     Finished,
     Error(UiError),
     Abandoned,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CoalescedTaskTerminal {
-    Finished,
-    Error(UiError),
-    Abandoned,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum TaskEventUpdate {
-    Update(SharedTaskUpdate),
-    Terminal(CoalescedTaskTerminal),
-}
-
-impl From<TaskUpdate> for TaskEventUpdate {
-    fn from(update: TaskUpdate) -> Self {
-        match update {
-            TaskUpdate::Finished => Self::Terminal(CoalescedTaskTerminal::Finished),
-            TaskUpdate::Error(error) => Self::Terminal(CoalescedTaskTerminal::Error(error)),
-            TaskUpdate::Abandoned => Self::Terminal(CoalescedTaskTerminal::Abandoned),
-            update => Self::Update(SharedTaskUpdate::new(update)),
-        }
-    }
-}
-
-impl From<SharedTaskUpdate> for TaskEventUpdate {
-    fn from(update: SharedTaskUpdate) -> Self {
-        Self::Update(update)
-    }
-}
-
-impl From<CoalescedTaskTerminal> for TaskEventUpdate {
-    fn from(terminal: CoalescedTaskTerminal) -> Self {
-        Self::Terminal(terminal)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CoalescedTaskStart {
-    pub(crate) kind: TaskKind,
-    pub(crate) status: TransactionStatus,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CoalescedTaskUpdate {
-    pub(crate) started: Option<CoalescedTaskStart>,
-    pub(crate) status: Option<TransactionStatus>,
-    pub(crate) progress: Option<f64>,
-    pub(crate) total_bytes: Option<u64>,
-    pub(crate) terminal: Option<CoalescedTaskTerminal>,
-}
-
-impl CoalescedTaskUpdate {
-    pub(crate) fn observe(&mut self, update: impl Into<TaskEventUpdate>, current_progress: f64) {
-        match update.into() {
-            TaskEventUpdate::Update(update) => {
-                self.observe_task_update(update.into_update(), current_progress);
-            }
-            TaskEventUpdate::Terminal(terminal) => {
-                self.terminal = Some(terminal);
-            }
-        }
-    }
-
-    fn observe_task_update(&mut self, update: TaskUpdate, current_progress: f64) {
-        match update {
-            TaskUpdate::Started { kind, status } => {
-                self.started = Some(CoalescedTaskStart { kind, status });
-                self.status = None;
-                self.progress = Some(0.0);
-                self.total_bytes = Some(0);
-                self.terminal = None;
-            }
-            TaskUpdate::Status(status) => {
-                self.status = Some(status);
-            }
-            TaskUpdate::Progress(progress) => {
-                self.progress = Some(progress.clamp(0.0, 1.0));
-            }
-            TaskUpdate::ProgressIncr(delta) => {
-                let base = self.progress.unwrap_or(current_progress);
-                self.progress = Some((base + delta).clamp(0.0, 1.0));
-            }
-            TaskUpdate::ProgressReset => {
-                self.progress = Some(0.0);
-            }
-            TaskUpdate::Total(total_bytes) => {
-                self.total_bytes = Some(total_bytes);
-            }
-            TaskUpdate::Finished => {
-                self.terminal = Some(CoalescedTaskTerminal::Finished);
-            }
-            TaskUpdate::Abandoned => {
-                self.terminal = Some(CoalescedTaskTerminal::Abandoned);
-            }
-            TaskUpdate::Error(error) => {
-                self.terminal = Some(CoalescedTaskTerminal::Error(error));
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -240,6 +159,10 @@ impl TaskHandle {
 
     pub(crate) fn total(&self, bytes: u64) {
         self.emit(TaskUpdate::Total(bytes));
+    }
+
+    pub(crate) fn extracted(&self, output: ExtractionOutput) {
+        self.emit(TaskUpdate::Extracted(output));
     }
 
     pub(crate) fn finished(&self) {
@@ -292,6 +215,15 @@ impl Tasks {
     }
 
     pub(crate) fn create(&self, kind: TaskKind, initial_status: TransactionStatus) -> TaskHandle {
+        self.create_identified(kind, initial_status, None)
+    }
+
+    pub(crate) fn create_identified(
+        &self,
+        kind: TaskKind,
+        initial_status: TransactionStatus,
+        identity: Option<TaskIdentity>,
+    ) -> TaskHandle {
         let id = TaskId::from_raw(self.next_id.fetch_add(1, Ordering::Relaxed));
 
         let handle = TaskHandle {
@@ -303,6 +235,7 @@ impl Tasks {
         handle.emit(TaskUpdate::Started {
             kind,
             status: initial_status,
+            identity,
         });
 
         handle

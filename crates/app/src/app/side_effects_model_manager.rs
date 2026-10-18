@@ -13,61 +13,7 @@ impl App {
         message: model_manager::Message,
     ) -> Task<RootMessage> {
         if let model_manager::Message::Viewer(message) = message {
-            let skin_selected = matches!(message, file_preview::Message::SkinSelected(_));
-            let task = self.apply_model_preview_message(message);
-            self.capture_model_stage_selection(skin_selected);
-            self.sync_model_workspace();
-            return task;
-        }
-        if matches!(
-            message,
-            model_manager::Message::PreviewRequested
-                | model_manager::Message::ApplyMaterialTint
-                | model_manager::Message::ApplyReplacementMaterial
-                | model_manager::Message::MaterialReset
-                | model_manager::Message::SkinTextureSelected(..)
-                | model_manager::Message::StageRequested
-                | model_manager::Message::InstallRequested
-                | model_manager::Message::SaveQcRequested
-                | model_manager::Message::ExportRequested
-                | model_manager::Message::BlenderExportRequested
-        ) {
-            let desired_selection = self
-                .state
-                .features
-                .model_manager
-                .preview_skin_materials()
-                .is_some()
-                .then(|| self.state.features.model_manager.preview_selection())
-                .or_else(|| {
-                    self.state
-                        .features
-                        .model_manager
-                        .preview_dirty()
-                        .then(|| self.state.features.model_manager.preview_selection())
-                });
-            self.capture_model_stage();
-            if let Some((skin, bodygroups)) = desired_selection {
-                let message = if self
-                    .state
-                    .features
-                    .model_preview
-                    .staged_placement()
-                    .is_some()
-                    && let Some((position, angles)) =
-                        self.state.features.model_manager.saved_stage_placement()
-                {
-                    model_manager::Message::StageSnapshotCaptured {
-                        position,
-                        angles,
-                        skin,
-                        bodygroups,
-                    }
-                } else {
-                    model_manager::Message::PreviewSelectionCaptured { skin, bodygroups }
-                };
-                model_manager::update(&mut self.state.features.model_manager, message);
-            }
+            return self.apply_model_preview_message(message);
         }
         let old_source = self
             .state
@@ -75,16 +21,11 @@ impl App {
             .model_manager
             .source_path()
             .map(Path::to_path_buf);
-        let skin_selected = matches!(message, model_manager::Message::SkinSelected(_));
         let inspected = matches!(message, model_manager::Message::Inspected(_, Ok(_)));
         let effects = model_manager::update(&mut self.state.features.model_manager, message);
         let mut tasks = Vec::new();
         if self.state.features.model_manager.source_path() != old_source.as_deref() {
             tasks.push(self.apply_model_preview_message(file_preview::Message::CloseFinished));
-        }
-        if skin_selected {
-            let (skin, _) = self.state.features.model_manager.preview_selection();
-            tasks.push(self.apply_model_preview_message(file_preview::Message::SkinSelected(skin)));
         }
         tasks.push(self.batch_effects(effects, Self::run_model_manager_effect));
         if inspected && self.state.features.model_manager.needs_initial_preview() {
@@ -92,67 +33,6 @@ impl App {
         }
         self.sync_model_workspace();
         Task::batch(tasks)
-    }
-
-    pub(super) fn capture_model_stage(&mut self) {
-        self.capture_model_stage_selection(false);
-    }
-
-    fn capture_model_stage_selection(&mut self, skin_selected: bool) {
-        if !self.state.features.model_preview.is_open()
-            || self.state.features.model_preview.current_model().is_none()
-        {
-            return;
-        }
-        let skin = if !skin_selected
-            && self
-                .state
-                .features
-                .model_manager
-                .preview_skin_materials()
-                .is_some()
-        {
-            self.state.features.model_manager.preview_selection().0
-        } else {
-            self.state.features.model_preview.selected_skin()
-        };
-        if let Some((position, angles)) = self.state.features.model_preview.staged_placement() {
-            let displayed_map = self
-                .state
-                .features
-                .model_preview
-                .request()
-                .and_then(|request| request.archive.entry_disk_path(&request.entry_path));
-            if displayed_map != self.state.features.model_manager.selected_map_path() {
-                return;
-            }
-            let bodygroups = self
-                .state
-                .features
-                .model_preview
-                .bodygroup_choices()
-                .to_vec();
-            model_manager::update(
-                &mut self.state.features.model_manager,
-                model_manager::Message::StageSnapshotCaptured {
-                    position,
-                    angles,
-                    skin,
-                    bodygroups,
-                },
-            );
-        } else if self.state.features.shell.route() == super::shell::Route::Models {
-            let bodygroups = self
-                .state
-                .features
-                .model_preview
-                .bodygroup_choices()
-                .to_vec();
-            model_manager::update(
-                &mut self.state.features.model_manager,
-                model_manager::Message::PreviewSelectionCaptured { skin, bodygroups },
-            );
-        }
     }
 
     pub(super) fn run_model_manager_effect(

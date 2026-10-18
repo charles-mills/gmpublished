@@ -9,6 +9,8 @@ mod qc_editor;
 mod state;
 mod update;
 mod view;
+mod workspace;
+pub use workspace::update_viewer;
 
 pub use collision::CollisionMode;
 pub use effect::Effect;

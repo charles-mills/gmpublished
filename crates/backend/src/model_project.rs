@@ -70,37 +70,24 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
             "saving TOML as QC is not supported; keep the original TOML definition",
         ));
     }
-    if !request.orientation.iter().all(|angle| angle.is_finite()) {
-        return Err(invalid("orientation angles must be finite"));
-    }
-    if !request.export_materials
-        && request
-            .skins
-            .iter()
-            .flat_map(|skin| skin.replacements.values())
-            .any(|replacement| !matches!(replacement, SkinMaterial::Material { .. }))
-    {
-        return Err(invalid(
-            "authored skin textures and tints require material export",
-        ));
-    }
-    let mut desc = model_compile::load_description(request, &source, base)?;
+    model_compile::preparation::validate_export_options(request)?;
+    let desc = model_compile::load_description(request, &source, base)?;
     let mut inputs = portable_qc::input_files(request, &desc, &source)?;
     if model_compile::authoring::model_settings(&source)?.is_some() {
         return save_source_authoring_qc(request, path, &destination, &inputs);
     }
-    let _authoring_assets = model_compile::authoring::prepare_assets(&mut desc, &source)?;
-    desc.model.version = Some(48);
-    desc.model.name = model_compile::normalize_model_name(
-        request.model_name.as_deref().unwrap_or(&desc.model.name),
+    let model_compile::preparation::PreparedModel {
+        desc,
+        compiled,
+        variants,
+        authoring_assets: _authoring_assets,
+    } = model_compile::preparation::prepare_model(
+        request,
+        &source,
+        base,
+        desc,
+        &AtomicBool::new(false),
     )?;
-    if let Some(directory) = &request.material_directory {
-        desc.materials.search_paths = vec![directory.replace('\\', "/")];
-    }
-    let mut compiled =
-        mdlc::compile::compile(&desc, base).map_err(mdlc::pipeline::PipelineError::Compile)?;
-    model_compile::apply_orientation(&mut compiled, &source, request.orientation)?;
-    let variants = model_compile::apply_skins(&mut compiled.desc, &request.skins)?;
     let stage = tempfile::Builder::new()
         .prefix(".gmpublished-qc-")
         .tempdir_in(&destination)
@@ -427,38 +414,14 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
         }
         qc.push_str("}\n");
     }
-    if request.export_materials {
-        let mut sources = vec![source.clone()];
-        for reference in desc
-            .bodyparts
-            .iter()
-            .flat_map(|body| &body.models)
-            .flat_map(|model| {
-                std::iter::once(Some(&model.smd))
-                    .chain(model.lods.iter().map(|lod| lod.smd.as_ref()))
-            })
-            .flatten()
-            .filter(|source| !source.is_empty())
-        {
-            sources.push(
-                mdlc::compile::resolve_smd_path(base, reference)
-                    .map_err(|error| ModelCompileError::Description(error.to_string()))?,
-            );
-        }
-        let directories = &compiled.desc.materials.search_paths;
-        let imported = model_materials::source_material_names(&compiled.desc, &variants);
-        let mut prepared =
-            model_materials::prepare_materials_for_sources(&imported, directories, base, &sources)?;
-        model_materials::prepare_skin_materials(&mut prepared, &variants, directories, base)?;
-        for replacement in request
-            .skins
-            .iter()
-            .flat_map(|skin| skin.replacements.values())
-        {
-            if let SkinMaterial::Material { name } = replacement {
-                model_materials::require_prepared_material(&prepared, name, directories)?;
-            }
-        }
+    if let Some(prepared) = model_compile::preparation::prepare_model_materials(
+        request,
+        &source,
+        base,
+        &desc,
+        &compiled.desc,
+        &variants,
+    )? {
         prepared.write_to(&files_root)?;
         inputs.extend(prepared.source_paths);
         for asset in prepared.assets {
@@ -862,50 +825,11 @@ impl<'a> SourceCopier<'a> {
             .to_ascii_lowercase();
         match extension.as_str() {
             "gltf" | "glb" => {
-                let json = if extension == "glb" {
-                    if bytes.len() < 20
-                        || &bytes[..4] != b"glTF"
-                        || &bytes[16..20] != b"JSON"
-                        || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != 2
-                        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize
-                            != bytes.len()
-                    {
-                        return Err(invalid("invalid GLB JSON header"));
-                    }
-                    let size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-                    let end = 20_usize
-                        .checked_add(size)
-                        .ok_or_else(|| invalid("GLB JSON size overflows"))?;
-                    bytes
-                        .get(20..end)
-                        .ok_or_else(|| invalid("GLB JSON exceeds its file"))?
-                } else {
-                    &bytes
-                };
-                let json: serde_json::Value = serde_json::from_slice(json)
-                    .map_err(|error| ModelCompileError::Description(error.to_string()))?;
-                for entries in ["buffers", "images"] {
-                    if let Some(entries) = json[entries].as_array() {
-                        for entry in entries {
-                            if let Some(uri) = entry["uri"].as_str() {
-                                if uri.starts_with("data:") {
-                                    continue;
-                                }
-                                let relative = source
-                                    .parent()
-                                    .unwrap()
-                                    .strip_prefix(self.base)
-                                    .unwrap()
-                                    .join(decode_source_uri(uri)?);
-                                let path = self.find(&relative)?.ok_or_else(|| {
-                                    invalid(&format!("source dependency was not found: {uri}"))
-                                })?;
-                                self.copy_file(&relative, &path)?;
-                            }
-                        }
-                    }
-                }
+                visit_gltf_dependencies(source, &bytes, self.base, |relative, path| {
+                    self.copy_file(relative, path).map(|_| ())
+                })?;
             }
+
             "fbx" => {
                 let scene =
                     ufbx::load_memory(&bytes, ufbx::LoadOpts::default()).map_err(|error| {
@@ -960,73 +884,47 @@ impl<'a> SourceCopier<'a> {
         self.copied.insert(target, source);
         Ok(bytes)
     }
+}
 
-    fn find(&self, relative: &Path) -> Result<Option<PathBuf>, ModelCompileError> {
-        let mut current = self.base.to_owned();
-        for component in relative.components() {
-            let name = match component {
-                std::path::Component::CurDir => continue,
-                std::path::Component::ParentDir => {
-                    if current == self.base {
-                        return Err(ModelCompileError::UnsafePath(relative.into()));
-                    }
-                    current.pop();
-                    continue;
-                }
-                std::path::Component::Normal(name) => name,
-                _ => return Err(ModelCompileError::UnsafePath(relative.into())),
-            };
-            let exact = current.join(name);
-            if exact.exists() {
-                current = exact;
-            } else {
-                if !current.is_dir() {
-                    return Ok(None);
-                }
-                let mut matched = None;
-                for entry in fs::read_dir(&current).map_err(|error| io_error(&current, error))? {
-                    let entry = entry.map_err(|error| io_error(&current, error))?;
-                    if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case(&name.to_string_lossy())
-                    {
-                        if matched.is_some() {
-                            return Err(invalid("ambiguous source dependency filename"));
-                        }
-                        matched = Some(entry.path());
-                    }
-                }
-                let Some(found) = matched else {
-                    return Ok(None);
-                };
-                current = found;
-            }
-            let real = canonical(&current)?;
-            if !real.starts_with(self.base) {
-                return Err(ModelCompileError::UnsafePath(current));
-            }
-        }
-        Ok(current.is_file().then_some(current))
+fn visit_gltf_dependencies(
+    source: &Path,
+    bytes: &[u8],
+    base: &Path,
+    mut visit: impl FnMut(&Path, &Path) -> Result<(), ModelCompileError>,
+) -> Result<(), ModelCompileError> {
+    let binary = source
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("glb"));
+    let document = crate::util::gltf::Document::parse(bytes, binary)
+        .map_err(ModelCompileError::Description)?;
+    for uri in document.external_uris() {
+        let relative = source
+            .parent()
+            .unwrap()
+            .strip_prefix(base)
+            .map_err(|_| ModelCompileError::UnsafePath(source.into()))?
+            .join(decode_source_uri(uri)?);
+        let path = find_source_file(base, &relative)?
+            .ok_or_else(|| invalid(&format!("source dependency was not found: {uri}")))?;
+        visit(&relative, &path)?;
     }
+    Ok(())
+}
+
+fn find_source_file(base: &Path, relative: &Path) -> Result<Option<PathBuf>, ModelCompileError> {
+    use crate::util::case_path::LookupError;
+    crate::util::case_path::find_file(base, relative, true, None).map_err(|error| match error {
+        LookupError::Io { path, source } => io_error(&path, source),
+        LookupError::InvalidPath(path) | LookupError::OutsideRoot(path) => {
+            ModelCompileError::UnsafePath(path)
+        }
+        LookupError::Ambiguous(_) => invalid("ambiguous source dependency filename"),
+        LookupError::EntryLimit => unreachable!("portable lookups have no directory limit"),
+    })
 }
 
 fn decode_source_uri(uri: &str) -> Result<PathBuf, ModelCompileError> {
-    let mut result = Vec::with_capacity(uri.len());
-    let mut bytes = uri.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == b'%' {
-            let high = bytes.next().and_then(|byte| char::from(byte).to_digit(16));
-            let low = bytes.next().and_then(|byte| char::from(byte).to_digit(16));
-            let (Some(high), Some(low)) = (high, low) else {
-                return Err(invalid("invalid percent escape in source URI"));
-            };
-            result.push((high * 16 + low) as u8);
-        } else {
-            result.push(byte);
-        }
-    }
-    let path = String::from_utf8(result).map_err(|_| invalid("source URI is not UTF-8"))?;
+    let path = crate::util::gltf::decode_uri_path(uri).map_err(invalid)?;
     if path.is_empty() || path.contains([':', '\\', '\0']) {
         return Err(ModelCompileError::UnsafePath(path.into()));
     }

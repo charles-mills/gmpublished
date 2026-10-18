@@ -26,7 +26,7 @@ use crate::{
         whitelist::AddonWhitelist,
     },
     steam::{CALLBACK_RESULT_TIMEOUT, ConnectedSteam, Steam, runtime::SteamRuntimeError},
-    transactions::Transactions,
+    transactions::{Transaction, Transactions},
 };
 
 const CALLBACK_PUMP_INTERVAL: Duration = Duration::from_millis(50);
@@ -270,7 +270,15 @@ impl Downloads {
         temp_guard: Option<tempfile::TempPath>,
     ) {
         let downloads = Arc::clone(self);
-        let transaction = self.transactions.begin();
+        let transaction = self.transactions.begin_announced(|transaction_id| {
+            BackendEvent::ExtractionStarted(ExtractionStartedEvent {
+                transaction_id,
+                source_path: None,
+                file_name: None,
+                workshop_id: Some(item),
+                request_id,
+            })
+        });
         transaction.status(crate::transactions::TransactionStatus::Locating);
         let worker_transaction = transaction.clone();
         let schedule = self
@@ -285,15 +293,11 @@ impl Downloads {
                     None
                 };
 
-                downloads.transactions.emit(BackendEvent::ExtractionStarted(
-                    ExtractionStartedEvent {
-                        transaction_id: transaction.id(),
-                        source_path: source_gma.clone(),
-                        file_name: None,
-                        workshop_id: Some(item),
-                        request_id,
-                    },
-                ));
+                if let Some(path) = &source_gma {
+                    transaction.data(crate::transactions::TransactionPayload::SourcePath(
+                        path.clone(),
+                    ));
+                }
 
                 let open_on_disk = |path: PathBuf| -> Result<(GmaFile, GmaView), GmaError> {
                     let gma = GmaFile::open(path)?;
@@ -373,19 +377,25 @@ impl Downloads {
             });
         if let Err(error) = schedule {
             log::error!("could not schedule Workshop extraction: {error}");
-            self.transactions
-                .emit(BackendEvent::ExtractionStarted(ExtractionStartedEvent {
-                    transaction_id: transaction.id(),
-                    source_path: None,
-                    file_name: None,
-                    workshop_id: Some(item),
-                    request_id,
-                }));
             transaction.error(crate::transactions::TransactionError::detailed(
                 crate::error_key::keys::UNKNOWN,
                 Some(error.to_string()),
             ));
         }
+    }
+
+    fn begin_download(
+        &self,
+        workshop_id: Option<WorkshopId>,
+        request_id: Option<WorkshopSnapshotId>,
+    ) -> Transaction {
+        self.transactions.begin_announced(|transaction_id| {
+            BackendEvent::DownloadStarted(DownloadStartedEvent {
+                transaction_id,
+                workshop_id,
+                request_id,
+            })
+        })
     }
 
     fn push_download(
@@ -410,32 +420,17 @@ impl Downloads {
                     token.request_id,
                 );
             } else {
-                let transaction = self.transactions.begin();
-                self.transactions
-                    .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                        transaction_id: transaction.id(),
-                        request_id: token.request_id,
-                    }));
-                transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
+                let transaction = self.begin_download(Some(item), token.request_id);
                 transaction.error(crate::error_key::keys::DOWNLOAD_MISSING);
             }
         } else {
             let download = Arc::new(DownloadInner {
                 item,
                 sent_total: AtomicBool::new(false),
-                transaction: self.transactions.begin(),
+                transaction: self.begin_download(Some(item), token.request_id),
                 extract_destination: (**extract_destination).clone(),
                 request_id: token.request_id,
             });
-
-            self.transactions
-                .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                    transaction_id: download.transaction.id(),
-                    request_id: token.request_id,
-                }));
-            download
-                .transaction
-                .data(crate::transactions::TransactionPayload::WorkshopItem(item));
 
             pending.push(download);
         }
@@ -446,13 +441,7 @@ impl Downloads {
             return;
         }
 
-        let transaction = self.transactions.begin();
-        self.transactions
-            .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                transaction_id: transaction.id(),
-                request_id: token.request_id,
-            }));
-        transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
+        let transaction = self.begin_download(Some(item), token.request_id);
         transaction.error(crate::error_key::keys::ITEM_NOT_FOUND);
     }
 
@@ -580,13 +569,7 @@ impl Downloads {
             return;
         }
 
-        let transaction = self.transactions.begin();
-        self.transactions
-            .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                transaction_id: transaction.id(),
-                request_id: token.request_id,
-            }));
-        transaction.data(crate::transactions::TransactionPayload::WorkshopItem(item));
+        let transaction = self.begin_download(Some(item), token.request_id);
 
         let downloads = Arc::clone(self);
         let extract_destination = (**extract_destination).clone();
@@ -745,12 +728,7 @@ impl Downloads {
             ) {
                 Ok(query) => query,
                 Err(error) => {
-                    let transaction = self.transactions.begin();
-                    self.transactions
-                        .emit(BackendEvent::DownloadStarted(DownloadStartedEvent {
-                            transaction_id: transaction.id(),
-                            request_id: token.request_id,
-                        }));
+                    let transaction = self.begin_download(None, token.request_id);
                     transaction.error(crate::transactions::TransactionError::detailed(
                         crate::error_key::keys::STEAM_ERROR,
                         crate::transactions::detail_from_serialize(error.to_string()),
@@ -769,13 +747,7 @@ impl Downloads {
                         if let Err(error) = &results
                             && let Some(request_id) = token.request_id
                         {
-                            let transaction = downloads.transactions.begin();
-                            downloads.transactions.emit(BackendEvent::DownloadStarted(
-                                DownloadStartedEvent {
-                                    transaction_id: transaction.id(),
-                                    request_id: Some(request_id),
-                                },
-                            ));
+                            let transaction = downloads.begin_download(None, Some(request_id));
                             transaction.error(crate::transactions::TransactionError::detailed(
                                 crate::error_key::keys::STEAM_ERROR,
                                 crate::transactions::detail_from_serialize(error.to_string()),

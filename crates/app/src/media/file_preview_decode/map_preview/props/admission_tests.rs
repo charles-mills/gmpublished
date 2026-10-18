@@ -1,5 +1,5 @@
 use super::*;
-use crate::bridge::materials::{DecodedTextureBudget, TextureLoadOutcome};
+use crate::bridge::materials::TextureLoadOutcome;
 use crate::media::file_preview_decode::tests::{prop_placement, test_prop_asset};
 use crate::test_support::fixture_vtf_bytes;
 
@@ -126,7 +126,7 @@ fn raw_material_eligibility_matches_bound_slots_for_skin_fallback_and_bodygroups
 }
 
 #[test]
-fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() {
+fn omitted_prefix_resources_never_select_textures() {
     let names = ["test/hidden", "test/admitted", "test/capped", "test/suffix"];
     let mut entries = Vec::new();
     for (index, name) in names.into_iter().enumerate() {
@@ -151,8 +151,6 @@ fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() 
             .map(|(name, bytes)| (name.as_str(), bytes.clone()))
             .collect(),
     );
-    let budget = Arc::new(DecodedTextureBudget::new(16));
-    let resolver = resolver.with_decoded_texture_budget(Arc::clone(&budget));
     let mut placements =
         names.map(|name| prop_placement(&format!("models/{name}.mdl"), Vec3::ZERO, Vec3::ZERO, 0));
     placements[0].entity = true;
@@ -193,12 +191,10 @@ fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() 
     assert_eq!(baked.model_lighting.len(), 1);
     assert_eq!(baked.meshes[0].vertices[0].lighting_context, 1);
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         ["materials/test/admitted.vtf"]
     );
-    assert_eq!(resolver.resident_texture_asset_count(), 1);
-    assert_eq!(budget.decoded_bytes(), 16);
-    assert_eq!(budget.rejected_textures(), 0);
+
     assert!(table.slots().iter().all(|slot| {
         slot.texture
             .as_ref()
@@ -206,7 +202,7 @@ fn omitted_prefix_resources_never_select_textures_or_consume_admission_budget() 
     }));
 }
 
-fn texture_fixture(names: &[&str], bytes: usize) -> (MaterialResolver, Arc<DecodedTextureBudget>) {
+fn texture_fixture(names: &[&str]) -> MaterialResolver {
     let mut entries = Vec::new();
     for (index, name) in names.iter().enumerate() {
         entries.push((
@@ -223,17 +219,12 @@ fn texture_fixture(names: &[&str], bytes: usize) -> (MaterialResolver, Arc<Decod
             ),
         ));
     }
-    let resolver = MaterialResolver::prop_lighting_fixture(
+    MaterialResolver::prop_lighting_fixture(
         Vec::new(),
         entries
             .iter()
             .map(|(name, bytes)| (name.as_str(), bytes.clone()))
             .collect(),
-    );
-    let budget = Arc::new(DecodedTextureBudget::new(bytes));
-    (
-        resolver.with_decoded_texture_budget(Arc::clone(&budget)),
-        budget,
     )
 }
 
@@ -269,7 +260,7 @@ fn bake_loaded(
 
 #[test]
 fn only_effective_skin_and_bodygroup_slots_select_textures() {
-    let (resolver, budget) = texture_fixture(&["test/skin0", "test/skin1", "test/unused"], 32);
+    let resolver = texture_fixture(&["test/skin0", "test/skin1", "test/unused"]);
     let mut asset = test_prop_asset(vec![0, 1, 2]);
     let model = Arc::make_mut(&mut asset.model);
     model.material_names = vec![
@@ -291,12 +282,10 @@ fn only_effective_skin_and_bodygroup_slots_select_textures() {
     assert_eq!(baked.placed_count, 2);
     assert!(baked.geometry.rejected.is_empty());
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         ["materials/test/skin0.vtf", "materials/test/skin1.vtf"]
     );
-    assert_eq!(resolver.resident_texture_asset_count(), 2);
-    assert_eq!(budget.decoded_bytes(), 32);
-    assert_eq!(budget.rejected_textures(), 0);
+
     assert_eq!(table.slots().len(), 2);
     let selected = select_loaded_prop_placements(&placements, &models);
     let mut context = PropMaterialContext {
@@ -320,8 +309,8 @@ fn only_effective_skin_and_bodygroup_slots_select_textures() {
 }
 
 #[test]
-fn malformed_selected_geometry_does_not_spend_texture_budget_or_compact_lighting_ids() {
-    let (resolver, budget) = texture_fixture(&["test/bad", "test/good"], 16);
+fn malformed_selected_geometry_does_not_select_textures_or_compact_lighting_ids() {
+    let resolver = texture_fixture(&["test/bad", "test/good"]);
     let mut bad = one_material("test/bad");
     let model = Arc::make_mut(&mut Arc::get_mut(&mut bad).unwrap().model);
     model.meshes.push(model.meshes[0].clone());
@@ -341,16 +330,14 @@ fn malformed_selected_geometry_does_not_spend_texture_budget_or_compact_lighting
     assert_eq!(baked.model_lighting.len(), 2);
     assert_eq!(baked.meshes[0].vertices[0].lighting_context, 2);
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         ["materials/test/good.vtf"]
     );
-    assert_eq!(budget.decoded_bytes(), 16);
-    assert_eq!(budget.rejected_textures(), 0);
 }
 
 #[test]
 fn referenced_missing_material_keeps_a_real_error_slot_without_resolving_unused_slots() {
-    let (resolver, _) = texture_fixture(&["test/unused"], 16);
+    let resolver = texture_fixture(&["test/unused"]);
     let mut asset = test_prop_asset(vec![0, 1]);
     let model = Arc::make_mut(&mut asset.model);
     model.material_names = vec!["test/unused".into(), "test/missing".into()];
@@ -379,7 +366,7 @@ fn referenced_missing_material_keeps_a_real_error_slot_without_resolving_unused_
     );
     assert!(
         !resolver
-            .selected_texture_paths()
+            .selected_reloadable_paths()
             .iter()
             .any(|path| path == "materials/test/unused.vtf")
     );
@@ -415,7 +402,7 @@ fn door(path: &str, mode: i32) -> MapDoor {
 
 #[test]
 fn hidden_and_malformed_doors_prepare_bounds_without_crowding_visible_textures() {
-    let (resolver, budget) = texture_fixture(&["test/hidden", "test/bad", "test/good"], 16);
+    let resolver = texture_fixture(&["test/hidden", "test/bad", "test/good"]);
     let mut bad = one_material("test/bad");
     let model = Arc::make_mut(&mut Arc::get_mut(&mut bad).unwrap().model);
     model.meshes.push(model.meshes[0].clone());
@@ -463,11 +450,10 @@ fn hidden_and_malformed_doors_prepare_bounds_without_crowding_visible_textures()
     assert_eq!(baked.doors[0].local_bounds_max, Vec3::splat(1.0));
     assert_eq!(baked.doors[1].meshes.len(), 1);
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         ["materials/test/good.vtf"]
     );
-    assert_eq!(budget.decoded_bytes(), 16);
-    assert_eq!(budget.rejected_textures(), 0);
+
     assert_eq!(table.slots().len(), 1);
 }
 

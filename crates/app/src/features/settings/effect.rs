@@ -1,8 +1,6 @@
-use super::state::{
-    PathSetting, PathValidationRequest, ResetAction, SettingsMutation, SettingsSnapshot,
-};
+use super::state::{PathSetting, PathValidationRequest};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     ModalOpenRequested,
     ModalCloseRequested,
@@ -11,9 +9,8 @@ pub enum Effect {
     CopyDebugInfoRequested(crate::generation::Generation, String),
     PathBrowseRequested(PathSetting),
     PathValidationRequested(PathValidationRequest),
-    PreviewApplied(SettingsMutation),
     FocusMoved(bool),
-    MutationApplied(crate::generation::Generation, SettingsMutation),
-    SnapshotApplied(Box<SettingsSnapshot>),
-    ResetRunRequested(ResetAction),
+    SettingsChanged,
+    SnapshotApplied,
+    PersistenceRequested,
 }

@@ -1,11 +1,8 @@
 #[cfg(test)]
-use super::ResidentTextureMip;
-#[cfg(test)]
-use super::ResolvedTextureMip;
+use super::{ResidentTextureMip, ResolvedTextureMip, TextureAssetError};
 
 use super::{
-    Arc, MaterialResolver, ResidentTexture, TextureAssetError, TextureLoadOutcome, TextureMetadata,
-    texture_path,
+    Arc, MaterialResolver, ResidentTexture, TextureLoadOutcome, TextureMetadata, texture_path,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +13,11 @@ pub struct DecodedTextureFrames {
 }
 
 impl DecodedTextureFrames {
+    #[cfg(test)]
+    pub(crate) fn read_for_test(&self) -> &Arc<ResidentTexture> {
+        self.resident.read_for_test()
+    }
+
     #[cfg(test)]
     pub(crate) fn from_rgba(
         flags: u32,
@@ -30,14 +32,7 @@ impl DecodedTextureFrames {
             load_outcome: TextureLoadOutcome::Generated,
         })
     }
-    fn unavailable(metadata: Option<Arc<TextureMetadata>>, outcome: TextureLoadOutcome) -> Self {
-        let placeholder = super::ResolvedTexture::unavailable(metadata.clone(), outcome);
-        Self {
-            resident: placeholder.resident,
-            source_metadata: metadata,
-            load_outcome: outcome,
-        }
-    }
+
     pub(crate) fn on_demand(
         &self,
     ) -> Option<(
@@ -70,7 +65,7 @@ impl DecodedTextureFrames {
             .frames
             .start
             .checked_add(u32::try_from(index).ok()?)?;
-        Some(&self.resident()?.layer(frame, 0)?.mips)
+        Some(&self.read_for_test().layer(frame, 0)?.mips)
     }
     pub(crate) fn source_metadata(&self) -> Option<&TextureMetadata> {
         self.source_metadata.as_deref()
@@ -131,85 +126,12 @@ impl MaterialResolver {
         name: &str,
     ) -> Option<Arc<DecodedTextureFrames>> {
         let path = texture_path(name)?;
-        if self.config.texture_loading == super::TextureLoading::OnDemand {
-            let source =
-                self.resolve_on_demand_texture(&path, super::TextureFailurePolicy::Unverified)?;
-            return Some(Arc::new(DecodedTextureFrames {
-                resident: source.resident.clone(),
-                source_metadata: source.source_metadata.clone(),
-                load_outcome: source.load_outcome,
-            }));
-        }
-        let selected = match self.selected_texture_asset(&path) {
-            Ok(selected) => selected,
-            Err(super::TextureSourceError::SourceUnavailable(_)) => {
-                return Some(Arc::new(DecodedTextureFrames::unavailable(
-                    None,
-                    TextureLoadOutcome::SourceUnavailable,
-                )));
-            }
-            Err(super::TextureSourceError::Preparation { .. }) => {
-                return Some(Arc::new(DecodedTextureFrames::unavailable(
-                    None,
-                    TextureLoadOutcome::Unplanned,
-                )));
-            }
-            Err(
-                super::TextureSourceError::EncodedBudget { metadata, .. }
-                | super::TextureSourceError::WorkingBudget { metadata, .. },
-            ) => {
-                return Some(Arc::new(DecodedTextureFrames::unavailable(
-                    metadata,
-                    TextureLoadOutcome::SourceBudgetRejected,
-                )));
-            }
-            Err(super::TextureSourceError::Missing) => return None,
-            Err(error) => {
-                log::warn!("material data texture {path}: {error}");
-                return None;
-            }
-        };
-        let source_metadata = selected.asset.metadata_arc();
-        let (resident, load_outcome) = match self.resident_texture(
-            &selected,
-            0..1,
-            !self.bc_textures_enabled(),
-        ) {
-            Ok(resident) => {
-                let outcome = resident.load_outcome();
-                (resident, outcome)
-            }
-            Err(error) => {
-                log::warn!("material data texture {path}: {error}");
-                if matches!(&error,TextureAssetError::Vtf(error) if super::native_invalid_texture(error))
-                {
-                    return None;
-                }
-                let outcome = match error {
-                    TextureAssetError::DimensionLimit(_)
-                    | TextureAssetError::Budget
-                    | TextureAssetError::ResidentImageBudget { .. }
-                    | TextureAssetError::WorkingLimit { .. }
-                    | TextureAssetError::ImageCount(_)
-                    | TextureAssetError::Vtf(vformats::vtf::VtfError::DecodedTooLarge { .. }) => {
-                        TextureLoadOutcome::QualityRejected
-                    }
-                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
-                        TextureLoadOutcome::Unplanned
-                    }
-                    _ => TextureLoadOutcome::Unsupported,
-                };
-                let placeholder = super::ResolvedTexture::unavailable(
-                    Some(Arc::clone(&source_metadata)),
-                    outcome,
-                );
-                (placeholder.resident, outcome)
-            }
-        };
+        let source =
+            self.resolve_on_demand_texture(&path, super::TextureFailurePolicy::Unverified)?;
         Some(Arc::new(DecodedTextureFrames {
-            resident,
-            source_metadata: Some(source_metadata),
-            load_outcome,
+            resident: source.resident.clone(),
+            source_metadata: source.source_metadata.clone(),
+            load_outcome: source.load_outcome,
         }))
     }
 }

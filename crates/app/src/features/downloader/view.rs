@@ -1016,7 +1016,6 @@ mod tests {
     use crate::i18n::I18n;
     use crate::theme::{Tokens, ViewCtx};
 
-    use super::super::jobs::{DownloaderEvent, workshop_result_success_with_gma};
     use super::super::update;
     use super::{LayoutMode, Message, State, layout_mode, view};
 
@@ -1059,11 +1058,11 @@ mod tests {
         let mut state = State::default();
         let _effects = update(
             &mut state,
-            Message::EventReceived(DownloaderEvent::TaskStarted {
-                kind: WorkshopDownloadTaskKind::Download,
-                item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-                task_id: TaskId::from_raw(7),
-            }),
+            Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+                WorkshopDownloadTaskKind::Download,
+                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+                TaskId::from_raw(7),
+            )]),
         );
         assert_eq!(state.downloading().len(), 1);
         let row_id = state.downloading()[0].id();
@@ -1101,20 +1100,18 @@ mod tests {
         let mut state = State::default();
         let _effects = update(
             &mut state,
-            Message::EventReceived(DownloaderEvent::TaskStarted {
-                kind: WorkshopDownloadTaskKind::Extract,
-                item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-                task_id: TaskId::from_raw(7),
-            }),
+            Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+                WorkshopDownloadTaskKind::Extract,
+                PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+                TaskId::from_raw(7),
+            )]),
         );
         let _effects = update(
             &mut state,
-            Message::EventReceived(DownloaderEvent::WorkshopDownloadFinished(
-                workshop_result_success_with_gma(
-                    123,
-                    PathBuf::from("/tmp/extracted/Addon"),
-                    Some(PathBuf::from("/tmp/workshop/addon_123.gma")),
-                ),
+            Message::TaskEventsReceived(crate::test_support::extraction_finished(
+                TaskId::from_raw(7),
+                Some(PathBuf::from("/tmp/workshop/addon_123.gma")),
+                PathBuf::from("/tmp/extracted/Addon"),
             )),
         );
         assert_eq!(state.extracting().len(), 1);
@@ -1157,7 +1154,6 @@ mod tests {
 #[test]
 #[ignore = "opt-in real UI screenshots"]
 fn capture_downloader_display_fixtures() {
-    use super::jobs::DownloaderEvent;
     use crate::bridge::domain::PublishedFileId;
     use crate::bridge::tasks::{TaskId, WorkshopDownloadTaskKind};
     let mut state = State::default();
@@ -1167,11 +1163,11 @@ fn capture_downloader_display_fixtures() {
     ] {
         super::update(
             &mut state,
-            Message::EventReceived(DownloaderEvent::TaskStarted {
+            Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
                 kind,
-                item_id: PublishedFileId::fixture(id),
-                task_id: TaskId::from_raw(id),
-            }),
+                PublishedFileId::fixture(id),
+                TaskId::from_raw(id),
+            )]),
         );
     }
     let i18n = crate::i18n::I18n::for_locale(Some("en"));

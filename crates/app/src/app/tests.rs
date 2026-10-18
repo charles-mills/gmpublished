@@ -340,30 +340,19 @@ fn downloader_executor_cancels_requested_tasks() {
 fn workshop_download_row_cancel_button_aborts_the_backend_transaction() {
     let mut app = App::new_for_test();
 
+    let events = app.environment.ctx.take_task_events_for_test();
     let transaction = app.environment.ctx.begin_transaction();
     let _task = app.update(RootMessage::BackendEvent(
         BackendRuntimeEvent::DownloadStarted {
             transaction_id: transaction.id(),
             request_id: None,
+            workshop_id: Some(PublishedFileId::fixture(123)),
         },
     ));
-
-    let actions = app
-        .environment
-        .ctx
-        .handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            crate::bridge::tasks::TransactionRuntimeEvent::Data {
-                id: transaction.id(),
-                payload: gmpublished_backend::TransactionPayload::WorkshopItem(
-                    gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
-                ),
-            },
-        ))
-        .into_actions();
-    assert!(!actions.is_empty(), "workshop item data must start the row");
-    for action in actions {
-        let _task = app.update(backend_runtime_action_message(action));
-    }
+    let event = events
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("backend start must enter the ordered task stream");
+    let _task = app.update(RootMessage::TaskEvent(event));
     assert_eq!(app.state.features.downloader.downloading().len(), 1);
 
     let row_id = app.state.features.downloader.downloading()[0].id();
@@ -384,13 +373,13 @@ fn downloader_row_cancel_button_is_clickable_through_the_full_app_view() {
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::Downloader,
     )));
-    let _task = app.update(RootMessage::Downloader(downloader::Message::EventReceived(
-        downloader::DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::fixture(123),
-            task_id: TaskId::from_raw(7),
-        },
-    )));
+    let _task = app.update(RootMessage::Downloader(
+        downloader::Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::fixture(123),
+            TaskId::from_raw(7),
+        )]),
+    ));
     assert_eq!(app.state.features.downloader.downloading().len(), 1);
     let row_id = app.state.features.downloader.downloading()[0].id();
 
@@ -431,15 +420,12 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
     )
     .expect("fixture archive should load");
 
-    let transaction = app.environment.ctx.begin_transaction();
     let task = app
         .environment
         .ctx
         .create_task(TaskKind::Extract, TransactionStatus::Extracting);
     let task_id = task.id();
-    app.environment
-        .ctx
-        .correlate_backend_transaction(transaction.id(), task);
+    let transaction = app.environment.ctx.begin_correlated_transaction(task);
 
     assert!(app.environment.ctx.cancel_task(task_id));
     assert!(transaction.aborted());
@@ -452,6 +438,36 @@ fn local_extraction_transaction_is_correlated_and_cancellation_stops_it() {
 
     assert!(matches!(result, Err(GmaError::Cancelled)));
     assert!(!app.environment.ctx.cancel_task(task_id));
+}
+
+#[test]
+fn malformed_local_archive_finishes_its_identified_task_with_one_error() {
+    use crate::bridge::tasks::{TaskIdentity, TaskUpdate};
+
+    let app = App::new_for_test();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("broken.gma");
+    std::fs::write(&path, b"invalid archive").unwrap();
+    let receiver = app.environment.ctx.take_task_events_for_test();
+    let task = app
+        .environment
+        .ctx
+        .create_local_extraction_task(path.clone(), 15);
+    let task_id = task.id();
+    let result = crate::app::runners::run_local_gma_extraction(
+        &app.environment.ctx,
+        &path,
+        ExtractDestination::Temp,
+        task,
+    );
+    assert!(result.is_err());
+    let updates = receiver.try_iter().collect::<Vec<_>>();
+    assert_eq!(updates.len(), 2);
+    assert!(updates.iter().all(|(id, _)| *id == task_id));
+    assert!(matches!(updates[0].1.as_update(), TaskUpdate::Started {
+        identity: Some(TaskIdentity::LocalExtraction { path: source, .. }), ..
+    } if source == &path));
+    assert!(matches!(updates[1].1.as_update(), TaskUpdate::Error(_)));
 }
 
 #[test]
@@ -1753,42 +1769,9 @@ fn library_refreshed_fans_out_to_installed_addons_search_and_size_analyzer() {
 }
 
 #[test]
-fn backend_runtime_actions_translate_to_downloader_events() {
-    let start = backend_runtime_action_message(BackendRuntimeAction::DownloadTaskStarted {
-        kind: WorkshopDownloadTaskKind::Download,
-        item_id: PublishedFileId::fixture(123),
-        task_id: TaskId::from_raw(7),
-    });
-    assert!(matches!(
-        start,
-        RootMessage::Downloader(downloader::Message::EventReceived(
-            downloader::DownloaderEvent::TaskStarted {
-                kind: WorkshopDownloadTaskKind::Download,
-                item_id,
-                task_id
-            }
-        )) if item_id == PublishedFileId::fixture(123) && task_id == TaskId::from_raw(7)
-    ));
-
-    let finished = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
-        request_id: None,
-        item_id: PublishedFileId::fixture(456),
-        installed_path: None,
-        extracted_path: PathBuf::from("/tmp/extracted/456"),
-    });
-    assert!(matches!(
-        finished,
-        RootMessage::Downloader(downloader::Message::EventReceived(
-            downloader::DownloaderEvent::WorkshopDownloadFinished(result)
-        )) if result.item_id == PublishedFileId::fixture(456)
-            && result.outcome.as_ref().is_ok_and(|success| {
-                success.extracted_path == std::path::Path::new("/tmp/extracted/456")
-                    && success.installed_path.is_none()
-            })
-    ));
-
-    let snapshot = backend_runtime_action_message(BackendRuntimeAction::DownloadFinished {
-        request_id: Some(crate::bridge::tasks::WorkshopSnapshotId::new(77)),
+fn backend_runtime_download_results_translate_to_their_consumers() {
+    let snapshot = backend_runtime_action_message(BackendRuntimeAction::SnapshotDownloaded {
+        request_id: crate::bridge::tasks::WorkshopSnapshotId::new(77),
         item_id: PublishedFileId::fixture(456),
         installed_path: None,
         extracted_path: PathBuf::from("/tmp/snapshot/456"),
@@ -2222,13 +2205,13 @@ fn update_check_completion_marks_update_nag_available() {
 fn downloader_start_events_sync_shell_job_badge() {
     let mut app = App::new_for_test();
 
-    let _task = app.update(RootMessage::Downloader(downloader::Message::EventReceived(
-        downloader::DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::fixture(123),
-            task_id: TaskId::from_raw(7),
-        },
-    )));
+    let _task = app.update(RootMessage::Downloader(
+        downloader::Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::fixture(123),
+            TaskId::from_raw(7),
+        )]),
+    ));
 
     let badge = app
         .state
@@ -2341,12 +2324,10 @@ fn model_workspace_preserves_selection_without_replacing_archive_previews() {
         &mut app.state.features.model_manager,
         model_manager::Message::SourceDropped("test.smd".into()),
     );
-    let _task = app.update(RootMessage::ModelManager(
-        model_manager::Message::PreviewSelectionCaptured {
-            skin: 1,
-            bodygroups: vec![2],
-        },
-    ));
+    app.state
+        .features
+        .model_manager
+        .set_workspace_selection(1, vec![2]);
     let mut request = file_preview_request();
     request.entry_path = "models/test.mdl".into();
     model_manager::update(
@@ -2397,7 +2378,6 @@ fn model_workspace_preserves_selection_without_replacing_archive_previews() {
     let _task = app.update(RootMessage::ModelPreview(
         file_preview::Message::SkinSelected(0),
     ));
-    app.capture_model_stage();
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::Downloader,
     )));
@@ -2429,7 +2409,6 @@ fn model_workspace_preserves_selection_without_replacing_archive_previews() {
     let _task = app.handle_file_drop("replacement.smd".into());
     assert!(!app.state.features.model_preview.is_open());
     assert!(app.state.features.file_preview.is_open());
-    app.capture_model_stage();
     assert_eq!(
         app.state.features.model_manager.preview_selection(),
         (0, vec![])
@@ -2445,7 +2424,8 @@ fn live_skin_survives_playback_and_route_changes_until_another_skin_is_selected(
     let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
         shell::Route::Models,
     )));
-    let model = crate::model_animation_test_support::animated_model();
+    let mut model = crate::model_animation_test_support::animated_model();
+    Arc::make_mut(&mut model).bodygroups = vec![2];
     let material = model.scene.materials[0].name.clone();
     let effects = model_manager::update(
         &mut app.state.features.model_manager,
@@ -2495,6 +2475,21 @@ fn live_skin_survives_playback_and_route_changes_until_another_skin_is_selected(
         .workspace_material_tints()
         .to_vec();
     assert_eq!(tints.len(), 1);
+    let _task = app.apply_model_manager_message(model_manager::Message::Viewer(
+        file_preview::Message::BodygroupChoiceSelected {
+            group: 0,
+            choice: 1,
+        },
+    ));
+    assert_eq!(
+        app.state.features.model_manager.preview_selection(),
+        (1, vec![1])
+    );
+    assert_eq!(
+        app.state.features.model_preview.workspace_material_tints(),
+        tints
+    );
+
     let _task = app.apply_model_manager_message(model_manager::Message::Viewer(
         file_preview::Message::ModelPlaybackToggled,
     ));
@@ -2589,7 +2584,10 @@ fn modeller_async_source_switch_retires_cancelled_decode_without_a_callback() {
         !app.state.features.model_manager.preview_busy(),
         "source replacement must retire the cancelled decoder's manager job"
     );
-    assert_eq!(app.state.features.model_preview_loading, None);
+    assert_eq!(
+        app.state.features.model_manager.presentation_request(),
+        None
+    );
     assert!(!app.state.features.model_preview.is_open());
 
     let effects = model_manager::update(
@@ -3083,13 +3081,15 @@ fn staged_modeller_preview(app: &mut App) {
             group: 0,
             choice: 1,
         },
-        file_preview::Message::StagePlacementRestored {
-            position: [32.0, 64.0, 128.0],
-            angles: [0.0, 90.0, 0.0],
-        },
+        file_preview::Message::StageTransformChanged({
+            let mut transform = state.stage_transform().unwrap();
+            transform.position = [32.0, 64.0, 128.0].into();
+            transform.angles = [0.0, 90.0, 0.0].into();
+            transform
+        }),
         file_preview::Message::MapFogToggled(false),
     ] {
-        let _effects = file_preview::update(state, message);
+        let _task = app.apply_model_preview_message(message);
     }
     app.sync_model_workspace();
     assert_eq!(
@@ -3119,7 +3119,12 @@ fn modeller_async_quality_reload_preserves_staged_model_selection_and_transform(
         let _task = app.apply_model_preview_message(
             file_preview::Message::MapReducedTextureDetailToggled(true),
         );
-        let generation = app.state.features.model_preview_loading.unwrap().request;
+        let generation = app
+            .state
+            .features
+            .model_manager
+            .presentation_request()
+            .unwrap();
         let result = if success {
             Ok(original.clone())
         } else {
@@ -3179,7 +3184,12 @@ fn modeller_async_quality_reload_does_not_finish_a_newer_manager_build() {
     let original = app.state.features.model_preview.current().unwrap().clone();
     let _task = app
         .apply_model_preview_message(file_preview::Message::MapReducedTextureDetailToggled(true));
-    let generation = app.state.features.model_preview_loading.unwrap().request;
+    let generation = app
+        .state
+        .features
+        .model_manager
+        .presentation_request()
+        .unwrap();
     model_manager::update(
         &mut app.state.features.model_manager,
         model_manager::Message::AutomaticAxesChanged(false),
@@ -3230,7 +3240,13 @@ fn modeller_workflow_until_decode(app: &mut App, source: PathBuf) -> Task<RootMe
     use crate::features::model_manager;
     let mut task = app.apply_model_manager_message(model_manager::Message::SourceDropped(source));
     for _ in 0..10 {
-        if app.state.features.model_preview_loading.is_some() {
+        if app
+            .state
+            .features
+            .model_manager
+            .presentation_request()
+            .is_some()
+        {
             return task;
         }
         let messages = task_messages(task);
@@ -3320,14 +3336,23 @@ fn modeller_async_texture_choice_waits_for_owned_stage_decode() {
         model: Box::new(model_request),
         map: Box::new(map),
     });
-    let generation = app.state.features.model_preview_loading.unwrap().request;
+    let generation = app
+        .state
+        .features
+        .model_manager
+        .presentation_request()
+        .unwrap();
     let manager = app.state.features.model_manager.preview_job_generation();
     for reduced in [true, false, true] {
         let _task = app.apply_model_preview_message(
             file_preview::Message::MapReducedTextureDetailToggled(reduced),
         );
         assert_eq!(
-            app.state.features.model_preview_loading.unwrap().request,
+            app.state
+                .features
+                .model_manager
+                .presentation_request()
+                .unwrap(),
             generation
         );
         assert_eq!(
@@ -3339,7 +3364,12 @@ fn modeller_async_texture_choice_waits_for_owned_stage_decode() {
         generation,
         Box::new(Ok((data.clone(), model))),
     ));
-    let quality_generation = app.state.features.model_preview_loading.unwrap().request;
+    let quality_generation = app
+        .state
+        .features
+        .model_manager
+        .presentation_request()
+        .unwrap();
     assert_ne!(quality_generation, generation);
     assert_eq!(
         app.state
@@ -3390,10 +3420,11 @@ fn modeller_async_real_stage_quality_rebuild_and_cache_round_trip() {
     let stage = app.apply_model_manager_message(model_manager::Message::StageRequested);
     modeller_workflow_drain(&mut app, stage);
     assert!(app.state.features.model_preview.stage_model().is_some());
-    let _task = app.apply_model_preview_message(file_preview::Message::StagePlacementRestored {
-        position: [32.0, 64.0, 128.0],
-        angles: [0.0, 90.0, 0.0],
-    });
+    let mut transform = app.state.features.model_preview.stage_transform().unwrap();
+    transform.position = [32.0, 64.0, 128.0].into();
+    transform.angles = [0.0, 90.0, 0.0].into();
+    let _task =
+        app.apply_model_preview_message(file_preview::Message::StageTransformChanged(transform));
     let placement = app.state.features.model_preview.stage_transform();
     let quality = app
         .apply_model_preview_message(file_preview::Message::MapReducedTextureDetailToggled(true));

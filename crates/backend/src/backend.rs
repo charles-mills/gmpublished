@@ -138,6 +138,13 @@ impl Backend {
         self.transactions.begin()
     }
 
+    pub fn begin_transaction_with(
+        &self,
+        initialize: impl FnOnce(&crate::Transaction),
+    ) -> crate::Transaction {
+        self.transactions.begin_with_initializer(initialize)
+    }
+
     #[must_use]
     pub fn cancel_all_transactions(&self) -> usize {
         self.transactions.cancel_all()

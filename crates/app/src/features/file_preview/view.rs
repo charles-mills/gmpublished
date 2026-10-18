@@ -1810,14 +1810,6 @@ fn map_inspector_rows<'a>(
                 .wrapping(text::Wrapping::WordOrGlyph),
         );
     }
-    let rejected = preparation.source_rejections + preparation.resident_rejections;
-    if rejected != 0 {
-        rows = rows.push(info_row(
-            i18n.tr("file-preview-map-texture-budget-rejections"),
-            count_text(u32::try_from(rejected).unwrap_or(u32::MAX)),
-            &tokens,
-        ));
-    }
     if stats.skipped_prop_count != 0 {
         rows = rows.push(info_row(
             i18n.tr("file-preview-map-skipped-props"),

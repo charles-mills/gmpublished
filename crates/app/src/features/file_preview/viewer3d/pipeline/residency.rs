@@ -327,12 +327,7 @@ impl Validator {
         resident: bool,
         outcome: TextureLoadOutcome,
     ) {
-        if !resident
-            || matches!(
-                outcome,
-                TextureLoadOutcome::Deferred | TextureLoadOutcome::Unplanned
-            )
-        {
+        if !resident || matches!(outcome, TextureLoadOutcome::Unplanned) {
             self.issues.push(TexturePreparationIssue {
                 material: material.to_owned(),
                 role,
@@ -528,57 +523,17 @@ mod tests {
     }
 
     #[test]
-    fn planning_results_cannot_enter_gpu_upload() {
-        let resolver = MaterialResolver::prop_lighting_fixture(
-            vec![
-                ("materials/test/planned.vmt", br#"LightmappedGeneric { "$basetexture" "test/image" "$bumpmap" "test/image" "$detail" "test/image" }"#.to_vec()),
-                ("materials/test/image.vtf", fixture_vtf_bytes(2, 2, vformats::vtf::VtfFormat::Rgba8888, &[&[255; 16]])),
-            ],
-            Vec::new(),
-        );
-        let (planned, requests) = resolver
-            .plan_texture_requests(|resolver| resolver.resolve_with_base2(&[], "test/planned"));
-        let error = validate(
-            &scene(planned.into_material().unwrap()),
-            &wgpu::Limits::default(),
-        )
-        .unwrap_err();
-        for role in ["base", "normal", "detail"] {
-            assert!(
-                error.issues.iter().any(
-                    |issue| issue.role == role && issue.outcome == TextureLoadOutcome::Deferred
-                ),
-                "{role}"
-            );
-        }
-        let admitted = resolver.with_texture_admissions(resolver.admit_texture_requests(requests));
-        let material = admitted
+    fn streamed_materials_are_valid_before_pixels_are_resident() {
+        let resolver = MaterialResolver::prop_lighting_fixture(vec![
+            ("materials/test/planned.vmt", br#"LightmappedGeneric { "$basetexture" "test/image" "$bumpmap" "test/image" "$detail" "test/image" }"#.to_vec()),
+            ("materials/test/image.vtf", fixture_vtf_bytes(2, 2, vformats::vtf::VtfFormat::Rgba8888, &[&[255; 16]])),
+        ], Vec::new());
+        let material = resolver
             .resolve_with_base2(&[], "test/planned")
             .into_material()
             .unwrap();
-        assert!(validate(&scene(material), &wgpu::Limits::default()).is_ok());
-    }
-
-    #[test]
-    fn no_draw_does_not_admit_retained_surface_pages_for_gpu_residency() {
-        let resolver = MaterialResolver::prop_lighting_fixture(
-            vec![
-                (
-                    "materials/test/hidden.vmt",
-                    br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
-                ),
-                (
-                    "materials/test/image.vtf",
-                    fixture_vtf_bytes(1, 1, vformats::vtf::VtfFormat::Rgba8888, &[&[1, 2, 3, 255]]),
-                ),
-            ],
-            Vec::new(),
-        );
-        let (planned, _) = resolver
-            .plan_texture_requests(|resolver| resolver.resolve_with_base2(&[], "test/hidden"));
-        let mut material = planned.into_material().unwrap();
-        assert!(validate(&scene(material.clone()), &wgpu::Limits::default()).is_err());
-        material.render_mode = crate::bridge::materials::RenderMode::NoDraw;
+        assert!(material.texture.as_ref().unwrap().resident().is_none());
+        assert!(material.texture.as_ref().unwrap().on_demand().is_some());
         assert!(validate(&scene(material), &wgpu::Limits::default()).is_ok());
     }
     fn validator() -> Validator {

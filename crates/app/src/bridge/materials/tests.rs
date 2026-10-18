@@ -378,13 +378,13 @@ fn effective_two_base_roles_are_shared_by_world_and_primary_consumers() {
             Some("test/two")
         );
         assert_eq!(
-            resolver.shared.texture_assets.resident_count(),
+            resolver.selected_reloadable_paths().len(),
             if active { 3 } else { 1 }
         );
         if active {
             assert!(Arc::ptr_eq(
-                world.texture2.as_ref().unwrap().resident().unwrap(),
-                primary.texture2.as_ref().unwrap().resident().unwrap()
+                world.texture2.as_ref().unwrap().on_demand().unwrap().0,
+                primary.texture2.as_ref().unwrap().on_demand().unwrap().0
             ));
             assert_eq!(texture_rgba(world.texture.as_ref().unwrap())[3], 127);
             assert_eq!(texture_rgba(world.texture2.as_ref().unwrap())[3], 63);
@@ -394,10 +394,10 @@ fn effective_two_base_roles_are_shared_by_world_and_primary_consumers() {
 
 #[test]
 fn base_blending_requires_both_texture_parameters_and_preserves_masked_mode_without_mask() {
-    for (base, second, expected, decoded) in [
-        (true, true, SourceSurfaceBaseBlend::Masked, 2),
-        (true, false, SourceSurfaceBaseBlend::Single, 1),
-        (false, true, SourceSurfaceBaseBlend::Single, 0),
+    for (base, second, expected) in [
+        (true, true, SourceSurfaceBaseBlend::Masked),
+        (true, false, SourceSurfaceBaseBlend::Single),
+        (false, true, SourceSurfaceBaseBlend::Single),
     ] {
         let primary = if base {
             r#""$basetexture" "test/one""#
@@ -429,7 +429,6 @@ fn base_blending_requires_both_texture_parameters_and_preserves_masked_mode_with
         assert_eq!(surface.base_blend, expected);
         assert!(surface.masked_blending);
         assert!(!surface.uses_blend_modulation(true));
-        assert_eq!(resolver.shared.texture_assets.resident_count(), decoded);
         assert_eq!(material.texture2.is_some(), base && second);
     }
 }
@@ -492,8 +491,8 @@ fn decoded_texture_cache_reuses_shared_vtf_path() {
         .expect("second material should resolve");
 
     assert!(Arc::ptr_eq(
-        first.resident().unwrap(),
-        second.resident().unwrap()
+        first.on_demand().unwrap().0,
+        second.on_demand().unwrap().0
     ));
 }
 
@@ -529,8 +528,8 @@ fn alphatest_and_opaque_materials_share_authored_texture_data() {
         .expect("opaque material should resolve");
 
     assert!(Arc::ptr_eq(
-        cutout.resident().unwrap(),
-        opaque.resident().unwrap()
+        cutout.on_demand().unwrap().0,
+        opaque.on_demand().unwrap().0
     ));
     assert_eq!(texture_rgba(&cutout), rgba);
     assert_eq!(texture_rgba(&opaque), rgba);
@@ -646,7 +645,7 @@ fn decoded_texture_cap_selects_authored_mip_without_resampling() {
 
     assert_eq!((texture.width(), texture.height()), (2, 1));
     assert_eq!(texture.rgba_bytes().expect("rgba texture"), lower);
-    assert_eq!(texture.resident().unwrap().id().first_source_mip, 1);
+    assert_eq!(texture.read_for_test().id().first_source_mip, 1);
     assert_eq!(texture.original_dimensions(), (4, 2));
 }
 
@@ -663,6 +662,7 @@ fn bc_resolution_reorders_vtf_mips_largest_first() {
     );
 
     let texture = resolved_bc_texture(&bytes, None).expect("BC texture");
+    let texture = texture.materialized_for_test();
     let (format, mips) = texture.bc_payload().expect("BC payload");
 
     assert_eq!(format, BcFormat::Bc1);
@@ -677,36 +677,6 @@ fn bc_resolution_reorders_vtf_mips_largest_first() {
         vec![(8, 4, 3), (4, 2, 2), (2, 1, 1)]
     );
     assert_eq!(texture.original_dimensions(), (8, 4));
-}
-
-#[test]
-fn bc_texture_budget_counts_compressed_mip_bytes() {
-    let block = solid_bc1_red_block();
-    let archive = PreviewArchive::from_gma(
-        GmaFixtureBuilder::new("BC Budget Fixture")
-            .entry(
-                "materials/test/first.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/first" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/first.vtf",
-                create_bc_vtf_bytes(4, 4, VtfFormat::Dxt1, &[block.as_slice()]),
-            )
-            .build(),
-    )
-    .expect("fixture archive should load");
-    let budget = Arc::new(DecodedTextureBudget::new(8));
-    let resolver = MaterialResolver::new(Arc::new(archive), None)
-        .with_bc_texture_support(true)
-        .with_decoded_texture_budget(Arc::clone(&budget));
-
-    let texture = resolver
-        .resolve(&[], "test/first")
-        .expect("BC material should resolve");
-
-    assert!(texture.is_bc());
-    assert_eq!(budget.decoded_bytes(), 8);
-    assert_eq!(budget.rejected_textures(), 0);
 }
 
 #[test]
@@ -743,8 +713,8 @@ fn bc_texture_cache_reuses_path_across_alpha_modes() {
     assert!(!cutout.render_mode.texture_alpha_policy().force_opaque());
     assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
     assert!(Arc::ptr_eq(
-        cutout.texture.as_ref().unwrap().resident().unwrap(),
-        opaque.texture.as_ref().unwrap().resident().unwrap()
+        cutout.texture.as_ref().unwrap().on_demand().unwrap().0,
+        opaque.texture.as_ref().unwrap().on_demand().unwrap().0
     ));
     assert!(cutout.texture.as_ref().unwrap().is_bc());
 }
@@ -1027,7 +997,7 @@ fn missing_basetexture_uses_native_error_without_substituting_envmap() {
     assert_eq!(texture.load_outcome(), TextureLoadOutcome::MissingSource);
     assert!(texture.has_effective_base_texture());
     assert!(Arc::ptr_eq(
-        texture.resident().unwrap(),
+        texture.read_for_test(),
         &texture_asset::native_error_resident()
     ));
 }
@@ -1969,7 +1939,7 @@ fn water_patch_preserves_normal_animation_and_shader_with_a_base_texture() {
         .into_material()
         .unwrap();
     assert!(Arc::ptr_eq(
-        normal.resident().unwrap(),
+        normal.on_demand().unwrap().0,
         again
             .shader
             .water()
@@ -1977,8 +1947,9 @@ fn water_patch_preserves_normal_animation_and_shader_with_a_base_texture() {
             .normal_map
             .as_ref()
             .unwrap()
-            .resident()
+            .on_demand()
             .unwrap()
+            .0
     ));
 }
 
@@ -2002,77 +1973,6 @@ fn missing_water_textures_keep_shader_and_use_single_flat_normal_fallback() {
     assert!(!water.has_base_texture);
     assert!(water.normal_map.is_none());
     assert!(resolved.texture.as_ref().unwrap().is_water_fallback());
-}
-
-#[test]
-fn water_normals_use_stored_linear_mips_and_share_the_texture_budget() {
-    let high = [128, 160, 240, 37].repeat(4);
-    let low = [127, 128, 255, 17];
-    let archive = PreviewArchive::from_gma(
-        GmaFixtureBuilder::new("Water Limits")
-            .entry(
-                "materials/water.vmt",
-                br#"Water { "$normalmap" "normal" }"#.to_vec(),
-            )
-            .entry(
-                "materials/normal.vtf",
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&low, &high]),
-            )
-            .build(),
-    )
-    .unwrap();
-    let resolver = MaterialResolver::new(Arc::new(archive), None);
-    let budget = Arc::new(DecodedTextureBudget::new(4));
-    let limited = resolver
-        .with_decoded_texture_max_dimension(1)
-        .with_decoded_texture_budget(Arc::clone(&budget));
-    let material = limited
-        .resolve_primary(&[], "water")
-        .into_material()
-        .unwrap();
-    let normal = material
-        .shader
-        .water()
-        .unwrap()
-        .normal_map
-        .as_ref()
-        .unwrap();
-    assert_eq!(normal.frame(0).unwrap().len(), 1);
-    assert_eq!(normal.frame(0).unwrap()[0].bytes.as_slice(), low);
-    assert_eq!(budget.decoded_bytes(), 4);
-    assert!(
-        limited
-            .resolve_primary(&[], "water")
-            .into_material()
-            .unwrap()
-            .shader
-            .water()
-            .unwrap()
-            .normal_map
-            .is_some()
-    );
-    assert_eq!(
-        budget.decoded_bytes(),
-        4,
-        "cache hits must not reserve memory twice"
-    );
-    let full = resolver
-        .with_decoded_texture_budget(Arc::clone(&budget))
-        .resolve_primary(&[], "water")
-        .into_material()
-        .unwrap();
-    assert_eq!(
-        full.shader
-            .water()
-            .unwrap()
-            .normal_map
-            .as_ref()
-            .unwrap()
-            .load_outcome(),
-        TextureLoadOutcome::QualityRejected
-    );
-    assert_eq!(budget.rejected_textures(), 1);
-    assert_eq!(budget.decoded_bytes(), 4);
 }
 
 #[test]
@@ -2235,8 +2135,8 @@ fn lightmapped_patch_preserves_linear_bumps_and_diffuse_controls() {
     let flat = flat.shader.surface().unwrap();
     assert!(!flat.diffuse_bump);
     assert!(Arc::ptr_eq(
-        flat.normal.as_ref().unwrap().resident().unwrap(),
-        lit.normal.as_ref().unwrap().resident().unwrap()
+        flat.normal.as_ref().unwrap().on_demand().unwrap().0,
+        lit.normal.as_ref().unwrap().on_demand().unwrap().0
     ));
 }
 
@@ -2272,8 +2172,8 @@ fn unlit_vertex_alpha_blends_partial_texture_alpha_without_changing_opaque_mater
     assert!(opaque.render_mode.texture_alpha_policy().force_opaque());
     assert_eq!(texture_rgba(opaque.texture.as_deref().unwrap()), rgba);
     assert!(Arc::ptr_eq(
-        opaque.texture.as_ref().unwrap().resident().unwrap(),
-        blended.texture.as_ref().unwrap().resident().unwrap()
+        opaque.texture.as_ref().unwrap().on_demand().unwrap().0,
+        blended.texture.as_ref().unwrap().on_demand().unwrap().0
     ));
 }
 
@@ -2903,10 +2803,12 @@ fn shared_base_texture_cache_separates_raw_and_srgb_mip_filters() {
             .texture
             .unwrap();
         assert!(Arc::ptr_eq(
-            linear.resident().unwrap(),
-            encoded.resident().unwrap()
+            linear.on_demand().unwrap().0,
+            encoded.on_demand().unwrap().0
         ));
         assert_eq!(linear.rgba_bytes(), encoded.rgba_bytes());
+        let linear = linear.materialized_for_test();
+        let encoded = encoded.materialized_for_test();
         let linear_mip = linear.mip_chain().nth(1).unwrap();
         let encoded_mip = encoded.mip_chain().nth(1).unwrap();
         assert_eq!(linear_mip.rgba, [23, 45, 67, 89]);
@@ -3040,55 +2942,6 @@ fn representative_mapping_uses_effective_role_priority_and_source_dimensions() {
 }
 
 #[test]
-fn rejected_warm_pak_index_blocks_lower_materials_without_poisoning_shared_directory() {
-    let pak = MapPakFile::from_pak_bytes(zip_fixture([zip_stored_entry(
-        "materials/test/image.vmt",
-        br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
-    )]));
-    assert_eq!(pak.indexed_entries().unwrap().len(), 1);
-    let addon = Arc::new(
-        PreviewArchive::from_gma(
-            GmaFixtureBuilder::new("Lower")
-                .entry(
-                    "materials/test/image.vmt",
-                    br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
-                )
-                .entry("materials/test/image.vtf", create_vtf_bytes(&[23; 16]))
-                .build(),
-        )
-        .unwrap(),
-    );
-    let strict = MaterialResolver::with_pakfile_source_and_index_limits(
-        Arc::clone(&addon),
-        None,
-        pak.clone(),
-        vformats::ArchiveIndexLimits {
-            entries: 0,
-            ..Default::default()
-        },
-        Arc::new(TextureWorkingBudget::new(1024 * 1024)),
-    );
-    assert!(matches!(
-        strict.resolve_primary(&[], "test/image"),
-        MaterialResolution::IndexUnavailable { .. }
-    ));
-    let path = content_path("materials/test/image.vtf");
-    assert!(matches!(
-        strict.selected_texture_asset(&path),
-        Err(TextureSourceError::WorkingBudget {
-            error: TextureAssetError::ArchiveIndex(_),
-            ..
-        })
-    ));
-    assert_eq!(strict.archive_index_stats().archives, 0);
-    let wide = MaterialResolver::with_pakfile_source(addon, None, pak);
-    assert_eq!(
-        wide.resolve_primary(&[], "test/image").outcome(),
-        MaterialResolutionOutcome::Loaded
-    );
-}
-
-#[test]
 fn aggregate_sibling_admission_keeps_earlier_sources_and_blocks_unknown_later_entries() {
     let root = tempfile::TempDir::new().unwrap();
     let addons = root.path().join("garrysmod/addons");
@@ -3199,78 +3052,6 @@ fn rejected_vpk_index_never_turns_into_a_lower_mount_lookup() {
 }
 
 #[test]
-fn cancelled_partial_sibling_index_releases_records_and_allows_another_token_to_retry() {
-    use std::{
-        sync::mpsc,
-        thread,
-        time::{Duration, Instant},
-    };
-    fn wait_queued(budget: &TextureWorkingBudget, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while budget.queued_requests() < count {
-            assert!(Instant::now() < deadline);
-            thread::yield_now();
-        }
-    }
-    let root = tempfile::tempdir().unwrap();
-    let game = root.path().join("game");
-    for name in ["a", "b"] {
-        write_gma_fixture(
-            game.join(format!("garrysmod/addons/{name}.gma")),
-            &GmaFixtureBuilder::new(name)
-                .entry(format!("materials/{name}.vtf"), create_vtf_bytes(&[42; 16]))
-                .build(),
-        );
-    }
-    let working = Arc::new(TextureWorkingBudget::new(128 * 1024));
-    let resolver = MaterialResolver::new_with_index_limits(
-        PreviewArchiveSource::from_folder([]),
-        Some(game),
-        vformats::ArchiveIndexLimits::default(),
-        Arc::clone(&working),
-    );
-    let held = working.request(128 * 1024).unwrap().acquire();
-    let cancellation = crate::preparation::PreparationCancellation::default();
-    let cancelled = resolver.with_cancellation(cancellation.clone());
-    let worker =
-        thread::spawn(move || cancelled.selected_texture_asset(&content_path("materials/b.vtf")));
-    wait_queued(&working, 1);
-    let blocker_budget = Arc::clone(&working);
-    let (blocked_tx, blocked_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let blocker = thread::spawn(move || {
-        let _lease = blocker_budget.request(128 * 1024).unwrap().acquire();
-        blocked_tx.send(()).unwrap();
-        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    });
-    wait_queued(&working, 2);
-    drop(held);
-    blocked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    wait_queued(&working, 1);
-    assert_eq!(resolver.archive_index_stats().archives, 1);
-    cancellation.cancel();
-    assert!(matches!(
-        worker.join().unwrap(),
-        Err(TextureSourceError::Preparation {
-            error: TextureAssetError::Cancelled(_),
-            ..
-        })
-    ));
-    assert_eq!(resolver.archive_index_stats().archives, 0);
-    assert_eq!(resolver.archive_index_stats().entries, 0);
-    assert!(resolver.shared.sibling_gmas.get_ref().is_none());
-    release_tx.send(()).unwrap();
-    blocker.join().unwrap();
-    assert!(
-        resolver
-            .selected_texture_asset(&content_path("materials/b.vtf"))
-            .is_ok()
-    );
-    assert_eq!(resolver.archive_index_stats().archives, 2);
-    assert_eq!(working.current_bytes(), 0);
-}
-
-#[test]
 fn already_cancelled_source_factory_stops_before_discovery_or_pak_index() {
     let token = crate::preparation::PreparationCancellation::default();
     token.cancel();
@@ -3303,15 +3084,15 @@ fn on_demand_compressed_source_decoder_policy_is_checked_on_cold_and_cached_sour
                 path.as_str(),
                 fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[3; 4], &[7; 16]]),
             )])),
-        )
-        .with_on_demand_textures();
+        );
         let decoder = SourceRef::Pakfile(resolver.config.pakfile.as_ref().unwrap())
             .descriptor(&path)
             .unwrap()
             .unwrap()
-            .cost()
+            .into_reader()
             .unwrap()
-            .decoder_bytes;
+            .1
+            .decoder_working_bytes();
         assert!(decoder > 0);
         let exact = resolver.with_texture_decoder_limit(decoder);
         let cached = warm.then(|| exact.selected_reloadable_texture(&path).unwrap());
@@ -3338,7 +3119,6 @@ fn on_demand_bc_handle_preserves_limits_for_capability_conversion() {
         )],
         Vec::new(),
     )
-    .with_on_demand_textures()
     .with_texture_resource_limit(8)
     .with_texture_decoder_limit(8);
     let source = resolver
@@ -3441,8 +3221,7 @@ fn sparse_large_animation_sources_keep_last_frame_reads_and_policy_bounded() {
                 PreviewArchiveSource::from_folder([(path.to_owned(), declared_len, disk)]),
                 None,
             ),
-        }
-        .with_on_demand_textures();
+        };
         let source = resolver
             .selected_reloadable_texture(&ContentPath::new(path).unwrap())
             .unwrap();
@@ -3511,8 +3290,8 @@ fn patch_color_modulation_preserves_shared_bc_texture_and_alpha() {
     let tinted = resolver.resolve(&[], "test/tinted").unwrap();
     assert!(tinted.is_bc());
     assert!(Arc::ptr_eq(
-        original.resident().unwrap(),
-        tinted.resident().unwrap()
+        original.on_demand().unwrap().0,
+        tinted.on_demand().unwrap().0
     ));
     let material = resolver
         .resolve_primary(&[], "test/tinted")
@@ -3521,16 +3300,17 @@ fn patch_color_modulation_preserves_shared_bc_texture_and_alpha() {
     assert_eq!(material.shader.surface().unwrap().color2, [0.25, 1.0, 1.0]);
     let original_again = resolver.resolve(&[], "test/base").unwrap();
     assert!(Arc::ptr_eq(
-        original.resident().unwrap(),
-        original_again.resident().unwrap()
+        original.on_demand().unwrap().0,
+        original_again.on_demand().unwrap().0
     ));
     assert!(Arc::ptr_eq(
-        tinted.resident().unwrap(),
+        tinted.on_demand().unwrap().0,
         resolver
             .resolve(&[], "test/tinted")
             .unwrap()
-            .resident()
+            .on_demand()
             .unwrap()
+            .0
     ));
 }
 
@@ -3592,8 +3372,8 @@ fn editable_model_tint_retains_base_channels_hidden_by_inherited_color2() {
     let texture = original.texture.as_ref().unwrap();
     assert_eq!(&texture_rgba(texture)[..4], &[255, 128, 64, 90]);
     assert!(Arc::ptr_eq(
-        texture.resident().unwrap(),
-        unchanged.texture.as_ref().unwrap().resident().unwrap()
+        texture.on_demand().unwrap().0,
+        unchanged.texture.as_ref().unwrap().on_demand().unwrap().0
     ));
     assert_eq!(original.render_mode, RenderMode::Translucent);
     let surface = original.shader.surface().unwrap();
@@ -3670,4 +3450,126 @@ fn authored_skin_exports_resolve_to_distinct_preview_colors() {
             .all(|value| (*value - expected).abs() < 1e-6)
     );
     assert_eq!(&texture_rgba(&blue)[..4], &[30, 70, 170, 255]);
+}
+
+#[test]
+fn rejected_warm_pak_index_blocks_lower_materials_without_poisoning_shared_directory() {
+    let pak = MapPakFile::from_pak_bytes(zip_fixture([zip_stored_entry(
+        "materials/test/image.vmt",
+        br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
+    )]));
+    assert_eq!(pak.indexed_entries().unwrap().len(), 1);
+    let addon = Arc::new(
+        PreviewArchive::from_gma(
+            GmaFixtureBuilder::new("Lower")
+                .entry(
+                    "materials/test/image.vmt",
+                    br#"UnlitGeneric { "$basetexture" "test/image" }"#.to_vec(),
+                )
+                .entry("materials/test/image.vtf", create_vtf_bytes(&[23; 16]))
+                .build(),
+        )
+        .unwrap(),
+    );
+    let strict = MaterialResolver::with_pakfile_source_and_index_limits(
+        Arc::clone(&addon),
+        None,
+        pak.clone(),
+        vformats::ArchiveIndexLimits {
+            entries: 0,
+            ..Default::default()
+        },
+        Arc::new(TextureWorkingBudget::new(1024 * 1024)),
+    );
+    assert!(matches!(
+        strict.resolve_primary(&[], "test/image"),
+        MaterialResolution::IndexUnavailable { .. }
+    ));
+    let path = content_path("materials/test/image.vtf");
+    assert!(matches!(
+        strict.selected_reloadable_texture(&path),
+        Err(TextureSourceError::WorkingBudget {
+            error: TextureAssetError::ArchiveIndex(_),
+            ..
+        })
+    ));
+    assert_eq!(strict.archive_index_stats().archives, 0);
+    let wide = MaterialResolver::with_pakfile_source(addon, None, pak);
+    assert_eq!(
+        wide.resolve_primary(&[], "test/image").outcome(),
+        MaterialResolutionOutcome::Loaded
+    );
+}
+
+#[test]
+fn cancelled_partial_sibling_index_releases_records_and_allows_another_token_to_retry() {
+    use std::{
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+    fn wait_queued(budget: &TextureWorkingBudget, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while budget.queued_requests() < count {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    for name in ["a", "b"] {
+        write_gma_fixture(
+            game.join(format!("garrysmod/addons/{name}.gma")),
+            &GmaFixtureBuilder::new(name)
+                .entry(format!("materials/{name}.vtf"), create_vtf_bytes(&[42; 16]))
+                .build(),
+        );
+    }
+    let working = Arc::new(TextureWorkingBudget::new(128 * 1024));
+    let resolver = MaterialResolver::new_with_index_limits(
+        PreviewArchiveSource::from_folder([]),
+        Some(game),
+        vformats::ArchiveIndexLimits::default(),
+        Arc::clone(&working),
+    );
+    let held = working.request(128 * 1024).unwrap().acquire();
+    let cancellation = crate::preparation::PreparationCancellation::default();
+    let cancelled = resolver.with_cancellation(cancellation.clone());
+    let worker = thread::spawn(move || {
+        cancelled.selected_reloadable_texture(&content_path("materials/b.vtf"))
+    });
+    wait_queued(&working, 1);
+    let blocker_budget = Arc::clone(&working);
+    let (blocked_tx, blocked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let blocker = thread::spawn(move || {
+        let _lease = blocker_budget.request(128 * 1024).unwrap().acquire();
+        blocked_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    });
+    wait_queued(&working, 2);
+    drop(held);
+    blocked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_queued(&working, 1);
+    assert_eq!(resolver.archive_index_stats().archives, 1);
+    cancellation.cancel();
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(TextureSourceError::Preparation {
+            error: TextureAssetError::Cancelled(_),
+            ..
+        })
+    ));
+    assert_eq!(resolver.archive_index_stats().archives, 0);
+    assert_eq!(resolver.archive_index_stats().entries, 0);
+    assert!(resolver.shared.sibling_gmas.get_ref().is_none());
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    assert!(
+        resolver
+            .selected_reloadable_texture(&content_path("materials/b.vtf"))
+            .is_ok()
+    );
+    assert_eq!(resolver.archive_index_stats().archives, 2);
+    assert_eq!(working.current_bytes(), 0);
 }

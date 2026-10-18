@@ -49,7 +49,7 @@ fn unavailable_loose_category_stops_material_and_texture_lookup_but_preserves_ad
         }
     ));
     assert!(matches!(
-        resolver.selected_texture_asset(&ContentPath::new("materials/later.vtf").unwrap()),
+        resolver.selected_reloadable_texture(&ContentPath::new("materials/later.vtf").unwrap()),
         Err(TextureSourceError::SourceUnavailable(_))
     ));
     assert!(resolver.shared.game_vpks.get_ref().is_none());
@@ -286,7 +286,7 @@ fn unavailable_named_cube_keeps_authored_identity_and_never_tries_default() {
         Some(CubemapFailure::SourceUnavailable(_))
     ));
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         ["materials/authored/cube.vtf"]
     );
 }
@@ -298,7 +298,6 @@ fn native_error_images_remain_sampleable_while_unavailable_preparations_do_not()
         TextureLoadOutcome::Generated,
         TextureLoadOutcome::MissingSource,
         TextureLoadOutcome::InvalidSource,
-        TextureLoadOutcome::InvalidPayload,
     ] {
         assert!(!outcome.is_unavailable());
     }
@@ -307,7 +306,6 @@ fn native_error_images_remain_sampleable_while_unavailable_preparations_do_not()
         TextureLoadOutcome::SourceBudgetRejected,
         TextureLoadOutcome::SourceUnavailable,
         TextureLoadOutcome::Unsupported,
-        TextureLoadOutcome::Deferred,
         TextureLoadOutcome::Unplanned,
     ] {
         assert!(outcome.is_unavailable());

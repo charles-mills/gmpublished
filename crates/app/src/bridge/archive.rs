@@ -210,19 +210,6 @@ impl PreviewArchiveSource {
             })
     }
 
-    pub(crate) fn entry_prefix(
-        &self,
-        path: &str,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, PreviewArchiveSourceError> {
-        match self {
-            Self::Gma(archive) => archive
-                .entry_prefix(path, max_bytes)
-                .map_err(PreviewArchiveSourceError::Gma),
-            Self::Folder(_) => unreachable!("folder entries use their opened handle"),
-        }
-    }
-
     pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {
         match self {
             Self::Gma(archive) => archive

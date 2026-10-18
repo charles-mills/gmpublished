@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use image::{ImageReader, RgbaImage};
 use thiserror::Error;
@@ -850,38 +850,17 @@ fn case_insensitive_file(
     root: &Path,
     relative: &Path,
 ) -> Result<Option<PathBuf>, MaterialExportError> {
-    let mut current = root.to_owned();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            return Ok(None);
-        };
-        let exact = current.join(name);
-        if exact.exists() {
-            current = exact;
-            continue;
+    use crate::util::case_path::LookupError;
+    match crate::util::case_path::find_file(root, relative, false, None) {
+        Ok(path) => Ok(path),
+        Err(LookupError::InvalidPath(_)) => Ok(None),
+        Err(LookupError::Io { path, source }) => Err(io_error(&path, source)),
+        Err(LookupError::Ambiguous(path)) => Err(MaterialExportError::Conflict(path)),
+        Err(LookupError::OutsideRoot(path)) => {
+            Err(MaterialExportError::UnsafePath(path.display().to_string()))
         }
-        if !current.is_dir() {
-            return Ok(None);
-        }
-        let entries = fs::read_dir(&current).map_err(|source| io_error(&current, source))?;
-        let mut matched = None;
-        for entry in entries {
-            let entry = entry.map_err(|source| io_error(&current, source))?;
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&name.to_string_lossy())
-            {
-                if matched.is_some() {
-                    return Err(MaterialExportError::Conflict(exact));
-                }
-                matched = Some(entry.path());
-            }
-        }
-        let Some(path) = matched else { return Ok(None) };
-        current = path;
+        Err(LookupError::EntryLimit) => unreachable!("material lookups have no directory limit"),
     }
-    Ok(Some(current))
 }
 
 fn material_name(name: &str) -> Result<String, MaterialExportError> {

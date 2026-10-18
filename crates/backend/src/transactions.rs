@@ -153,6 +153,24 @@ impl Transactions {
 
     #[must_use]
     pub fn begin(&self) -> Transaction {
+        self.begin_initialized(None::<fn(&Transaction)>)
+    }
+
+    pub(crate) fn begin_announced(
+        &self,
+        announcement: impl FnOnce(TransactionId) -> BackendEvent,
+    ) -> Transaction {
+        self.begin_with_initializer(|transaction| self.emit(announcement(transaction.id())))
+    }
+
+    pub(crate) fn begin_with_initializer(
+        &self,
+        initialize: impl FnOnce(&Transaction),
+    ) -> Transaction {
+        self.begin_initialized(Some(initialize))
+    }
+
+    fn begin_initialized(&self, initialize: Option<impl FnOnce(&Transaction)>) -> Transaction {
         let mut registry = self.shared.registry.write();
         let id = registry.allocate_id();
         let transaction = Arc::new(TransactionInner {
@@ -161,9 +179,17 @@ impl Transactions {
             emission: Mutex::new(()),
             shared: Arc::clone(&self.shared),
         });
+        // Global cancellation can discover the transaction once registered,
+        // but cannot publish its terminal event before initialization finishes.
+        let emission = initialize.as_ref().map(|_| transaction.emission.lock());
 
         registry.live.insert(id, Arc::downgrade(&transaction));
         drop(registry);
+
+        if let Some(initialize) = initialize {
+            initialize(&Transaction(Arc::clone(&transaction)));
+        }
+        drop(emission);
 
         Transaction(transaction)
     }
@@ -514,6 +540,45 @@ mod tests {
         assert_eq!(transactions.cancel_all(), 2);
         assert!(first.aborted());
         assert!(second.aborted());
+    }
+
+    #[test]
+    fn concurrent_cancellation_cannot_overtake_an_announced_start() {
+        let collector = BackendEventCollector::default();
+        let transactions = Transactions::new(Arc::new(collector.clone()));
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let starting = transactions.clone();
+        let starter = std::thread::spawn(move || {
+            starting.begin_announced(|transaction_id| {
+                registered_tx.send(transaction_id).unwrap();
+                release_rx.recv().unwrap();
+                BackendEvent::DownloadStarted(crate::DownloadStartedEvent {
+                    transaction_id,
+                    workshop_id: Some(crate::WorkshopId::new(123).unwrap()),
+                    request_id: None,
+                })
+            })
+        });
+        let id = registered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let transaction = transactions.find(id).unwrap();
+        assert!(transaction.0.emission.try_lock().is_none());
+        let cancelling = transactions;
+        let canceller = std::thread::spawn(move || cancelling.cancel_all());
+        release_tx.send(()).unwrap();
+        let transaction = starter.join().unwrap();
+        assert_eq!(canceller.join().unwrap(), 1);
+        assert!(transaction.cancelled());
+        let events = collector.snapshot();
+        assert!(
+            matches!(&events[0], BackendEvent::DownloadStarted(start) if start.transaction_id == id)
+        );
+        assert!(
+            matches!(&events[1], BackendEvent::Transaction(TransactionEvent::Error { id: actual, .. }) if *actual == id)
+        );
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

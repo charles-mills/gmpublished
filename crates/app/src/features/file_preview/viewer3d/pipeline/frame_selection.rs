@@ -321,9 +321,8 @@ mod tests {
                 .build(),
         )
         .unwrap();
-        let resolved = MaterialResolver::new(Arc::new(archive), None)
-            .with_on_demand_textures()
-            .resolve_with_base2(&[], "control");
+        let resolved =
+            MaterialResolver::new(Arc::new(archive), None).resolve_with_base2(&[], "control");
         let resolution = resolved.outcome();
         let material = resolved.into_material().unwrap();
         MaterialSlot {

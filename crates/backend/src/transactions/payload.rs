@@ -1,11 +1,9 @@
 use std::path::PathBuf;
 
-use crate::WorkshopId;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionPayload {
     None,
-    WorkshopItem(WorkshopId),
+    SourcePath(PathBuf),
     TotalBytes(u64),
     ByteSize { source: Option<String>, bytes: u64 },
     ExtractedPath(PathBuf),

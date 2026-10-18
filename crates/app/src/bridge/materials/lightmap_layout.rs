@@ -99,7 +99,6 @@ mod tests {
                 .requirement,
             SourceLightmapRequirement::Bumped
         );
-        assert_eq!(resolver.shared.texture_assets.resident_count(), 0);
     }
 
     #[test]

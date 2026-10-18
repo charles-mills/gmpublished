@@ -114,6 +114,7 @@ fn rejected_extraction_schedule_emits_a_correlated_terminal_error() {
             _ => None,
         })
         .expect("rejected extraction is still correlated");
+    assert_extraction_started(&events, transaction_id, item, None);
     assert!(events.iter().any(|event| matches!(
         event,
         BackendEvent::Transaction(TransactionEvent::Error { id, error })
@@ -218,14 +219,36 @@ fn assert_extraction_started(
     item: WorkshopId,
     source_path: Option<&std::path::Path>,
 ) {
-    assert!(events.iter().any(|event| matches!(
-        event,
-        BackendEvent::ExtractionStarted(event)
-            if event.transaction_id == transaction_id
-                && event.source_path.as_deref() == source_path
-                && event.file_name.is_none()
-                && event.workshop_id == Some(item)
-    )));
+    let starts = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            BackendEvent::ExtractionStarted(start) if start.transaction_id == transaction_id => {
+                Some((index, start))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts.len(),
+        1,
+        "each extraction announces one complete identity"
+    );
+    let (start_index, start) = starts[0];
+    assert_eq!(start.workshop_id, Some(item));
+    assert!(start.source_path.is_none());
+    assert!(start.file_name.is_none());
+    assert!(!events[..start_index].iter().any(|event| matches!(event,
+        BackendEvent::Transaction(TransactionEvent::Status { id, .. } | TransactionEvent::Error { id, .. } | TransactionEvent::Finished { id, .. }) if *id == transaction_id
+    )), "identity must precede worker progress and scheduling errors");
+    let discovered = events.iter().find_map(|event| match event {
+        BackendEvent::Transaction(TransactionEvent::Data {
+            id,
+            payload: crate::TransactionPayload::SourcePath(path),
+        }) if *id == transaction_id => Some(path.as_path()),
+        _ => None,
+    });
+    assert_eq!(discovered, source_path);
 }
 
 fn statuses_for(events: &[BackendEvent], transaction_id: TransactionId) -> Vec<TransactionStatus> {

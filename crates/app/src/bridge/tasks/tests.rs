@@ -93,6 +93,7 @@ fn task_event_forwarder_delivers_on_its_own_thread() {
     assert_eq!(
         update.into_update(),
         TaskUpdate::Started {
+            identity: None,
             kind: TaskKind::Search,
             status: TransactionStatus::Searching,
         }
@@ -145,6 +146,7 @@ fn task_handles_emit_started_progress_and_terminal_updates() {
             (
                 id,
                 TaskUpdate::Started {
+                    identity: None,
                     kind: TaskKind::Download,
                     status: TransactionStatus::Downloading,
                 },
@@ -154,40 +156,6 @@ fn task_handles_emit_started_progress_and_terminal_updates() {
             (id, TaskUpdate::Finished),
         ]
     );
-}
-
-#[test]
-fn coalesced_updates_observe_last_values_and_accumulate_incremental_progress() {
-    let mut update = CoalescedTaskUpdate::default();
-    update.observe(
-        TaskUpdate::Started {
-            kind: TaskKind::Publish,
-            status: TransactionStatus::PublishPreparingConfig,
-        },
-        0.0,
-    );
-    update.observe(TaskUpdate::Total(1_000), 0.0);
-    update.observe(TaskUpdate::Total(2_000), 0.0);
-    update.observe(TaskUpdate::Progress(0.10), 0.0);
-    update.observe(TaskUpdate::ProgressIncr(0.20), 0.0);
-    update.observe(TaskUpdate::Status(TransactionStatus::PublishPacking), 0.0);
-    update.observe(TaskUpdate::Finished, 0.0);
-
-    assert_eq!(
-        update.started,
-        Some(CoalescedTaskStart {
-            kind: TaskKind::Publish,
-            status: TransactionStatus::PublishPreparingConfig,
-        })
-    );
-    assert_eq!(update.status, Some(TransactionStatus::PublishPacking));
-    assert!((update.progress.expect("coalesced progress") - 0.30).abs() < f64::EPSILON);
-    assert_eq!(update.total_bytes, Some(2_000));
-    assert_eq!(update.terminal, Some(CoalescedTaskTerminal::Finished));
-
-    let mut other = CoalescedTaskUpdate::default();
-    other.observe(TaskUpdate::ProgressIncr(0.05), 0.40);
-    assert!((other.progress.expect("coalesced progress") - 0.45).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -413,6 +381,7 @@ fn backend_context_forwards_installed_backend_events() {
     ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::InstalledAddonsRefreshed);
     ctx.emit_backend_event_for_test(gmpublished_backend::BackendEvent::DownloadStarted(
         gmpublished_backend::DownloadStartedEvent {
+            workshop_id: None,
             transaction_id: TransactionId::from_raw(40),
             request_id: None,
         },
@@ -454,6 +423,7 @@ fn backend_context_forwards_installed_backend_events() {
     assert_eq!(
         receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
         BackendRuntimeEvent::DownloadStarted {
+            workshop_id: None,
             transaction_id: TransactionId::from_raw(40),
             request_id: None,
         }
@@ -512,7 +482,7 @@ fn backend_event_sink_fans_out_to_worker_subscriptions() {
 }
 
 #[test]
-fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
+fn source_metadata_and_terminal_events_survive_a_saturated_progress_queue() {
     let _lock = BACKEND_EVENT_SINK_TEST_LOCK.lock();
     let ctx = BackendContext::new_with_backend_event_sink_for_test();
     let root_receiver = ctx
@@ -538,6 +508,14 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
     let emitter = std::thread::spawn(move || {
         emitter_context.emit_backend_event_for_test(
             gmpublished_backend::BackendEvent::Transaction(
+                gmpublished_backend::TransactionEvent::Data {
+                    id: TransactionId::from_raw(900),
+                    payload: TransactionPayload::SourcePath(PathBuf::from("/tmp/source.gma")),
+                },
+            ),
+        );
+        emitter_context.emit_backend_event_for_test(
+            gmpublished_backend::BackendEvent::Transaction(
                 gmpublished_backend::TransactionEvent::Finished {
                     id: TransactionId::from_raw(900),
                     payload: TransactionPayload::None,
@@ -546,13 +524,21 @@ fn terminal_event_is_never_dropped_even_when_progress_queue_is_saturated() {
         );
     });
 
+    let mut saw_source = false;
     let mut saw_finished = false;
     while let Ok(event) = root_receiver.recv_timeout(Duration::from_secs(2)) {
+        if matches!(&event, BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Data {
+            id, payload: TransactionPayload::SourcePath(path),
+        }) if *id == TransactionId::from_raw(900) && path == Path::new("/tmp/source.gma"))
+        {
+            saw_source = true;
+        }
         if matches!(
             event,
             BackendRuntimeEvent::Transaction(TransactionRuntimeEvent::Finished { id, .. })
                 if id == TransactionId::from_raw(900)
         ) {
+            assert!(saw_source, "source metadata must precede completion");
             saw_finished = true;
             break;
         }
@@ -654,7 +640,8 @@ fn backend_start_event_correlates_transaction_updates_to_task_events() {
         TaskUpdate::Started {
             kind: TaskKind::Extract,
             status,
-        } if *status == TransactionStatus::Extracting
+            ..
+        } if *status == TransactionStatus::Locating
     )));
     assert!(updates.iter().any(|(_, update)| {
         matches!(update, TaskUpdate::Status(status) if *status == TransactionStatus::Locating)
@@ -681,6 +668,7 @@ fn correlated_backend_transaction_error_finishes_task_with_error() {
 
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
+            workshop_id: None,
             transaction_id: TransactionId::from_raw(501),
             request_id: None,
         })
@@ -766,41 +754,35 @@ fn uncorrelated_backend_transaction_events_remain_noops() {
 }
 
 #[test]
-fn download_start_waits_for_item_payload_before_downloader_action() {
+fn download_start_contains_identity_before_progress() {
     let ctx = BackendContext::new().expect("test backend context");
-
+    let receiver = ctx.task_events.take_receiver().expect("task events");
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
         transaction_id: TransactionId::from_raw(610),
+        workshop_id: Some(PublishedFileId::fixture(123)),
         request_id: None,
     });
     assert!(effects.handled_event());
     assert!(effects.into_actions().is_empty());
-
-    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-        TransactionRuntimeEvent::Data {
+    ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+        TransactionRuntimeEvent::Progress {
             id: TransactionId::from_raw(610),
-            payload: TransactionPayload::WorkshopItem(
-                gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
-            ),
+            progress: 5_000,
         },
     ));
-    assert!(effects.handled_event());
-    let actions = effects.into_actions();
-    assert_eq!(actions.len(), 1);
-    assert!(matches!(
-        &actions[0],
-        BackendRuntimeAction::DownloadTaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id,
-            ..
-        } if *item_id == PublishedFileId::fixture(123)
-    ));
+    let updates = drain_updates(&receiver);
+    assert!(matches!(&updates[0].1, TaskUpdate::Started {
+        kind: TaskKind::Download,
+        identity: Some(TaskIdentity::Workshop { kind: WorkshopDownloadTaskKind::Download, item_id }),
+        ..
+    } if *item_id == PublishedFileId::fixture(123)));
+    assert_eq!(updates[1], (updates[0].0, TaskUpdate::Progress(0.5)));
 }
 
 #[test]
-fn extraction_start_and_finish_emit_downloader_actions() {
+fn extraction_emits_identity_output_and_terminal_in_one_ordered_stream() {
     let ctx = BackendContext::new().expect("test backend context");
-
+    let receiver = ctx.task_events.take_receiver().expect("task events");
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
         transaction_id: TransactionId::from_raw(620),
         source_path: None,
@@ -809,17 +791,7 @@ fn extraction_start_and_finish_emit_downloader_actions() {
         request_id: None,
     });
     assert!(effects.handled_event());
-    let actions = effects.into_actions();
-    assert_eq!(actions.len(), 1);
-    assert!(matches!(
-        &actions[0],
-        BackendRuntimeAction::DownloadTaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id,
-            ..
-        } if *item_id == PublishedFileId::fixture(456)
-    ));
-
+    assert!(effects.into_actions().is_empty());
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Finished {
             id: TransactionId::from_raw(620),
@@ -827,47 +799,68 @@ fn extraction_start_and_finish_emit_downloader_actions() {
         },
     ));
     assert!(effects.handled_event());
+    assert!(effects.into_actions().is_empty());
+    let updates = drain_updates(&receiver);
+    let id = updates[0].0;
     assert_eq!(
-        effects.into_actions(),
-        vec![BackendRuntimeAction::DownloadFinished {
-            request_id: None,
-            item_id: PublishedFileId::fixture(456),
-            installed_path: None,
-            extracted_path: PathBuf::from("/tmp/extracted/456"),
-        }]
+        updates,
+        vec![
+            (
+                id,
+                TaskUpdate::Started {
+                    kind: TaskKind::Extract,
+                    status: TransactionStatus::Locating,
+                    identity: Some(TaskIdentity::Workshop {
+                        kind: WorkshopDownloadTaskKind::Extract,
+                        item_id: PublishedFileId::fixture(456)
+                    })
+                }
+            ),
+            (
+                id,
+                TaskUpdate::Extracted(ExtractionOutput {
+                    source_path: None,
+                    extracted_path: PathBuf::from("/tmp/extracted/456")
+                })
+            ),
+            (id, TaskUpdate::Finished),
+        ]
     );
 }
 
 #[test]
-fn extraction_finish_carries_the_source_gma_from_the_started_event() {
-    let ctx = BackendContext::new().expect("test backend context");
-    let source_gma = PathBuf::from("/tmp/workshop/content/4000/457/addon.gma");
-
-    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-        transaction_id: TransactionId::from_raw(621),
-        source_path: Some(source_gma.clone()),
-        file_name: None,
-        workshop_id: Some(PublishedFileId::fixture(457)),
-        request_id: None,
-    });
-    assert!(effects.handled_event());
-
-    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-        TransactionRuntimeEvent::Finished {
-            id: TransactionId::from_raw(621),
-            payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted/457")),
-        },
-    ));
-    assert!(effects.handled_event());
-    assert_eq!(
-        effects.into_actions(),
-        vec![BackendRuntimeAction::DownloadFinished {
+fn extraction_output_preserves_source_path_and_accepts_worker_enrichment() {
+    for enrich in [false, true] {
+        let ctx = BackendContext::new().expect("test backend context");
+        let receiver = ctx.task_events.take_receiver().expect("task events");
+        let source_path = PathBuf::from("/tmp/workshop/content/4000/457/addon.gma");
+        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
+            transaction_id: TransactionId::from_raw(621),
+            source_path: (!enrich).then(|| source_path.clone()),
+            file_name: None,
+            workshop_id: Some(PublishedFileId::fixture(457)),
             request_id: None,
-            item_id: PublishedFileId::fixture(457),
-            installed_path: Some(source_gma),
-            extracted_path: PathBuf::from("/tmp/extracted/457"),
-        }]
-    );
+        });
+        if enrich {
+            ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+                TransactionRuntimeEvent::Data {
+                    id: TransactionId::from_raw(621),
+                    payload: TransactionPayload::SourcePath(source_path.clone()),
+                },
+            ));
+        }
+        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+            TransactionRuntimeEvent::Finished {
+                id: TransactionId::from_raw(621),
+                payload: TransactionPayload::ExtractedPath(PathBuf::from("/tmp/extracted/457")),
+            },
+        ));
+        assert!(drain_updates(&receiver).iter().any(|(_, update)| *update
+            == TaskUpdate::Extracted(ExtractionOutput {
+                source_path: Some(source_path.clone()),
+                extracted_path: PathBuf::from("/tmp/extracted/457"),
+            })));
+    }
 }
 
 #[test]
@@ -893,8 +886,8 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
     ));
     assert_eq!(
         effects.into_actions(),
-        vec![BackendRuntimeAction::DownloadFinished {
-            request_id: Some(WorkshopSnapshotId::new(77)),
+        vec![BackendRuntimeAction::SnapshotDownloaded {
+            request_id: WorkshopSnapshotId::new(77),
             item_id: workshop_id,
             installed_path: None,
             extracted_path: PathBuf::from("/tmp/extracted/458"),
@@ -906,6 +899,7 @@ fn workshop_snapshot_actions_keep_the_request_id_and_skip_downloader_rows() {
 fn workshop_snapshot_error_is_request_scoped() {
     let ctx = BackendContext::new().expect("test backend context");
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
+        workshop_id: None,
         transaction_id: TransactionId::from_raw(623),
         request_id: Some(WorkshopSnapshotId::new(78)),
     });
@@ -930,69 +924,50 @@ fn workshop_snapshot_error_is_request_scoped() {
 #[test]
 fn cancelling_correlated_backend_task_aborts_registered_transaction() {
     let ctx = BackendContext::new().expect("test backend context");
-    let receiver = ctx
-        .task_events
-        .take_receiver()
-        .expect("task event receiver");
+    let receiver = ctx.task_events.take_receiver().expect("task events");
     let transaction = ctx.begin_transaction();
-
-    assert!(
-        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
-            transaction_id: transaction.id(),
-            request_id: None,
-        })
-        .handled_event()
-    );
-    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-        TransactionRuntimeEvent::Data {
-            id: transaction.id(),
-            payload: TransactionPayload::WorkshopItem(
-                gmpublished_backend::WorkshopId::new(123).expect("fixture ids are nonzero"),
-            ),
-        },
+    ctx.handle_backend_runtime_event(&BackendRuntimeEvent::DownloadStarted {
+        transaction_id: transaction.id(),
+        workshop_id: Some(PublishedFileId::fixture(123)),
+        request_id: None,
+    });
+    let updates = drain_updates(&receiver);
+    let task_id = updates[0].0;
+    assert!(matches!(
+        &updates[0].1,
+        TaskUpdate::Started {
+            kind: TaskKind::Download,
+            identity: Some(_),
+            ..
+        }
     ));
-    let actions = effects.into_actions();
-    let [BackendRuntimeAction::DownloadTaskStarted { task_id, .. }] = actions.as_slice() else {
-        panic!("expected correlated downloader start action");
-    };
-
     assert!(!transaction.aborted());
-    assert!(ctx.cancel_task(*task_id));
+    assert!(ctx.cancel_task(task_id));
     assert!(transaction.aborted());
     assert!(
         !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Status {
                 id: transaction.id(),
                 status: TransactionStatus::Downloading,
-            },
+            }
         ))
         .handled_event()
     );
-
-    let updates = drain_updates(&receiver);
-    assert!(updates.iter().any(|(_, update)| {
-        matches!(
-            update,
-            TaskUpdate::Started {
-                kind: TaskKind::Download,
-                ..
-            }
-        )
-    }));
-    assert!(updates.iter().any(|(_, update)| {
-        matches!(update, TaskUpdate::Error(error) if error.to_string() == "ERR_CANCELLED")
-    }));
-    assert!(!ctx.cancel_task(*task_id));
+    assert!(drain_updates(&receiver).iter().any(|(_, update)| matches!(update, TaskUpdate::Error(error) if error.to_string() == "ERR_CANCELLED")));
+    assert!(!ctx.cancel_task(task_id));
 }
 
 #[test]
-fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event() {
+fn extraction_start_precedes_locating_updates() {
     let ctx = BackendContext::new().expect("test backend context");
-    let receiver = ctx
-        .task_events
-        .take_receiver()
-        .expect("task event receiver");
-
+    let receiver = ctx.task_events.take_receiver().expect("task events");
+    ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
+        transaction_id: TransactionId::from_raw(630),
+        source_path: None,
+        file_name: None,
+        workshop_id: Some(PublishedFileId::fixture(789)),
+        request_id: None,
+    });
     let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
         TransactionRuntimeEvent::Status {
             id: TransactionId::from_raw(630),
@@ -1000,155 +975,59 @@ fn extraction_pre_start_locating_status_is_buffered_until_downloader_start_event
         },
     ));
     assert!(effects.handled_event());
-    assert!(effects.into_actions().is_empty());
-
-    let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-        transaction_id: TransactionId::from_raw(630),
-        source_path: None,
-        file_name: None,
-        workshop_id: Some(PublishedFileId::fixture(789)),
-        request_id: None,
-    });
-    assert!(effects.handled_event());
+    let updates = drain_updates(&receiver);
     assert!(matches!(
-        effects.into_actions().as_slice(),
-        [BackendRuntimeAction::DownloadTaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id,
+        updates[0].1,
+        TaskUpdate::Started {
+            identity: Some(_),
             ..
-        }] if *item_id == PublishedFileId::fixture(789)
+        }
     ));
-
-    let updates: Vec<_> = receiver
-        .try_iter()
-        .map(|(_task_id, update)| update.into_update())
-        .collect();
-    assert!(updates.iter().any(|update| matches!(
-        update,
-        TaskUpdate::Status(status) if *status == TransactionStatus::Locating
-    )));
-}
-
-#[test]
-fn extraction_pre_start_buffer_is_globally_bounded() {
-    let ctx = BackendContext::new().expect("test backend context");
-
-    for offset in 0..(MAX_PENDING_PRE_START_TRANSACTIONS + 4) {
-        let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            TransactionRuntimeEvent::Status {
-                id: TransactionId::from_raw(
-                    10_000 + u32::try_from(offset).expect("test offset fits u32"),
-                ),
-                status: TransactionStatus::Locating,
-            },
-        ));
-        assert!(effects.handled_event());
-    }
-
-    // One transaction gets more events than its own cap allows, so the
-    // per-entry bound is exercised rather than asserted against entries of
-    // length one.
-    let noisy = TransactionId::from_raw(9_999);
-    for _ in 0..(MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION + 5) {
-        let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            TransactionRuntimeEvent::Status {
-                id: noisy,
-                status: TransactionStatus::Locating,
-            },
-        ));
-        assert!(effects.handled_event());
-    }
-
-    let pending = ctx.transaction_tasks.pending_pre_start_snapshot();
-    assert!(pending.len() <= MAX_PENDING_PRE_START_TRANSACTIONS);
     assert_eq!(
-        pending
-            .get(&noisy)
-            .expect("the noisy transaction is the most recent, so it survives eviction")
-            .len(),
-        MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION,
-        "the per-transaction cap must drop the oldest, not grow"
-    );
-    assert!(
-        pending
-            .values()
-            .all(|events| events.len() <= MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION)
+        updates[1],
+        (
+            updates[0].0,
+            TaskUpdate::Status(TransactionStatus::Locating)
+        )
     );
 }
 
 #[test]
-fn completed_transaction_never_rebuffers_a_late_pre_start_event() {
+fn completed_transaction_ignores_late_running_and_terminal_events() {
     let ctx = BackendContext::new().expect("test backend context");
     let transaction_id = TransactionId::from_raw(640);
-
-    assert!(
-        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-            transaction_id,
-            source_path: None,
-            file_name: None,
-            workshop_id: None,
-            request_id: None,
-        })
-        .handled_event()
-    );
+    ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
+        transaction_id,
+        source_path: None,
+        file_name: None,
+        workshop_id: None,
+        request_id: None,
+    });
     assert!(
         ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
             TransactionRuntimeEvent::Finished {
                 id: transaction_id,
                 payload: TransactionPayload::None,
-            },
+            }
         ))
         .handled_event()
     );
-    assert!(ctx.transaction_tasks.is_completed(transaction_id));
-
-    let late = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
+    assert!(!ctx.is_backend_transaction_active(transaction_id));
+    for event in [
         TransactionRuntimeEvent::Status {
             id: transaction_id,
             status: TransactionStatus::Locating,
         },
-    ));
-    assert!(!late.handled_event());
-    assert!(
-        !ctx.transaction_tasks
-            .pending_pre_start_snapshot()
-            .contains_key(&transaction_id)
-    );
-
-    let duplicate_start =
-        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::ExtractionStarted {
-            transaction_id,
-            source_path: None,
-            file_name: None,
-            workshop_id: None,
-            request_id: None,
-        });
-    assert!(duplicate_start.handled_event());
-    assert!(duplicate_start.into_actions().is_empty());
-    assert!(!ctx.transaction_tasks.is_active(transaction_id));
-    assert!(ctx.transaction_tasks.is_completed(transaction_id));
-}
-
-#[test]
-fn completed_transaction_tombstones_are_bounded() {
-    let ctx = BackendContext::new().expect("test backend context");
-
-    for offset in 0..(MAX_COMPLETED_TRANSACTION_TOMBSTONES + 4) {
-        let effects = ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            TransactionRuntimeEvent::Finished {
-                id: TransactionId::from_raw(
-                    20_000 + u32::try_from(offset).expect("test offset fits u32"),
-                ),
-                payload: TransactionPayload::None,
-            },
-        ));
-        assert!(!effects.handled_event());
+        TransactionRuntimeEvent::Finished {
+            id: transaction_id,
+            payload: TransactionPayload::None,
+        },
+    ] {
+        assert!(
+            !ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(event))
+                .handled_event()
+        );
     }
-
-    assert_eq!(
-        ctx.transaction_tasks.completed_count(),
-        MAX_COMPLETED_TRANSACTION_TOMBSTONES
-    );
 }
 
 #[test]
@@ -1701,19 +1580,6 @@ fn typed_transaction_total_payloads_preserve_upstream_overlay_behavior() {
             .handled_event()
         );
     }
-
-    assert!(
-        ctx.handle_backend_runtime_event(&BackendRuntimeEvent::Transaction(
-            TransactionRuntimeEvent::Data {
-                id: TransactionId::from_raw(701),
-                payload: TransactionPayload::WorkshopItem(
-                    gmpublished_backend::WorkshopId::new(76561198000000000)
-                        .expect("fixture ids are nonzero")
-                ),
-            },
-        ))
-        .handled_event()
-    );
 
     let totals = drain_updates(&receiver)
         .into_iter()

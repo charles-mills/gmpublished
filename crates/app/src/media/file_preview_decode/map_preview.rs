@@ -200,7 +200,7 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
         texture_residency
             .max_dimension
             .is_none_or(|value| value > 0)
-            && texture_residency.resources.resident_bytes > 0
+            && texture_residency.resources.resource_resident_bytes > 0
     );
     if !request.bypass_size_limits && bsp_bytes.len() > MAP_TOO_LARGE_BYTES {
         return Ok(info_preview_data(request, InfoReason::TooLarge));
@@ -220,18 +220,14 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
     let decode_timing = bsp_started.elapsed();
     super::emit_checked_stage(request, PreviewLoadStage::ResolvingMaterials, emit_stage)?;
     let materials_started = Instant::now();
-    let super::TexturePreparationResources {
-        resolver,
-        encoded_budget,
-        texture_budget,
-        ..
-    } = super::TexturePreparationResources::for_map_cancellable(
-        request.archive.clone(),
-        gmod_dir,
-        asset.pakfile().clone(),
-        &texture_residency.resources,
-        request.cancellation.clone(),
-    )?;
+    let super::TexturePreparationResources { resolver, .. } =
+        super::TexturePreparationResources::for_map_cancellable(
+            request.archive.clone(),
+            gmod_dir,
+            asset.pakfile().clone(),
+            &texture_residency.resources,
+            request.cancellation.clone(),
+        )?;
     let material_resolver = texture_residency
         .max_dimension
         .map(|maximum| resolver.with_decoded_texture_max_dimension(maximum));
@@ -658,23 +654,8 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
     let skipped_overlay_count = overlay_bake
         .skipped_count
         .saturating_add(skybox_overlay_bake.skipped_count);
-    if texture_budget.rejected_textures() > 0 {
-        log::debug!(
-            "map preview texture budget {} MiB exhausted: dropped {} texture decodes",
-            format_mib(texture_residency.resources.resident_bytes),
-            texture_budget.rejected_textures()
-        );
-    }
-    if encoded_budget.rejected_textures() > 0 {
-        log::debug!(
-            "map preview source texture budget {} MiB exhausted: rejected {} sources",
-            format_mib(texture_residency.resources.source_encoded_bytes),
-            encoded_budget.rejected_textures()
-        );
-    }
     log_unresolved_materials(table.slots());
     let water_status = water_fallback_log_suffix(water_material_count);
-    let texture_mib = format_mib(texture_budget.decoded_bytes());
     let texture_payloads = texture_payload_log_suffix(table.slots());
     let render_mode_status = render_mode_log_suffix(table.slots());
     if !phy_debug_meshes.is_empty() {
@@ -706,13 +687,6 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
             archive_indexes: material_resolver.archive_index_stats(),
             source_discovery: material_resolver.source_discovery_stats().clone(),
             max_dimension: texture_residency.max_dimension,
-            admitted_source_bytes: encoded_budget.encoded_bytes(),
-            admitted_sources: encoded_budget.admitted_textures(),
-            admitted_resident_bytes: texture_budget.decoded_bytes(),
-            admitted_resident_images: texture_budget.admitted_images(),
-            reduced_resident_images: texture_budget.reduced_images(),
-            source_rejections: encoded_budget.rejected_textures(),
-            resident_rejections: texture_budget.rejected_textures(),
             header_only_surface_materials,
             payload_working_peak_bytes: texture_residency.resources.working_budget.peak_bytes(),
             source_working_peak_bytes: texture_residency
@@ -797,7 +771,6 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
         &MapPreviewStatuses {
             water: &water_status,
             render_mode: &render_mode_status,
-            texture_mib: &texture_mib,
             texture_payloads: &texture_payloads,
             lightmap: &lightmap_status,
             sky: &sky_status,

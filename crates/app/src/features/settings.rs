@@ -13,7 +13,7 @@ pub use message::Message;
 #[cfg(test)]
 pub use state::Tab;
 pub use state::{
-    ColorSetting, PathSetting, PathValidationRequest, ResetAction, SettingsMutation,
+    PathSetting, PathValidationRequest, PersistenceCommand, ResetAction, SettingsMutation,
     SettingsSnapshot, State, accent_inputs_from_settings, apply_settings_mutation,
     validate_path_request,
 };

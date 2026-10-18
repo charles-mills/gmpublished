@@ -22,7 +22,6 @@ pub(super) fn lightmap_status(
 pub(super) struct MapPreviewStatuses<'a> {
     pub(super) water: &'a str,
     pub(super) render_mode: &'a str,
-    pub(super) texture_mib: &'a str,
     pub(super) texture_payloads: &'a str,
     pub(super) lightmap: &'a str,
     pub(super) sky: &'a str,
@@ -49,13 +48,12 @@ pub(super) fn log_map_preview_summary(
     let MapPreviewStatuses {
         water,
         render_mode,
-        texture_mib,
         texture_payloads,
         lightmap,
         sky,
     } = statuses;
     log::info!(
-        "map {entry_path}: materials resolved {}/{}{water}{render_mode}, textures {texture_mib} MiB{texture_payloads}, {lightmap}, {sky}, clusters {}, skybox faces {}, props {}, props placed {} (skipped {}: cap {}, triangles {}, load {}, invalid {}, empty {}), prop mesh {prop_mesh_bytes} bytes ({} MiB), detail sprites {}, overlays {} (skipped {skipped_overlay_count}), timings: bsp {}ms, materials {}ms, props {}ms, props load {}ms, bake {}ms, lightmap {}ms",
+        "map {entry_path}: materials resolved {}/{}{water}{render_mode}, streamed textures{texture_payloads}, {lightmap}, {sky}, clusters {}, skybox faces {}, props {}, props placed {} (skipped {}: cap {}, triangles {}, load {}, invalid {}, empty {}), prop mesh {prop_mesh_bytes} bytes ({} MiB), detail sprites {}, overlays {} (skipped {skipped_overlay_count}), timings: bsp {}ms, materials {}ms, props {}ms, props load {}ms, bake {}ms, lightmap {}ms",
         stats.resolved_material_count,
         stats.material_count,
         stats.cluster_count,

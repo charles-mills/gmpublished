@@ -8,7 +8,7 @@ impl State {
     pub fn preview_skin_materials(&self) -> Option<(&BTreeMap<String, SkinMaterial>, &[String])> {
         let inspection = self.inspection.as_ref()?;
         let imported = inspection.skins.len().max(1);
-        let skin = self.skins.get(self.stage_skin.checked_sub(imported)?)?;
+        let skin = self.skins.get(self.workspace.skin.checked_sub(imported)?)?;
         let materials = inspection
             .skins
             .first()

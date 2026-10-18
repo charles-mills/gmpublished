@@ -36,10 +36,6 @@ fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
             state.apply_stage_loaded(generation, *result);
             Vec::new()
         }
-        Message::StagePlacementRestored { position, angles } => {
-            state.restore_stage_placement(position, angles);
-            Vec::new()
-        }
         Message::StageTransformChanged(transform) => {
             state.set_stage_transform(transform);
             Vec::new()

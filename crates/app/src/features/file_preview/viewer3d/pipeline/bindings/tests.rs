@@ -255,8 +255,7 @@ fn append_material_pages_preserves_full_recipes_duplicates_and_existing_prefix()
             ("materials/test/b.vtf", b),
         ],
         Vec::new(),
-    )
-    .with_on_demand_textures();
+    );
     let material = resolver
         .resolve_with_base2(&[], "test/control")
         .into_material()
@@ -338,8 +337,7 @@ fn hidden_material_pages_are_not_demanded_even_if_a_texture_descriptor_is_retain
             ),
         ],
         Vec::new(),
-    )
-    .with_on_demand_textures();
+    );
     let material = resolver
         .resolve_with_base2(&[], "test/visible")
         .into_material()
@@ -391,8 +389,7 @@ fn normalized_page_policy_applies_before_shared_gpu_hits() {
             ("materials/policy.vmt".into(), vmt.len() as u64, vmt_path),
         ]),
         None,
-    )
-    .with_on_demand_textures();
+    );
     let material = resolver
         .resolve_with_base2(&[], "policy")
         .into_material()
@@ -481,8 +478,7 @@ fn rgba_page(rgb: [u8; 3]) -> (TestDir, PageNeed) {
             ("materials/warm.vmt".into(), vmt.len() as u64, vmt_path),
         ]),
         None,
-    )
-    .with_on_demand_textures();
+    );
     let material = resolver
         .resolve_with_base2(&[], "warm")
         .into_material()
@@ -696,8 +692,7 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
             ),
         ],
         Vec::new(),
-    )
-    .with_on_demand_textures();
+    );
     let materials = ["test/animated", "test/other"]
         .into_iter()
         .map(|name| {

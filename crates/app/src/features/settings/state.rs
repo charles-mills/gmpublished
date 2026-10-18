@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
 use crate::bridge::ExtractionOverwriteMode;
 use crate::bridge::ui_error::UiError;
@@ -241,75 +244,50 @@ pub fn apply_settings_mutation(settings: &mut Settings, mutation: SettingsMutati
 }
 
 fn mutation_changes(settings: &Settings, mutation: &SettingsMutation) -> bool {
-    match mutation {
-        SettingsMutation::Sounds(enabled) => settings.backend.sounds != *enabled,
-        SettingsMutation::PlayGifsByDefault(enabled) => {
-            settings.ui.play_gifs_by_default != *enabled
-        }
-        SettingsMutation::Titlebar(preference) => settings.backend.titlebar != *preference,
-        SettingsMutation::Language(language) => &settings.backend.language != language,
-        SettingsMutation::DownloadCountFormat(format) => {
-            settings.ui.download_count_format != *format
-        }
-        SettingsMutation::Density(density) => settings.ui.density != *density,
-        SettingsMutation::ReduceMotion(enabled) => settings.ui.reduce_motion != *enabled,
-        SettingsMutation::TextSize(value) => {
-            crate::bridge::valid_text_size_percent(*value)
-                && settings.ui.text_size_percent != *value
-        }
-        SettingsMutation::Theme {
-            preset,
-            neutral,
-            success,
-            error,
-        } => {
-            settings.ui.theme_preset != *preset
-                || settings.backend.color_neutral != *neutral
-                || settings.backend.color_success != *success
-                || settings.backend.color_error != *error
-        }
-        SettingsMutation::OverwriteMode(mode) => settings.backend.extract_overwrite_mode != *mode,
-        SettingsMutation::Path { kind, path } => {
-            path_setting_value(settings, *kind) != path.as_deref()
-        }
-        SettingsMutation::Color { kind, rgb } => get_color_setting(settings, *kind) != *rgb,
-    }
+    let mut changed = settings.clone();
+    apply_settings_mutation(&mut changed, mutation.clone());
+    changed != *settings
 }
 
-fn path_setting_value(settings: &Settings, kind: PathSetting) -> Option<&Path> {
-    match kind {
-        PathSetting::Gmod => settings.backend.gmod.as_deref(),
-        PathSetting::Downloads => settings.backend.downloads.as_deref(),
-        PathSetting::UserData => settings.backend.user_data.as_deref(),
-        PathSetting::Temp => settings.backend.temp.as_deref(),
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PersistenceCommand {
+    Save(Generation, SettingsMutation),
+    Reset(ResetAction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteStatus {
+    Queued,
+    Running,
+    Failed,
 }
 
 #[derive(Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "modal visibility, persistence, and optimistic display acknowledgements have independent lifecycles"
-)]
+struct PendingSave {
+    generation: Generation,
+    mutation: SettingsMutation,
+    status: WriteStatus,
+}
+
+#[derive(Debug)]
 pub struct State {
     pub(super) about: super::about::AboutState,
     open: bool,
     active_tab: Tab,
     settings: Settings,
-    paths: AppPaths,
-    system_scheme: SystemColorScheme,
+    durable: SettingsSnapshot,
+    saves: VecDeque<PendingSave>,
+    reset: Option<(ResetAction, WriteStatus)>,
     path_fields: PathFields,
     color_fields: ColorFields,
     active_color_picker: Option<ColorSetting>,
     color_picker_draft: Option<HsvColor>,
     status: SettingsStatus,
-    /// Stamps each issued save so an out-of-order completion is discarded.
+    /// Identifies queued writes independently of external settings snapshots.
     save_generation: Generation,
     /// A slider preview is applied live but saved only when the edit completes.
     pending_text_size: Option<u16>,
-    display_save_pending: bool,
-    reduce_motion_save_pending: bool,
     last_text_preview: Option<std::time::Instant>,
-    reset_busy: bool,
     pending_reset: Option<ResetAction>,
 }
 
@@ -325,16 +303,14 @@ impl Default for State {
             color_fields: ColorFields::from_settings(&settings),
             active_color_picker: None,
             color_picker_draft: None,
+            durable: SettingsSnapshot::new(settings.clone(), paths, SystemColorScheme::Dark),
             settings,
-            paths,
-            system_scheme: SystemColorScheme::Dark,
+            saves: VecDeque::new(),
+            reset: None,
             status: SettingsStatus::None,
             save_generation: Generation::INITIAL,
             pending_text_size: None,
-            display_save_pending: false,
-            reduce_motion_save_pending: false,
             last_text_preview: None,
-            reset_busy: false,
             pending_reset: None,
         }
     }
@@ -358,7 +334,7 @@ impl State {
     }
 
     pub(crate) const fn reset_busy(&self) -> bool {
-        self.reset_busy
+        self.reset.is_some()
     }
 
     pub(crate) fn status_key(&self) -> Option<&'static str> {
@@ -380,23 +356,16 @@ impl State {
         )
     }
 
-    pub(crate) fn open_with_snapshot(&mut self, mut snapshot: SettingsSnapshot) {
-        if let Some((density, text_size)) = self.display_preferences_override() {
-            snapshot.settings.ui.density = density;
-            snapshot.settings.ui.text_size_percent = text_size;
-        }
-        if let Some(reduce_motion) = self.reduce_motion_override() {
-            snapshot.settings.ui.reduce_motion = reduce_motion;
-        }
+    pub(crate) fn open_with_snapshot(&mut self, snapshot: SettingsSnapshot) {
         self.active_tab = Tab::General;
         self.about.reset();
         self.open = true;
         self.pending_reset = None;
-        self.reset_busy = false;
         self.status = SettingsStatus::None;
-        self.pending_text_size = None;
-        self.last_text_preview = None;
-        self.apply_snapshot(snapshot);
+        self.observe_snapshot(snapshot);
+        self.path_fields = PathFields::from_settings(&self.settings);
+        self.color_fields = ColorFields::from_settings(&self.settings);
+        self.close_color_picker();
     }
 
     pub(crate) fn close(&mut self) {
@@ -413,7 +382,7 @@ impl State {
     }
 
     pub(crate) fn apply_system_scheme(&mut self, system_scheme: SystemColorScheme) {
-        self.system_scheme = system_scheme;
+        self.durable.system_scheme = system_scheme;
     }
 
     pub(crate) fn path_text(&self, kind: PathSetting) -> &str {
@@ -421,7 +390,7 @@ impl State {
     }
 
     pub(crate) fn path_placeholder(&self, kind: PathSetting) -> String {
-        option_path_to_display(path_setting_runtime_path(&self.paths, kind).as_deref())
+        option_path_to_display(path_setting_runtime_path(&self.durable.paths, kind).as_deref())
     }
 
     pub(crate) fn path_error_key(&self, kind: PathSetting) -> Option<&'static str> {
@@ -502,7 +471,7 @@ impl State {
     }
 
     pub(crate) fn initial_browse_directory(&self, kind: PathSetting) -> PathBuf {
-        path_setting_runtime_path(&self.paths, kind)
+        path_setting_runtime_path(&self.durable.paths, kind)
             .or_else(|| path_option_from_input(self.path_text(kind)))
             .unwrap_or_else(fallback_current_dir)
     }
@@ -609,7 +578,7 @@ impl State {
     }
 
     pub(crate) fn request_reset(&mut self, action: ResetAction) {
-        if !self.reset_busy {
+        if !self.reset_busy() {
             self.close_color_picker();
             self.pending_reset = Some(action);
         }
@@ -620,30 +589,59 @@ impl State {
     }
 
     pub(crate) fn begin_reset(&mut self) -> Option<ResetAction> {
-        let action = self.pending_reset.take()?;
-        if self.reset_busy {
+        if self.reset_busy() {
             return None;
         }
-        self.reset_busy = true;
+        let action = self.pending_reset.take()?;
+        self.reset = Some((action, WriteStatus::Queued));
         self.status = SettingsStatus::ResetRunning;
         Some(action)
+    }
+
+    pub(crate) fn next_persistence(&mut self) -> Option<PersistenceCommand> {
+        if self
+            .saves
+            .iter()
+            .any(|save| save.status == WriteStatus::Running)
+            || self
+                .reset
+                .is_some_and(|(_, status)| status == WriteStatus::Running)
+        {
+            return None;
+        }
+        if let Some(save) = self
+            .saves
+            .iter_mut()
+            .find(|save| save.status == WriteStatus::Queued)
+        {
+            save.status = WriteStatus::Running;
+            return Some(PersistenceCommand::Save(
+                save.generation,
+                save.mutation.clone(),
+            ));
+        }
+        let (action, status) = self.reset.as_mut()?;
+        *status = WriteStatus::Running;
+        Some(PersistenceCommand::Reset(*action))
     }
 
     pub(crate) fn apply_reset_completed(
         &mut self,
         action: ResetAction,
         result: Result<Option<SettingsSnapshot>, UiError>,
-    ) -> Option<SettingsSnapshot> {
-        self.reset_busy = false;
+    ) -> Option<()> {
+        if !self.reset.is_some_and(|(active, _)| active == action) {
+            return None;
+        }
+        self.reset = None;
         match result {
             Ok(Some(snapshot)) => {
-                self.display_save_pending = false;
-                self.reduce_motion_save_pending = false;
+                self.saves.clear();
                 self.pending_text_size = None;
                 self.last_text_preview = None;
-                self.apply_snapshot(snapshot);
+                self.observe_snapshot(snapshot);
                 self.status = SettingsStatus::ResetComplete(action);
-                Some(self.current_snapshot())
+                Some(())
             }
             Ok(None) => {
                 self.status = SettingsStatus::ResetComplete(action);
@@ -662,51 +660,125 @@ impl State {
         self.save_generation
     }
 
-    pub(crate) fn apply_save_started(&mut self) -> Generation {
+    #[cfg(test)]
+    pub(super) fn saves_acknowledged_for_test(&self) -> bool {
+        self.saves.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_save_for_test(&self) -> Option<(Generation, SettingsMutation)> {
+        self.saves
+            .iter()
+            .find(|save| save.status == WriteStatus::Running)
+            .map(|save| (save.generation, save.mutation.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_saves_for_test(&self) -> usize {
+        self.saves
+            .iter()
+            .filter(|save| save.status == WriteStatus::Queued)
+            .count()
+    }
+
+    pub(crate) fn apply_save_started(&mut self, mutation: SettingsMutation) -> Generation {
         self.status = SettingsStatus::Saving;
-        self.save_generation = self.save_generation.next();
-        self.save_generation
+        let generation = self.save_generation.bump();
+        self.saves.push_back(PendingSave {
+            generation,
+            mutation,
+            status: WriteStatus::Queued,
+        });
+        generation
     }
 
     pub(crate) fn apply_save_completed(
         &mut self,
         generation: Generation,
         result: Result<SettingsSnapshot, UiError>,
-    ) -> Option<SettingsSnapshot> {
+    ) -> Option<()> {
+        let index = self
+            .saves
+            .iter()
+            .position(|save| save.generation == generation)?;
+        if self
+            .saves
+            .iter()
+            .any(|save| save.status == WriteStatus::Running && save.generation != generation)
+        {
+            return None;
+        }
         match result {
-            Ok(snapshot) if generation != self.save_generation => {
-                // A later edit has already been issued; adopting this older
-                // snapshot would revert it in the UI.
-                log::debug!("discarding a settings save superseded by a later edit");
-                let _superseded = snapshot;
-                None
-            }
             Ok(snapshot) => {
-                self.reconcile_display_preferences(&snapshot.settings);
-                // Saves issued before a slider drag can complete during it.
-                // Retain the latest preview when adopting their durable snapshot.
-                let mut snapshot = snapshot;
-                if self.display_save_pending {
-                    snapshot.settings.ui.density = self.settings.ui.density;
-                    snapshot.settings.ui.text_size_percent = self.settings.ui.text_size_percent;
+                if mutation_changes(&snapshot.settings, &self.saves[index].mutation) {
+                    self.saves[index].status = WriteStatus::Failed;
+                } else {
+                    let completed = self.saves.remove(index).expect("completed save exists");
+                    let mut preceding = index;
+                    self.saves.retain_mut(|save| {
+                        if preceding == 0 {
+                            return true;
+                        }
+                        preceding -= 1;
+                        if save.status != WriteStatus::Failed {
+                            return true;
+                        }
+                        // A color edit can acknowledge one field of a failed theme write.
+                        if let (
+                            SettingsMutation::Theme {
+                                neutral,
+                                success,
+                                error,
+                                ..
+                            },
+                            SettingsMutation::Color { kind, rgb },
+                        ) = (&mut save.mutation, &completed.mutation)
+                        {
+                            *match kind {
+                                ColorSetting::Neutral => neutral,
+                                ColorSetting::Success => success,
+                                ColorSetting::Error => error,
+                            } = *rgb;
+                        }
+                        let mut replayed = snapshot.settings.clone();
+                        apply_settings_mutation(&mut replayed, save.mutation.clone());
+                        apply_settings_mutation(&mut replayed, completed.mutation.clone());
+                        replayed != snapshot.settings
+                    });
                 }
-                if let Some(reduce_motion) = self.reduce_motion_override() {
-                    snapshot.settings.ui.reduce_motion = reduce_motion;
+                self.observe_snapshot(snapshot);
+                if generation == self.save_generation && !self.reset_busy() {
+                    self.status = SettingsStatus::Saved;
                 }
-                if let Some(value) = self.pending_text_size {
-                    snapshot.settings.ui.text_size_percent = value;
-                }
-                self.apply_saved_snapshot(snapshot);
-                self.status = SettingsStatus::Saved;
-                Some(self.current_snapshot())
+                Some(())
             }
-            Err(_) if generation != self.save_generation => None,
             Err(error) => {
-                log::warn!("Settings save failed: {error}");
-                self.status = SettingsStatus::SaveFailed;
+                self.saves[index].status = WriteStatus::Failed;
+                if generation == self.save_generation {
+                    log::warn!("Settings save failed: {error}");
+                    if !self.reset_busy() {
+                        self.status = SettingsStatus::SaveFailed;
+                    }
+                }
                 None
             }
         }
+    }
+
+    pub(crate) fn observe_snapshot(&mut self, snapshot: SettingsSnapshot) {
+        self.saves.retain(|save| {
+            save.status != WriteStatus::Failed
+                || mutation_changes(&snapshot.settings, &save.mutation)
+        });
+        self.durable = snapshot;
+        let mut effective = self.durable.settings.clone();
+        for save in &self.saves {
+            apply_settings_mutation(&mut effective, save.mutation.clone());
+        }
+        if let Some(value) = self.pending_text_size {
+            effective.ui.text_size_percent = value;
+        }
+        self.apply_saved_settings(effective);
     }
 
     pub(crate) fn preview_text_size(&mut self, value: u16) -> Option<SettingsMutation> {
@@ -717,29 +789,6 @@ impl State {
         self.pending_text_size = Some(value);
         self.last_text_preview = Some(std::time::Instant::now());
         Some(mutation)
-    }
-
-    /// Keep live display values across backend snapshots until a durable
-    /// snapshot contains them. Draft editing must not clear this protection.
-    pub(crate) fn display_preferences_override(&self) -> Option<(UiDensity, u16)> {
-        (self.pending_text_size.is_some() || self.display_save_pending)
-            .then_some((self.settings.ui.density, self.settings.ui.text_size_percent))
-    }
-
-    pub(crate) fn reduce_motion_override(&self) -> Option<bool> {
-        self.reduce_motion_save_pending
-            .then_some(self.settings.ui.reduce_motion)
-    }
-
-    pub(crate) fn reconcile_display_preferences(&mut self, durable: &Settings) {
-        if durable.ui.reduce_motion == self.settings.ui.reduce_motion {
-            self.reduce_motion_save_pending = false;
-        }
-        if durable.ui.density == self.settings.ui.density
-            && durable.ui.text_size_percent == self.settings.ui.text_size_percent
-        {
-            self.display_save_pending = false;
-        }
     }
 
     pub(crate) const fn has_text_preview(&self) -> bool {
@@ -761,9 +810,6 @@ impl State {
 
     pub(crate) fn commit_text_size(&mut self) -> Option<SettingsMutation> {
         self.last_text_preview = None;
-        if self.pending_text_size.is_some() {
-            self.display_save_pending = true;
-        }
         self.pending_text_size
             .take()
             .map(SettingsMutation::TextSize)
@@ -791,8 +837,10 @@ impl State {
     }
 
     pub(crate) fn theme_mutation(&mut self, preset: ThemePreset) -> Option<SettingsMutation> {
-        let concrete_preset =
-            concrete_preset_for_effective(effective_theme_preset(preset, self.system_scheme));
+        let concrete_preset = concrete_preset_for_effective(effective_theme_preset(
+            preset,
+            self.durable.system_scheme,
+        ));
         let (neutral, success, error) = concrete_preset.accent_colors();
         self.scalar_mutation(SettingsMutation::Theme {
             preset,
@@ -809,35 +857,23 @@ impl State {
         self.scalar_mutation(SettingsMutation::OverwriteMode(mode))
     }
 
-    fn current_snapshot(&self) -> SettingsSnapshot {
+    pub(crate) fn current_snapshot(&self) -> SettingsSnapshot {
         SettingsSnapshot::new(
             self.settings.clone(),
-            self.paths.clone(),
-            self.system_scheme,
+            self.durable.paths.clone(),
+            self.durable.system_scheme,
         )
     }
 
-    fn apply_snapshot(&mut self, snapshot: SettingsSnapshot) {
-        let SettingsSnapshot {
-            settings,
-            paths,
-            system_scheme,
-        } = snapshot;
-        self.path_fields = PathFields::from_settings(&settings);
-        self.color_fields = ColorFields::from_settings(&settings);
-        self.close_color_picker();
-        self.settings = settings;
-        self.paths = paths;
-        self.system_scheme = system_scheme;
-    }
-
-    fn apply_saved_snapshot(&mut self, snapshot: SettingsSnapshot) {
+    fn apply_saved_settings(&mut self, settings: Settings) {
         let path_defaults = PathFields::from_settings(&self.settings);
         let color_defaults = ColorFields::from_settings(&self.settings);
         let paths = self.path_fields.clone();
         let colors = self.color_fields.clone();
         let picker = (self.active_color_picker, self.color_picker_draft);
-        self.apply_snapshot(snapshot);
+        self.path_fields = PathFields::from_settings(&settings);
+        self.color_fields = ColorFields::from_settings(&settings);
+        self.settings = settings;
         for kind in PathSetting::ALL {
             if paths.text(kind) != path_defaults.text(kind) || paths.error(kind).is_some() {
                 *self.path_fields.get_mut(kind) = paths.get(kind).clone();
@@ -856,12 +892,6 @@ impl State {
             return false;
         }
         apply_settings_mutation(&mut self.settings, mutation.clone());
-        if matches!(mutation, SettingsMutation::ReduceMotion(_)) {
-            self.reduce_motion_save_pending = true;
-        }
-        if matches!(mutation, SettingsMutation::Density(_)) {
-            self.display_save_pending = true;
-        }
 
         match mutation {
             SettingsMutation::Path { .. } => {

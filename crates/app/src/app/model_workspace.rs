@@ -13,6 +13,12 @@ const IDENTITY: [[f32; 4]; 4] = [
 impl App {
     pub(super) fn sync_model_workspace(&mut self) {
         let manager = &self.state.features.model_manager;
+        let (skin, bodygroups) = manager.preview_selection();
+        self.state
+            .features
+            .model_preview
+            .apply_workspace_selection(skin, &bodygroups);
+        let manager = &self.state.features.model_manager;
         let matrix = match (
             manager.displayed_preview_transform(),
             manager.desired_preview_transform(),
@@ -27,12 +33,9 @@ impl App {
             && let Some(model) = self.state.features.model_preview.current_model()
             && let Some(base) = model.skin_tables.first()
         {
-            let mut remap = self
-                .state
-                .features
-                .model_preview
-                .current_model()
-                .and_then(|model| model.skin_tables.get(manager.preview_selection().0))
+            let mut remap = model
+                .skin_tables
+                .get(skin)
                 .cloned()
                 .unwrap_or_else(|| base.clone());
             for (slot, name) in slots.iter().enumerate() {

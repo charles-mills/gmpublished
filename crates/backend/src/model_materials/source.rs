@@ -53,42 +53,10 @@ fn read_gltf(
 ) -> Result<Vec<SourceMaterial>, MaterialExportError> {
     source_paths.insert(path.to_owned());
     let bytes = read_source(path)?;
-    let mut binary = None;
-    let json = if bytes.starts_with(b"glTF") {
-        if bytes.len() < 20 || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != 2 {
-            return Err(decode_error(path, "Invalid GLB header"));
-        }
-        let declared = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        if declared != bytes.len() {
-            return Err(decode_error(
-                path,
-                "GLB file length differs from its header",
-            ));
-        }
-        let mut offset = 12_usize;
-        let mut json = None;
-        while offset + 8 <= bytes.len() {
-            let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            let kind = &bytes[offset + 4..offset + 8];
-            offset += 8;
-            let end = offset
-                .checked_add(length)
-                .filter(|end| *end <= bytes.len())
-                .ok_or_else(|| decode_error(path, "GLB chunk exceeds the file"))?;
-            if kind == b"JSON" {
-                json = Some(&bytes[offset..end]);
-            }
-            if kind == b"BIN\0" {
-                binary = Some(&bytes[offset..end]);
-            }
-            offset = end;
-        }
-        json.ok_or_else(|| decode_error(path, "GLB JSON chunk is missing"))?
-    } else {
-        &bytes
-    };
-    let document: Value =
-        serde_json::from_slice(json).map_err(|error| decode_error(path, &error.to_string()))?;
+    let source = crate::util::gltf::Document::parse(&bytes, bytes.starts_with(b"glTF"))
+        .map_err(|reason| decode_error(path, &reason))?;
+    let document = &source.json;
+    let binary = source.binary;
     let mut buffers = Vec::new();
     if let Some(values) = document["buffers"].as_array() {
         for buffer in values {
@@ -137,7 +105,7 @@ fn read_gltf(
             }
         }
         let mut image = if let Some(index) = pbr["baseColorTexture"]["index"].as_u64() {
-            gltf_texture(path, &document, &buffers, index as usize, source_paths)?
+            gltf_texture(path, document, &buffers, index as usize, source_paths)?
         } else {
             RgbaImage::from_pixel(1, 1, image::Rgba([255; 4]))
         };
@@ -154,7 +122,7 @@ fn read_gltf(
         }
         let mut normal = material["normalTexture"]["index"]
             .as_u64()
-            .map(|index| gltf_texture(path, &document, &buffers, index as usize, source_paths))
+            .map(|index| gltf_texture(path, document, &buffers, index as usize, source_paths))
             .transpose()?;
         let normal_scale = material["normalTexture"]["scale"].as_f64().unwrap_or(1.0) as f32;
         if let Some(normal) = normal.as_mut()
@@ -179,14 +147,14 @@ fn read_gltf(
         let mut warnings = Vec::new();
         let texture_flags = gltf_texture_flags(
             path,
-            &document,
+            document,
             &pbr["baseColorTexture"],
             name,
             &mut warnings,
         )?;
         let normal_flags = gltf_texture_flags(
             path,
-            &document,
+            document,
             &material["normalTexture"],
             name,
             &mut warnings,
@@ -414,21 +382,7 @@ fn read_uri(
 }
 
 fn decode_uri_path(path: &Path, uri: &str) -> Result<String, MaterialExportError> {
-    let mut decoded = Vec::with_capacity(uri.len());
-    let mut bytes = uri.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == b'%' {
-            let high = bytes.next().and_then(|byte| char::from(byte).to_digit(16));
-            let low = bytes.next().and_then(|byte| char::from(byte).to_digit(16));
-            let (Some(high), Some(low)) = (high, low) else {
-                return Err(decode_error(path, "Invalid percent escape in glTF URI"));
-            };
-            decoded.push((high * 16 + low) as u8);
-        } else {
-            decoded.push(byte);
-        }
-    }
-    String::from_utf8(decoded).map_err(|error| decode_error(path, &error.to_string()))
+    crate::util::gltf::decode_uri_path(uri).map_err(|reason| decode_error(path, reason))
 }
 
 fn read_fbx(

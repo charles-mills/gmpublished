@@ -39,45 +39,13 @@ impl MaterialResolver {
             material.effective_base_texture()
         {
             let path = texture_path(base)?;
-            match self.selected_texture_source(&path) {
-                Ok(selected) => match selected.validate_payload() {
-                    Ok(()) => {
-                        let metadata = selected.metadata();
-                        let reflectivity =
-                            Vec3::from(metadata.reflectivity_bits?.map(f32::from_bits));
-                        if !reflectivity.is_finite() {
-                            return None;
-                        }
-                        (reflectivity, metadata.flags, true)
-                    }
-                    Err(error) if native_error_texture && super::native_invalid_texture(&error) => {
-                        source_outcome = super::TextureLoadOutcome::InvalidPayload;
-                        (
-                            Vec3::splat(0.5),
-                            Some(super::NATIVE_ERROR_TEXTURE_FLAGS),
-                            true,
-                        )
-                    }
-                    Err(error) => {
-                        log::warn!("surface lighting texture {path}: {error}");
-                        return None;
-                    }
-                },
-                Err(
-                    TextureSourceError::EncodedBudget {
-                        metadata: Some(metadata),
-                        ..
-                    }
-                    | TextureSourceError::WorkingBudget {
-                        metadata: Some(metadata),
-                        ..
-                    },
-                ) => {
+            match self.selected_reloadable_texture(&path) {
+                Ok(selected) => {
+                    let metadata = selected.metadata();
                     let reflectivity = Vec3::from(metadata.reflectivity_bits?.map(f32::from_bits));
                     if !reflectivity.is_finite() {
                         return None;
                     }
-                    source_outcome = super::TextureLoadOutcome::SourceBudgetRejected;
                     (reflectivity, metadata.flags, true)
                 }
                 Err(TextureSourceError::Invalid {
@@ -109,9 +77,7 @@ impl MaterialResolver {
             source_outcome = super::TextureLoadOutcome::Generated;
             (Vec3::splat(0.2), None, false)
         };
-        let (shader, _) = self.plan_texture_requests(|resolver| {
-            resolver.resolve_shader(material, has_base_texture, false)
-        });
+        let shader = self.resolve_shader(material, has_base_texture, false);
         let render_mode = shader.surface().map_or_else(
             || material.render_mode(),
             |surface| surface.draw_render_mode(base_flags, surface.alpha),
@@ -178,7 +144,6 @@ mod tests {
                 .reflectivity,
             Vec3::ZERO
         );
-        assert!(resolver.shared.texture_assets.resident_count() == 0);
     }
 
     #[test]

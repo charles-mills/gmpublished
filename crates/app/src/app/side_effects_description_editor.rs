@@ -118,9 +118,8 @@ fn run_metadata_update(
     task: TaskHandle,
     request: &description_editor::SaveRequest,
 ) -> Result<description_editor::SaveOutcome, UiError> {
-    let transaction = backend_ctx.begin_transaction();
+    let transaction = backend_ctx.begin_correlated_transaction(task);
     let transaction_id = transaction.id();
-    backend_ctx.correlate_backend_transaction(transaction_id, task);
 
     match publish.update_publish_metadata(&request.edit, &transaction) {
         Ok(legal_agreement_required) => {

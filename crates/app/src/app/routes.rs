@@ -107,7 +107,6 @@ impl App {
             }
             shell::Route::Models => {
                 if lifecycle == RouteLifecycle::Exited {
-                    self.capture_model_stage();
                     let playback = if self.state.features.model_preview.model_playing() {
                         self.apply_model_preview_message(
                             crate::features::file_preview::Message::ModelPlaybackToggled,

@@ -22,6 +22,7 @@ pub(crate) use collision::collision_hulls;
 pub use collision::{CollisionDetail, CollisionPhysics, ModelCollision, collision_parts};
 #[path = "model_compile/lods.rs"]
 mod lods;
+pub(crate) mod preparation;
 mod surfaces;
 pub use lods::{ModelLod, validate_lod_values, validate_lods};
 pub use mdlc::fbx::SourcePart;
@@ -213,39 +214,14 @@ fn compile_model_inner(
     let base = source
         .parent()
         .ok_or_else(|| ModelCompileError::InvalidOption("source must be a file".into()))?;
-    let mut desc = load_description(request, &source, base)?;
-    let _authoring_assets = authoring::prepare_assets(&mut desc, &source)?;
-    desc.model.version = Some(48);
-    if let Some(name) = &request.model_name {
-        desc.model.name = normalize_model_name(name)?;
-    } else {
-        desc.model.name = normalize_model_name(&desc.model.name)?;
-    }
-    if let Some(directory) = &request.material_directory {
-        desc.materials.search_paths = vec![directory.replace('\\', "/")];
-    }
-    check_cancel(cancel)?;
-    if request.orientation.iter().any(|value| !value.is_finite()) {
-        return Err(ModelCompileError::InvalidOption(
-            "orientation angles must be finite".into(),
-        ));
-    }
-    if !request.export_materials
-        && request
-            .skins
-            .iter()
-            .flat_map(|skin| skin.replacements.values())
-            .any(|material| !matches!(material, SkinMaterial::Material { .. }))
-    {
-        return Err(ModelCompileError::InvalidOption(
-            "authored skin textures and tints require material export".into(),
-        ));
-    }
-    let mut compiled =
-        mdlc::compile::compile(&desc, base).map_err(mdlc::pipeline::PipelineError::Compile)?;
+    let desc = load_description(request, &source, base)?;
+    let preparation::PreparedModel {
+        desc,
+        mut compiled,
+        variants,
+        authoring_assets: _authoring_assets,
+    } = preparation::prepare_model(request, &source, base, desc, cancel)?;
     authoring::restore_animation_labels(&mut compiled, &source)?;
-    apply_orientation(&mut compiled, &source, request.orientation)?;
-    let variants = apply_skins(&mut compiled.desc, &request.skins)?;
     let mut output = pipeline::build_compiled(compiled, base, PipelineOptions::default())?;
     collision::apply(&mut output, request, cancel)?;
     if let Some(bytes) = &output.phy {
@@ -268,52 +244,14 @@ fn compile_model_inner(
         .map(|texture| texture.name.clone())
         .collect::<Vec<_>>();
     let material_directories = output.compiled.desc.materials.search_paths.clone();
-    let prepared = if request.export_materials {
-        let mut sources = vec![source.clone()];
-        for model in desc.bodyparts.iter().flat_map(|body| &body.models) {
-            for reference in std::iter::once(Some(&model.smd))
-                .chain(model.lods.iter().map(|lod| lod.smd.as_ref()))
-                .flatten()
-            {
-                if reference.is_empty() {
-                    continue;
-                }
-                let path = mdlc::compile::resolve_smd_path(base, reference)
-                    .map_err(|error| ModelCompileError::Description(error.to_string()))?;
-                if !sources.contains(&path) {
-                    sources.push(path);
-                }
-            }
-        }
-        let imported_materials =
-            model_materials::source_material_names(&output.compiled.desc, &variants);
-        let mut prepared = model_materials::prepare_materials_for_sources(
-            &imported_materials,
-            &material_directories,
-            base,
-            &sources,
-        )?;
-        model_materials::prepare_skin_materials(
-            &mut prepared,
-            &variants,
-            &material_directories,
-            base,
-        )?;
-        for skin in &request.skins {
-            for replacement in skin.replacements.values() {
-                if let SkinMaterial::Material { name } = replacement {
-                    model_materials::require_prepared_material(
-                        &prepared,
-                        name,
-                        &material_directories,
-                    )?;
-                }
-            }
-        }
-        Some(prepared)
-    } else {
-        None
-    };
+    let prepared = preparation::prepare_model_materials(
+        request,
+        &source,
+        base,
+        &desc,
+        &output.compiled.desc,
+        &variants,
+    )?;
     check_cancel(cancel)?;
     let _export = EXPORT_LOCK.lock();
     check_cancel(cancel)?;

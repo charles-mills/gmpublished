@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{Cursor, Read},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
 
@@ -512,46 +512,17 @@ fn material_name(name: &str) -> Option<String> {
 }
 
 fn local_file(root: &Path, relative: &Path) -> Result<Option<PathBuf>, String> {
-    let mut current = root.to_owned();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            return Ok(None);
-        };
-        let exact = current.join(name);
-        if exact.exists() {
-            current = exact;
-        } else {
-            let entries = match fs::read_dir(&current) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.to_string()),
-            };
-            let mut matched = None;
-            for (index, entry) in entries.enumerate() {
-                if index >= 65_536 {
-                    return Err("material directory entry limit exceeded".into());
-                }
-                let entry = entry.map_err(|error| error.to_string())?;
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&name.to_string_lossy())
-                {
-                    if matched.is_some() {
-                        return Err("material path is ambiguous ignoring case".into());
-                    }
-                    matched = Some(entry.path());
-                }
-            }
-            let Some(path) = matched else { return Ok(None) };
-            current = path;
+    use crate::util::case_path::LookupError;
+    match crate::util::case_path::find_file(root, relative, false, Some(65_536)) {
+        Ok(path) => Ok(path),
+        Err(LookupError::InvalidPath(_)) => Ok(None),
+        Err(LookupError::Io { source, .. }) => Err(source.to_string()),
+        Err(LookupError::Ambiguous(_)) => Err("material path is ambiguous ignoring case".into()),
+        Err(LookupError::OutsideRoot(_)) => {
+            Err("material symlink points outside the model directory".into())
         }
-        let real = fs::canonicalize(&current).map_err(|error| error.to_string())?;
-        if !real.starts_with(root) {
-            return Err("material symlink points outside the model directory".into());
-        }
+        Err(error @ LookupError::EntryLimit) => Err(error.to_string()),
     }
-    Ok(current.is_file().then_some(current))
 }
 
 fn number(parameters: &BTreeMap<String, String>, key: &str) -> Option<f64> {

@@ -32,10 +32,6 @@ pub enum Message {
         >,
     ),
     StageTransformChanged(StageTransform),
-    StagePlacementRestored {
-        position: [f32; 3],
-        angles: [f32; 3],
-    },
     StageCameraChanged {
         pose: FlyPose,
         mode: MovementMode,

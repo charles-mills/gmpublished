@@ -51,23 +51,11 @@ impl VpkArchive {
             .map_err(Clone::clone)?
             .entry_storage(path)
     }
-    pub(crate) fn entry_prefix(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, VpkError> {
-        self.file
-            .as_ref()
-            .map_err(Clone::clone)?
-            .read_entry_prefix(path, max_bytes)
-    }
 
     pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, VpkError> {
         self.file
             .as_ref()
             .map_err(Clone::clone)?
             .read_entry_bytes(path)
-    }
-    pub(crate) fn texture_entry_bytes(&self, path: &str, limit: u64) -> Result<Vec<u8>, VpkError> {
-        self.file
-            .as_ref()
-            .map_err(Clone::clone)?
-            .read_entry_bytes_with_limit(path, limit)
     }
 }

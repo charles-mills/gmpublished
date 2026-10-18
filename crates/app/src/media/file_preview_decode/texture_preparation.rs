@@ -1,7 +1,4 @@
-use crate::bridge::materials::{
-    DecodedTextureBudget, EncodedTextureBudget, MaterialResolver, SpriteSheetBudget,
-    TextureWorkingBudget,
-};
+use crate::bridge::materials::{MaterialResolver, SpriteSheetBudget, TextureWorkingBudget};
 use std::sync::{Arc, OnceLock};
 
 const DEFAULT_BYTES: usize = 1024 * 1024 * 1024;
@@ -11,9 +8,6 @@ pub struct TextureResourcePolicy {
     pub source_discovery_limits: crate::bridge::materials::SourceDiscoveryLimits,
     pub archive_index_limits: vformats::ArchiveIndexLimits,
     pub archive_index_working_budget: Arc<TextureWorkingBudget>,
-    pub resident_bytes: usize,
-    pub resident_images: usize,
-    pub source_encoded_bytes: usize,
     pub resource_resident_bytes: usize,
     pub source_decoder_bytes: usize,
     pub sprite_sheet_frames: usize,
@@ -30,9 +24,6 @@ impl Default for TextureResourcePolicy {
             source_discovery_limits: Default::default(),
             archive_index_limits: vformats::ArchiveIndexLimits::default(),
             archive_index_working_budget: MaterialResolver::default_archive_index_working_budget(),
-            resident_bytes: DEFAULT_BYTES,
-            resident_images: vformats::Limits::default().max_entries,
-            source_encoded_bytes: DEFAULT_BYTES,
             resource_resident_bytes: DEFAULT_BYTES,
             source_decoder_bytes: DEFAULT_BYTES,
             sprite_sheet_frames: crate::bridge::materials::DEFAULT_SPRITE_SHEET_FRAMES,
@@ -56,8 +47,6 @@ pub struct MapTextureResidency {
 
 pub(super) struct TexturePreparationResources {
     pub resolver: MaterialResolver,
-    pub encoded_budget: Arc<EncodedTextureBudget>,
-    pub texture_budget: Arc<DecodedTextureBudget>,
     pub sheet_budget: Arc<SpriteSheetBudget>,
 }
 
@@ -99,28 +88,18 @@ impl TexturePreparationResources {
     }
 
     pub fn new(resolver: &MaterialResolver, policy: &TextureResourcePolicy) -> Self {
-        let encoded_budget = Arc::new(EncodedTextureBudget::new(policy.source_encoded_bytes));
-        let texture_budget = Arc::new(DecodedTextureBudget::with_image_limit(
-            policy.resident_bytes,
-            policy.resident_images,
-        ));
         let sheet_budget = Arc::new(SpriteSheetBudget::new(
             policy.sprite_sheet_frames,
             policy.sprite_sheet_metadata_bytes,
         ));
         let resolver = resolver
-            .with_on_demand_textures()
-            .with_encoded_texture_budget(Arc::clone(&encoded_budget))
             .with_texture_resource_limit(policy.resource_resident_bytes)
             .with_texture_decoder_limit(policy.source_decoder_bytes)
             .with_texture_source_working_budget(Arc::clone(&policy.source_working_budget))
             .with_texture_working_budget(Arc::clone(&policy.working_budget))
-            .with_decoded_texture_budget(Arc::clone(&texture_budget))
             .with_sprite_sheet_budget(Arc::clone(&sheet_budget));
         Self {
             resolver,
-            encoded_budget,
-            texture_budget,
             sheet_budget,
         }
     }
@@ -171,8 +150,6 @@ mod tests {
             &MaterialResolver::prop_lighting_fixture(Vec::new(), Vec::new()),
             &policy,
         );
-        assert!(!Arc::ptr_eq(&first.texture_budget, &second.texture_budget));
-        assert!(!Arc::ptr_eq(&first.encoded_budget, &second.encoded_budget));
         assert!(!Arc::ptr_eq(&first.sheet_budget, &second.sheet_budget));
     }
 }

@@ -3,9 +3,9 @@ use gmpublished_backend::error_keys as keys;
 use super::{
     Arc, BackendContext, BackendRuntimeAction, BackendRuntimeEvent, BackendServices, Duration,
     HashMap, NativeOpenTarget, Path, PathBuf, PublishedFileId, RootMessage, RunBlockingError,
-    SearchFullRequest, TaskHandle, TaskKind, UiError, WorkshopDownloadResult,
-    WorkshopDownloadSuccess, downloader, gma, iced_mpsc, installed_addons, prepare_publish,
-    preview_gma, search, size_analyzer, steam_session, tasks,
+    SearchFullRequest, TaskHandle, TaskKind, UiError, WorkshopDownloadSuccess, downloader, gma,
+    iced_mpsc, installed_addons, prepare_publish, preview_gma, search, size_analyzer,
+    steam_session, tasks,
 };
 use crate::bridge::tasks::TransactionStatus;
 use crate::generation::Generation;
@@ -45,9 +45,9 @@ pub(super) fn run_search_full(
         return;
     };
 
-    let transaction = app.begin_transaction();
+    let transaction = ctx.begin_correlated_transaction(task);
     let transaction_id = transaction.id();
-    ctx.correlate_backend_transaction(transaction_id, task);
+
     let started_id = app.start_full_search(&request, transaction);
     debug_assert_eq!(started_id, transaction_id);
 
@@ -212,7 +212,6 @@ pub(super) fn run_downloader_local_extraction(
     ctx: &BackendContext,
     app: &BackendServices,
     paths: Vec<PathBuf>,
-    mut output: iced_mpsc::Sender<RootMessage>,
 ) {
     let destination = app.settings_snapshot().backend.extract_destination;
     let paths = paths
@@ -227,43 +226,9 @@ pub(super) fn run_downloader_local_extraction(
 
     for path in paths {
         let total_bytes = path.metadata().map_or(0, |metadata| metadata.len());
-        let task = create_downloader_local_extract_task(ctx, total_bytes);
-        let task_id = task.id();
-
-        if !send_root_message(
-            &mut output,
-            RootMessage::Downloader(downloader::Message::EventReceived(
-                downloader::DownloaderEvent::LocalExtractionStarted {
-                    path: path.clone(),
-                    task_id,
-                    total_bytes,
-                },
-            )),
-        ) {
-            return;
-        }
-
-        let result = run_local_gma_extraction(ctx, &path, destination.clone(), task);
-
-        if !send_root_message(
-            &mut output,
-            RootMessage::Downloader(downloader::Message::EventReceived(
-                downloader::DownloaderEvent::LocalExtractionFinished {
-                    task_id,
-                    outcome: local_extraction_outcome(result),
-                },
-            )),
-        ) {
-            return;
-        }
+        let task = ctx.create_local_extraction_task(path.clone(), total_bytes);
+        let _result = run_local_gma_extraction(ctx, &path, destination.clone(), task);
     }
-}
-
-pub(super) fn create_downloader_local_extract_task(
-    ctx: &BackendContext,
-    total_bytes: u64,
-) -> TaskHandle {
-    create_extract_task(ctx, TaskKind::Extract, total_bytes)
 }
 
 /// Use a correlated transaction so task cancellation reaches the extraction.
@@ -273,24 +238,19 @@ pub(super) fn run_local_gma_extraction(
     destination: gma::ExtractDestination,
     task: TaskHandle,
 ) -> Result<PathBuf, gma::GmaError> {
-    let archive = gma::PreviewArchive::open(path)?;
-
-    let transaction = ctx.begin_transaction();
-    ctx.correlate_backend_transaction(transaction.id(), task);
-    let result = ctx.extract_preview_archive(&archive, destination, &transaction);
+    let transaction = ctx.begin_correlated_transaction(task);
+    let result = (|| {
+        if transaction.aborted() {
+            return Err(gma::GmaError::Cancelled);
+        }
+        let archive = gma::PreviewArchive::open(path)?;
+        ctx.extract_preview_archive(&archive, destination, &transaction)
+    })();
     if let Err(error) = &result {
+        transaction.error(error);
         let _handled = ctx.error_backend_transaction_task(transaction.id(), UiError::from(error));
     }
     result
-}
-
-pub(super) fn local_extraction_outcome(
-    result: Result<PathBuf, gma::GmaError>,
-) -> downloader::LocalExtractionOutcome {
-    match result {
-        Ok(path) => downloader::LocalExtractionOutcome::Success(path),
-        Err(error) => downloader::LocalExtractionOutcome::Error(UiError::from(&error)),
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -350,10 +310,8 @@ pub(super) fn create_preview_gma_extract_transaction(
     ctx: &BackendContext,
     total_bytes: u64,
 ) -> gmpublished_backend::Transaction {
-    let transaction = ctx.begin_transaction();
     let task = create_preview_gma_extract_task(ctx, total_bytes);
-    ctx.correlate_backend_transaction(transaction.id(), task);
-    transaction
+    ctx.begin_correlated_transaction(task)
 }
 
 pub(super) fn create_preview_gma_extract_task(
@@ -426,19 +384,8 @@ pub(super) fn log_preview_gma_extraction_result(
 
 pub(super) fn backend_runtime_action_message(action: BackendRuntimeAction) -> RootMessage {
     match action {
-        BackendRuntimeAction::DownloadTaskStarted {
-            kind,
-            item_id,
-            task_id,
-        } => RootMessage::Downloader(downloader::Message::EventReceived(
-            downloader::DownloaderEvent::TaskStarted {
-                kind,
-                item_id,
-                task_id,
-            },
-        )),
-        BackendRuntimeAction::DownloadFinished {
-            request_id: Some(request_id),
+        BackendRuntimeAction::SnapshotDownloaded {
+            request_id,
             item_id,
             installed_path,
             extracted_path,
@@ -449,21 +396,6 @@ pub(super) fn backend_runtime_action_message(action: BackendRuntimeAction) -> Ro
                 installed_path,
                 extracted_path,
             },
-        )),
-        BackendRuntimeAction::DownloadFinished {
-            request_id: None,
-            item_id,
-            installed_path,
-            extracted_path,
-        } => RootMessage::Downloader(downloader::Message::EventReceived(
-            downloader::DownloaderEvent::WorkshopDownloadFinished(WorkshopDownloadResult {
-                item_id,
-                outcome: Ok(WorkshopDownloadSuccess {
-                    item_id,
-                    installed_path,
-                    extracted_path,
-                }),
-            }),
         )),
         BackendRuntimeAction::SnapshotFailed { request_id, error } => RootMessage::PreparePublish(
             prepare_publish::Message::WorkshopSnapshotFailed(request_id, error),

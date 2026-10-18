@@ -90,16 +90,6 @@ pub enum Message {
             String,
         >,
     ),
-    StageSnapshotCaptured {
-        position: [f32; 3],
-        angles: [f32; 3],
-        skin: usize,
-        bodygroups: Vec<usize>,
-    },
-    PreviewSelectionCaptured {
-        skin: usize,
-        bodygroups: Vec<usize>,
-    },
     InstallRequested,
     InstallConfirmed,
     InstallDismissed,

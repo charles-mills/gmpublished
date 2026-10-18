@@ -447,11 +447,11 @@ mod tests {
             state.bodygroups
         );
         assert_eq!(state.qc_request().unwrap().bodygroups, state.bodygroups);
-        state.stage_bodygroups = vec![2];
+        state.workspace.bodygroups = vec![2];
         state.qc_saved = true;
         super::super::update(&mut state, Message::BodygroupChoiceMoved(0, 2, 0));
         assert_eq!(state.bodygroups[0].choices[0], BodygroupChoice::Hidden);
-        assert!(state.stage_bodygroups.is_empty());
+        assert!(state.workspace.bodygroups.is_empty());
         assert!(!state.qc_saved);
         super::super::update(&mut state, Message::SourceDropped("new.fbx".into()));
         assert!(state.bodygroups.is_empty());

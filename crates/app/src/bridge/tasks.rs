@@ -48,13 +48,13 @@ pub use runtime_events::{
 };
 pub use services::BackendServices;
 #[cfg(test)]
+pub use task_events::SharedTaskUpdate;
+#[cfg(test)]
 use task_events::task_event_stream;
 use task_events::{BackendEventStreamFactory, TaskEventStreamFactory};
-#[cfg(test)]
-pub use task_events::{CoalescedTaskStart, SharedTaskUpdate};
 pub use task_events::{
-    CoalescedTaskTerminal, CoalescedTaskUpdate, TaskEvent, TaskHandle, TaskId, TaskKind,
-    TaskUpdate, Tasks, WorkshopDownloadTaskKind,
+    ExtractionOutput, TaskEvent, TaskHandle, TaskId, TaskIdentity, TaskKind, TaskUpdate, Tasks,
+    WorkshopDownloadTaskKind,
 };
 use worker_runtime::show_native_open_error_dialog;
 pub use worker_runtime::{RunBlockingError, ScheduleError};
@@ -65,8 +65,3 @@ const BACKEND_EVENT_QUEUE_CAPACITY: usize = 256;
 pub use gmpublished_backend::TransactionStatus;
 pub use gmpublished_backend::WorkshopSnapshotId;
 const TRANSACTION_PROGRESS_SCALE: f64 = 10_000.0;
-const MAX_PENDING_PRE_START_TRANSACTIONS: usize = 128;
-const MAX_PENDING_PRE_START_EVENTS_PER_TRANSACTION: usize = 8;
-/// Recent terminal ids retained to reject delayed running events rather than
-/// mistaking them for events that raced their start correlation.
-const MAX_COMPLETED_TRANSACTION_TOMBSTONES: usize = 1_024;

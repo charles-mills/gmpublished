@@ -157,7 +157,7 @@ impl MaterialResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::materials::{DecodedTextureBudget, TextureLoadOutcome};
+    use crate::bridge::materials::TextureLoadOutcome;
     use crate::test_support::fixture_vtf_bytes;
     use std::{
         sync::mpsc,
@@ -255,80 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_source_initializer_releases_admission_and_another_token_can_retry() {
-        let bytes = fixture_vtf_bytes(4, 4, vformats::vtf::VtfFormat::Rgba8888, &[&[42; 64]]);
-        let path = super::super::ContentPath::new("materials/test/cancel.vtf").unwrap();
-        let resolver =
-            MaterialResolver::prop_lighting_fixture(vec![(path.as_str(), bytes)], Vec::new());
-        let working = Arc::new(TextureWorkingBudget::new(4096));
-        let held = working.request(4096).unwrap().acquire();
-        let encoded = Arc::new(super::super::EncodedTextureBudget::new(4096));
-        let cancellation = crate::preparation::PreparationCancellation::default();
-        let cancelled_resolver = resolver
-            .with_encoded_texture_budget(Arc::clone(&encoded))
-            .with_texture_source_working_budget(Arc::clone(&working))
-            .with_cancellation(cancellation.clone());
-        let worker_path = path.clone();
-        let worker = thread::spawn(move || cancelled_resolver.selected_texture_asset(&worker_path));
-        wait_queued(&working, 1);
-        cancellation.cancel();
-        assert!(matches!(
-            worker.join().unwrap(),
-            Err(
-                super::super::texture_asset::TextureSourceError::Preparation {
-                    error: TextureAssetError::Cancelled(_),
-                    ..
-                }
-            )
-        ));
-        assert_eq!(encoded.encoded_bytes(), 0);
-        assert_eq!(working.current_bytes(), 4096);
-        drop(held);
-        let next = resolver
-            .with_encoded_texture_budget(Arc::clone(&encoded))
-            .with_texture_source_working_budget(Arc::clone(&working));
-        let first = next.selected_texture_asset(&path).unwrap();
-        let second = next.selected_texture_asset(&path).unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(encoded.admitted_textures(), 1);
-        assert_eq!(working.current_bytes(), 0);
-    }
-
-    #[test]
-    fn cancelled_resident_initializer_releases_admission_without_poisoning_shared_content() {
-        let bytes = fixture_vtf_bytes(4, 4, vformats::vtf::VtfFormat::Rgba8888, &[&[42; 64]]);
-        let path = super::super::ContentPath::new("materials/test/cancel.vtf").unwrap();
-        let resolver =
-            MaterialResolver::prop_lighting_fixture(vec![(path.as_str(), bytes)], Vec::new());
-        let selected = resolver.selected_texture_asset(&path).unwrap();
-        let working = Arc::new(TextureWorkingBudget::new(4096));
-        let held = working.request(4096).unwrap().acquire();
-        let resident = Arc::new(DecodedTextureBudget::new(64));
-        let cancellation = crate::preparation::PreparationCancellation::default();
-        let cancelled_resolver = resolver
-            .with_decoded_texture_budget(Arc::clone(&resident))
-            .with_texture_working_budget(Arc::clone(&working))
-            .with_cancellation(cancellation.clone());
-        let worker_source = Arc::clone(&selected);
-        let worker =
-            thread::spawn(move || cancelled_resolver.resident_texture(&worker_source, 0..1, false));
-        wait_queued(&working, 1);
-        cancellation.cancel();
-        assert!(matches!(
-            worker.join().unwrap(),
-            Err(TextureAssetError::Cancelled(_))
-        ));
-        assert_eq!(resident.decoded_bytes(), 0);
-        drop(held);
-        let next = resolver
-            .with_decoded_texture_budget(Arc::clone(&resident))
-            .with_texture_working_budget(Arc::clone(&working));
-        assert!(next.resident_texture(&selected, 0..1, false).is_ok());
-        assert_eq!(resident.decoded_bytes(), 64);
-        assert_eq!(working.current_bytes(), 0);
-    }
-
-    #[test]
     fn lease_releases_on_unwind() {
         let budget = Arc::new(TextureWorkingBudget::new(8));
         let worker_budget = Arc::clone(&budget);
@@ -347,132 +273,6 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
     }
 
-    fn rgba_resolver() -> MaterialResolver {
-        MaterialResolver::prop_lighting_fixture(
-            vec![
-                (
-                    "materials/test/image.vmt",
-                    br#"LightmappedGeneric { "$basetexture" "test/image" }"#.to_vec(),
-                ),
-                (
-                    "materials/test/image.vtf",
-                    fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[3; 4], &[7; 16]]),
-                ),
-            ],
-            Vec::new(),
-        )
-    }
-
-    #[test]
-    fn working_fit_is_identical_for_cold_and_warm_resources_and_does_not_poison_cache() {
-        for warm in [false, true] {
-            let resolver = rgba_resolver();
-            if warm {
-                assert!(
-                    resolver
-                        .resolve_primary(&[], "test/image")
-                        .material()
-                        .is_some()
-                );
-            }
-            let small =
-                resolver.with_texture_working_budget(Arc::new(TextureWorkingBudget::new(19)));
-            let (planned, plan) =
-                small.plan_texture_requests(|resolver| resolver.resolve_primary(&[], "test/image"));
-            assert_eq!(
-                planned
-                    .material()
-                    .unwrap()
-                    .texture
-                    .as_ref()
-                    .unwrap()
-                    .load_outcome(),
-                TextureLoadOutcome::QualityRejected
-            );
-            let resident = Arc::new(DecodedTextureBudget::new(20));
-            let small = small.with_decoded_texture_budget(Arc::clone(&resident));
-            let admitted = small.with_texture_admissions(small.admit_texture_requests(plan));
-            assert_eq!(resident.decoded_bytes(), 0);
-            assert_eq!(
-                admitted
-                    .resolve_primary(&[], "test/image")
-                    .material()
-                    .unwrap()
-                    .texture
-                    .as_ref()
-                    .unwrap()
-                    .load_outcome(),
-                TextureLoadOutcome::QualityRejected
-            );
-            let working = Arc::new(TextureWorkingBudget::new(20));
-            let accepted = resolver
-                .with_texture_working_budget(Arc::clone(&working))
-                .resolve_primary(&[], "test/image")
-                .into_material()
-                .unwrap();
-            assert_eq!(
-                accepted.texture.as_ref().unwrap().load_outcome(),
-                TextureLoadOutcome::Loaded
-            );
-            assert_eq!(working.current_bytes(), 0);
-            assert_eq!(working.peak_bytes(), if warm { 0 } else { 20 });
-        }
-    }
-
-    #[test]
-    fn converted_image_jobs_share_one_working_gate_and_single_flight() {
-        const SIDE: u16 = 512;
-        let pixels = vec![31; usize::from(SIDE) * usize::from(SIDE) * 3];
-        let resolver = MaterialResolver::prop_lighting_fixture(
-            vec![
-                (
-                    "materials/test/image.vmt",
-                    br#"LightmappedGeneric { "$basetexture" "test/image" }"#.to_vec(),
-                ),
-                (
-                    "materials/test/image.vtf",
-                    fixture_vtf_bytes(SIDE, SIDE, VtfFormat::Rgb888, &[&pixels]),
-                ),
-            ],
-            Vec::new(),
-        );
-        let working = Arc::new(TextureWorkingBudget::new(
-            usize::from(SIDE) * usize::from(SIDE) * 4,
-        ));
-        let resolver = Arc::new(resolver.with_texture_working_budget(Arc::clone(&working)));
-        let workers = (0..4)
-            .map(|_| {
-                let resolver = Arc::clone(&resolver);
-                thread::spawn(move || {
-                    resolver
-                        .resolve_primary(&[], "test/image")
-                        .into_material()
-                        .unwrap()
-                })
-            })
-            .collect::<Vec<_>>();
-        let outputs = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .collect::<Vec<_>>();
-        for output in &outputs {
-            assert_eq!(
-                output.texture.as_ref().unwrap().load_outcome(),
-                TextureLoadOutcome::Loaded
-            );
-            assert_eq!(
-                &output.texture.as_ref().unwrap().rgba_bytes().unwrap()[..4],
-                &[31, 31, 31, 255]
-            );
-            assert!(Arc::ptr_eq(
-                output.texture.as_ref().unwrap().resident().unwrap(),
-                outputs[0].texture.as_ref().unwrap().resident().unwrap()
-            ));
-        }
-        assert_eq!(working.current_bytes(), 0);
-        assert_eq!(working.peak_bytes(), working.capacity());
-        assert_eq!(resolver.resident_texture_asset_count(), 1);
-    }
     #[test]
     fn declared_resource_limit_applies_consistently_to_base_frames_and_cube_selections() {
         let mut cube = fixture_vtf_bytes(1, 1, VtfFormat::Rgba8888, &[&[63; 24]]);
@@ -507,42 +307,7 @@ mod tests {
             assert_eq!(cube.load_outcome(), expected);
         }
     }
-    #[test]
-    fn actual_decode_error_releases_working_and_persistent_reservations() {
-        let mut unsupported = fixture_vtf_bytes(1, 1, VtfFormat::Rgba8888, &[&[42]]);
-        unsupported[52..56].copy_from_slice(&7_i32.to_le_bytes());
-        let resolver = MaterialResolver::prop_lighting_fixture(
-            vec![
-                (
-                    "materials/test/image.vmt",
-                    br#"LightmappedGeneric { "$basetexture" "test/image" }"#.to_vec(),
-                ),
-                ("materials/test/image.vtf", unsupported),
-            ],
-            Vec::new(),
-        );
-        let working = Arc::new(TextureWorkingBudget::new(4));
-        let resident = Arc::new(DecodedTextureBudget::new(4));
-        let resolver = resolver
-            .with_texture_working_budget(Arc::clone(&working))
-            .with_decoded_texture_budget(Arc::clone(&resident));
-        for _ in 0..2 {
-            assert_eq!(
-                resolver
-                    .resolve_primary(&[], "test/image")
-                    .material()
-                    .unwrap()
-                    .texture
-                    .as_ref()
-                    .unwrap()
-                    .load_outcome(),
-                TextureLoadOutcome::Unsupported
-            );
-            assert_eq!(working.current_bytes(), 0);
-            assert_eq!(resident.decoded_bytes(), 0);
-        }
-        assert_eq!(working.peak_bytes(), 4);
-    }
+
     #[test]
     fn independent_converted_resources_share_the_declared_aggregate_gate() {
         const SIDE: u16 = 512;
@@ -571,7 +336,7 @@ mod tests {
             Vec::new(),
         );
         let working = Arc::new(TextureWorkingBudget::new(
-            usize::from(SIDE) * usize::from(SIDE) * 4,
+            usize::from(SIDE) * usize::from(SIDE) * 7,
         ));
         let resolver = Arc::new(resolver.with_texture_working_budget(Arc::clone(&working)));
         let workers = (0_u8..4)
@@ -586,8 +351,17 @@ mod tests {
                         material.texture.as_ref().unwrap().load_outcome(),
                         TextureLoadOutcome::Loaded
                     );
+                    let texture = material.texture.as_ref().unwrap();
+                    let (source, request) = texture.on_demand().unwrap();
+                    let page = source
+                        .load_page(
+                            request,
+                            &Default::default(),
+                            resolver.config.texture_working_budget.as_ref().unwrap(),
+                        )
+                        .unwrap();
                     assert_eq!(
-                        &material.texture.as_ref().unwrap().rgba_bytes().unwrap()[..4],
+                        &page.resident().layers()[0].mips[0].bytes.as_slice()[..4],
                         &[index, index, index, 255]
                     );
                 })
@@ -598,6 +372,5 @@ mod tests {
         }
         assert_eq!(working.current_bytes(), 0);
         assert_eq!(working.peak_bytes(), working.capacity());
-        assert_eq!(resolver.resident_texture_asset_count(), 4);
     }
 }

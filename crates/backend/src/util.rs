@@ -1,3 +1,5 @@
+pub(crate) mod case_path;
+pub(crate) mod gltf;
 pub(crate) mod panic;
 pub mod path;
 pub(crate) mod threads;

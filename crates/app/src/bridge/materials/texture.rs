@@ -25,28 +25,30 @@ pub(super) fn resolved_bc_texture(
     bytes: &[u8],
     max_dimension: Option<u32>,
 ) -> Option<super::ResolvedTexture> {
-    let limits = Limits::default();
-    let asset =
-        super::texture_asset::TextureAsset::from_bytes(std::sync::Arc::from(bytes), &limits)
-            .ok()?;
-    let first = asset.first_mip(max_dimension).ok()?;
-    let format = asset.metadata().format?.bc()?;
-    let end = if asset.metadata().flags.unwrap_or(0) & vformats::vtf::texture_flags::NOMIP != 0 {
-        first + 1
-    } else {
-        asset.metadata().mip_count
-    };
-    let resident = asset
-        .materialize(
-            0..asset.metadata().frame_count,
-            0..1,
-            first..end,
-            super::TextureStorage::Bc(format),
-            &limits,
-        )
+    let source = super::ReloadableTextureSource::inspect(
+        super::texture_asset::TextureOrigin {
+            path: super::ContentPath::new("materials/fixture.vtf").unwrap(),
+            tier: super::ContentSourceTier::Addon,
+        },
+        std::sync::Arc::new(super::reloadable::PreloadSource(std::sync::Arc::from(
+            bytes,
+        ))),
+        Limits::default(),
+        &Default::default(),
+        &std::sync::Arc::new(super::TextureWorkingBudget::new(usize::MAX)),
+    )
+    .ok()?;
+    source.metadata().format?.bc()?;
+    let resolver = super::MaterialResolver::prop_lighting_fixture(Vec::new(), Vec::new());
+    let resolver = max_dimension.map_or_else(
+        || resolver.variant(resolver.config.clone()),
+        |max| resolver.with_decoded_texture_max_dimension(max),
+    );
+    let residency = resolver
+        .reloadable_residency(std::sync::Arc::clone(&source), 0, 0..1, false)
         .ok()?;
     Some(super::ResolvedTexture::from_resident(
-        super::TextureResidency::Resident(resident),
-        asset.metadata_arc(),
+        super::TextureResidency::Resident(std::sync::Arc::clone(residency.read_for_test())),
+        source.metadata_arc(),
     ))
 }

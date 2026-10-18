@@ -198,6 +198,13 @@ impl BackendServices {
         self.backend.begin_transaction()
     }
 
+    pub(crate) fn begin_transaction_with(
+        &self,
+        initialize: impl FnOnce(&Transaction),
+    ) -> Transaction {
+        self.backend.begin_transaction_with(initialize)
+    }
+
     pub(crate) fn cpu_executor(&self) -> &gmpublished_backend::CpuExecutor {
         self.backend.cpu_executor()
     }

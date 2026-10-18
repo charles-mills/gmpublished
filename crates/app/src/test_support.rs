@@ -12,12 +12,71 @@ use vformats::vtf::VtfFormat;
 
 use crate::bridge::gma::{FixtureGmaEntry, FixtureGmaFile, GMA_VERSION, GmaHeader, GmaMetadata};
 
+pub fn workshop_task_started(
+    kind: crate::bridge::tasks::WorkshopDownloadTaskKind,
+    item_id: crate::bridge::domain::PublishedFileId,
+    task_id: crate::bridge::tasks::TaskId,
+) -> crate::bridge::tasks::TaskEvent {
+    use crate::bridge::tasks::{
+        TaskIdentity, TaskKind, TaskUpdate, TransactionStatus, WorkshopDownloadTaskKind,
+    };
+    let (task_kind, status) = match kind {
+        WorkshopDownloadTaskKind::Download => (TaskKind::Download, TransactionStatus::Downloading),
+        WorkshopDownloadTaskKind::Extract => (TaskKind::Extract, TransactionStatus::Extracting),
+    };
+    (
+        task_id,
+        TaskUpdate::Started {
+            kind: task_kind,
+            status,
+            identity: Some(TaskIdentity::Workshop { kind, item_id }),
+        }
+        .into(),
+    )
+}
+
+pub fn local_extraction_started(
+    path: PathBuf,
+    task_id: crate::bridge::tasks::TaskId,
+    total_bytes: u64,
+) -> crate::bridge::tasks::TaskEvent {
+    use crate::bridge::tasks::{TaskIdentity, TaskKind, TaskUpdate, TransactionStatus};
+    (
+        task_id,
+        TaskUpdate::Started {
+            kind: TaskKind::Extract,
+            status: TransactionStatus::Extracting,
+            identity: Some(TaskIdentity::LocalExtraction { path, total_bytes }),
+        }
+        .into(),
+    )
+}
+
+pub fn extraction_finished(
+    task_id: crate::bridge::tasks::TaskId,
+    source_path: Option<PathBuf>,
+    extracted_path: PathBuf,
+) -> Vec<crate::bridge::tasks::TaskEvent> {
+    use crate::bridge::tasks::{ExtractionOutput, TaskUpdate};
+    vec![
+        (
+            task_id,
+            TaskUpdate::Extracted(ExtractionOutput {
+                source_path,
+                extracted_path,
+            })
+            .into(),
+        ),
+        (task_id, TaskUpdate::Finished.into()),
+    ]
+}
+
 pub struct TestDir {
     inner: TempDir,
 }
 
 impl TestDir {
-    pub(crate) fn new(prefix: &str) -> Self {
+    pub fn new(prefix: &str) -> Self {
         let inner = tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
@@ -25,29 +84,25 @@ impl TestDir {
         Self { inner }
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         self.inner.path()
     }
 
-    pub(crate) fn path_text(&self) -> String {
+    pub fn path_text(&self) -> String {
         self.path().to_string_lossy().into_owned()
     }
 
-    pub(crate) fn join(&self, relative_path: impl AsRef<Path>) -> PathBuf {
+    pub fn join(&self, relative_path: impl AsRef<Path>) -> PathBuf {
         self.path().join(relative_path)
     }
 
-    pub(crate) fn dir(&self, relative_path: impl AsRef<Path>) -> PathBuf {
+    pub fn dir(&self, relative_path: impl AsRef<Path>) -> PathBuf {
         let path = self.join(relative_path);
         fs::create_dir_all(&path).expect("fixture directory should be creatable");
         path
     }
 
-    pub(crate) fn file(
-        &self,
-        relative_path: impl AsRef<Path>,
-        contents: impl AsRef<[u8]>,
-    ) -> PathBuf {
+    pub fn file(&self, relative_path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> PathBuf {
         let path = self.join(relative_path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("fixture parent directory should be creatable");
@@ -56,7 +111,7 @@ impl TestDir {
         path
     }
 
-    pub(crate) fn image(
+    pub fn image(
         &self,
         relative_path: impl AsRef<Path>,
         format: ImageFormat,
@@ -76,7 +131,7 @@ impl TestDir {
         path
     }
 
-    pub(crate) fn gif(&self, relative_path: impl AsRef<Path>, width: u32, height: u32) -> PathBuf {
+    pub fn gif(&self, relative_path: impl AsRef<Path>, width: u32, height: u32) -> PathBuf {
         let path = self.join(relative_path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("fixture parent directory should be creatable");
@@ -225,19 +280,19 @@ pub struct GmaFixtureBuilder {
 }
 
 impl GmaFixtureBuilder {
-    pub(crate) fn new(title: impl Into<String>) -> Self {
+    pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
             entries: Vec::new(),
         }
     }
 
-    pub(crate) fn entry(mut self, path: impl Into<String>, contents: impl Into<Vec<u8>>) -> Self {
+    pub fn entry(mut self, path: impl Into<String>, contents: impl Into<Vec<u8>>) -> Self {
         self.entries.push((path.into(), contents.into()));
         self
     }
 
-    pub(crate) fn build(self) -> FixtureGmaFile {
+    pub fn build(self) -> FixtureGmaFile {
         let mut entries = Vec::with_capacity(self.entries.len());
         let mut data = Vec::with_capacity(self.entries.len());
         for (path, contents) in self.entries {

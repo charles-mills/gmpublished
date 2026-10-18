@@ -1,6 +1,6 @@
 use super::{
-    ModelCompileError, ModelCompileRequest, Path, PathBuf, SourceCopier, canonical,
-    decode_source_uri, fs, invalid, io_error, model_compile, quote_path, stage_asset, text_tokens,
+    ModelCompileError, ModelCompileRequest, Path, PathBuf, SourceCopier, canonical, fs, invalid,
+    io_error, model_compile, quote_path, stage_asset, text_tokens,
 };
 use std::collections::BTreeSet;
 
@@ -338,49 +338,12 @@ fn gltf_dependencies(source: &Path) -> Result<Vec<PathBuf>, ModelCompileError> {
         return Ok(Vec::new());
     }
     let bytes = fs::read(source).map_err(|error| io_error(source, error))?;
-    let json = if extension.eq_ignore_ascii_case("glb") {
-        let size = bytes
-            .get(12..16)
-            .map(|size| u32::from_le_bytes(size.try_into().unwrap()) as usize)
-            .ok_or_else(|| invalid("invalid GLB JSON header"))?;
-        bytes
-            .get(
-                20..20_usize
-                    .checked_add(size)
-                    .ok_or_else(|| invalid("GLB JSON size overflows"))?,
-            )
-            .ok_or_else(|| invalid("GLB JSON exceeds its file"))?
-    } else {
-        &bytes
-    };
-    let json: serde_json::Value =
-        serde_json::from_slice(json).map_err(|error| invalid(&error.to_string()))?;
+    let filesystem_root = source.ancestors().last().unwrap();
     let mut files = Vec::new();
-    for key in ["buffers", "images"] {
-        if let Some(entries) = json[key].as_array() {
-            for entry in entries {
-                if let Some(uri) = entry["uri"]
-                    .as_str()
-                    .filter(|uri| !uri.starts_with("data:"))
-                {
-                    let filesystem_root = source.ancestors().last().unwrap();
-                    let mut writes = Vec::new();
-                    let finder =
-                        SourceCopier::new(filesystem_root, filesystem_root, "", &mut writes);
-                    let relative = source
-                        .parent()
-                        .unwrap()
-                        .strip_prefix(filesystem_root)
-                        .unwrap()
-                        .join(decode_source_uri(uri)?);
-                    let path = finder.find(&relative)?.ok_or_else(|| {
-                        invalid(&format!("source dependency was not found: {uri}"))
-                    })?;
-                    files.push(canonical(&path)?);
-                }
-            }
-        }
-    }
+    super::visit_gltf_dependencies(source, &bytes, filesystem_root, |_, path| {
+        files.push(canonical(path)?);
+        Ok(())
+    })?;
     Ok(files)
 }
 

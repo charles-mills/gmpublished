@@ -3,7 +3,7 @@ use super::{
     BackendEventStreamFactory, BackendRuntimeEvent, BackendRuntimeEventEffects, BackendServices,
     BackendTaskCancelResult, BackendTaskSource, BackendTransactionTasks, LibraryRefresh,
     LibraryRefreshReason, LibrarySnapshot, NativeOpenTarget, RunBlockingError, ScheduleError,
-    Settings, TaskEvent, TaskEventStreamFactory, TaskHandle, TaskId, TaskKind, Tasks,
+    Settings, TaskEvent, TaskEventStreamFactory, TaskHandle, TaskId, TaskIdentity, TaskKind, Tasks,
     TransactionStatus, UiError, install_backend_event_sink_by_default,
     show_native_open_error_dialog,
 };
@@ -183,6 +183,17 @@ impl BackendContext {
         self.services.game_paths()
     }
 
+    pub(crate) fn begin_correlated_transaction(
+        &self,
+        task: TaskHandle,
+    ) -> gmpublished_backend::Transaction {
+        self.services.begin_transaction_with(|transaction| {
+            self.transaction_tasks
+                .correlate(transaction.id(), task, BackendTaskSource::Generic);
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn begin_transaction(&self) -> gmpublished_backend::Transaction {
         self.services.begin_transaction()
     }
@@ -317,6 +328,19 @@ impl BackendContext {
         self.tasks.create(kind, status)
     }
 
+    pub(crate) fn create_local_extraction_task(
+        &self,
+        path: PathBuf,
+        total_bytes: u64,
+    ) -> TaskHandle {
+        self.tasks.create_identified(
+            TaskKind::Extract,
+            TransactionStatus::Locating,
+            Some(TaskIdentity::LocalExtraction { path, total_bytes }),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn correlate_backend_transaction(
         &self,
         transaction_id: TransactionId,
@@ -339,22 +363,30 @@ impl BackendContext {
         match event {
             BackendRuntimeEvent::DownloadStarted {
                 transaction_id,
+                workshop_id,
                 request_id,
             } => {
-                let task = self.create_task(
+                let task = self.tasks.create_identified(
                     if request_id.is_some() {
                         TaskKind::WorkshopSnapshot
                     } else {
                         TaskKind::Download
                     },
                     TransactionStatus::Downloading,
+                    request_id
+                        .is_none()
+                        .then(|| {
+                            workshop_id.map(|item_id| TaskIdentity::Workshop {
+                                kind: super::WorkshopDownloadTaskKind::Download,
+                                item_id,
+                            })
+                        })
+                        .flatten(),
                 );
                 self.transaction_tasks.correlate(
                     *transaction_id,
                     task,
                     BackendTaskSource::WorkshopDownload {
-                        item_id: None,
-                        start_emitted: false,
                         request_id: *request_id,
                     },
                 );
@@ -367,25 +399,33 @@ impl BackendContext {
                 request_id,
                 ..
             } => {
-                let task = self.create_task(
+                let task = self.tasks.create_identified(
                     if request_id.is_some() {
                         TaskKind::WorkshopSnapshot
                     } else {
                         TaskKind::Extract
                     },
-                    TransactionStatus::Extracting,
+                    TransactionStatus::Locating,
+                    request_id
+                        .is_none()
+                        .then(|| {
+                            workshop_id.map(|item_id| TaskIdentity::Workshop {
+                                kind: super::WorkshopDownloadTaskKind::Extract,
+                                item_id,
+                            })
+                        })
+                        .flatten(),
                 );
-                let effects = self.transaction_tasks.correlate(
+                self.transaction_tasks.correlate(
                     *transaction_id,
                     task,
                     BackendTaskSource::WorkshopExtraction {
                         item_id: *workshop_id,
-                        start_emitted: false,
                         source_gma: source_path.clone(),
                         request_id: *request_id,
                     },
                 );
-                BackendRuntimeEventEffects::handled_with(effects)
+                BackendRuntimeEventEffects::handled()
             }
             BackendRuntimeEvent::Transaction(event) => self.transaction_tasks.apply(event),
             BackendRuntimeEvent::SteamConnected
@@ -403,6 +443,13 @@ impl BackendContext {
         error: impl Into<UiError>,
     ) -> bool {
         self.transaction_tasks.error(transaction_id, error.into())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_task_events_for_test(&self) -> mpsc::Receiver<TaskEvent> {
+        self.task_events
+            .take_receiver()
+            .expect("task events already subscribed")
     }
 
     pub(crate) fn task_events(&self) -> Subscription<TaskEvent> {

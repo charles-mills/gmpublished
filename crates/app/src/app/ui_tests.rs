@@ -1,5 +1,4 @@
 use super::*;
-use crate::generation::Generation;
 
 #[test]
 fn density_transition_updates_geometry_continuously_and_stops_after_settling() {
@@ -86,7 +85,13 @@ fn incoming_snapshots_preserve_active_and_queued_non_display_preferences() {
     let _task = app.apply_settings_snapshot_runtime(&original);
     assert_eq!(app.state.theme_preset, ThemePreset::Light);
     assert_eq!(app.state.i18n.locale_id(), "fr");
-    let generation = app.settings_save_in_flight.as_ref().unwrap().0;
+    let generation = app
+        .state
+        .features
+        .settings
+        .active_save_for_test()
+        .unwrap()
+        .0;
     let _task = app.update(RootMessage::Settings(settings::Message::SaveCompleted(
         generation,
         Ok(Box::new(original.clone())),
@@ -101,7 +106,7 @@ fn delayed_backend_completion_uses_current_published_settings_after_a_save() {
     let mut app = App::new_for_test();
     let original = open_settings(&mut app);
     let _task = app.apply_settings_message(settings::Message::ThemeSelected(ThemePreset::Light));
-    let (generation, mutation) = app.settings_save_in_flight.clone().unwrap();
+    let (generation, mutation) = app.state.features.settings.active_save_for_test().unwrap();
     app.environment
         .ctx
         .update_settings_snapshot_for_test(|settings| {
@@ -113,8 +118,8 @@ fn delayed_backend_completion_uses_current_published_settings_after_a_save() {
         generation,
         Ok(latest),
     )));
-    assert!(app.settings_save_in_flight.is_none());
-    assert!(app.settings_save_queue.is_empty());
+    assert!(app.state.features.settings.active_save_for_test().is_none());
+    assert!(app.state.features.settings.queued_saves_for_test() == 0);
     let _task = app.update(RootMessage::AppDataSnapshotApplied(Ok(Box::new(original))));
     assert_eq!(app.state.theme_preset, ThemePreset::Light);
     assert_eq!(app.state.tokens.variant, theme::ThemeVariant::Light);
@@ -132,11 +137,8 @@ fn live_display_preferences_survive_incoming_snapshots_until_saved() {
     let _task = app.apply_settings_snapshot_runtime(&original);
     assert_eq!(app.state.text_size_percent, 150);
     assert!(
-        app.state
-            .features
-            .settings
-            .display_preferences_override()
-            .is_some()
+        app.state.features.settings.active_save_for_test().is_some()
+            || app.state.features.settings.queued_saves_for_test() > 0
     );
 }
 
@@ -148,7 +150,13 @@ fn matching_an_older_save_does_not_acknowledge_a_newer_display_edit() {
         let _task = app.apply_settings_message(settings::Message::TextSizeChanged(percent));
         let _task = app.apply_settings_message(settings::Message::TextSizeCommitted);
     }
-    let first = app.settings_save_in_flight.as_ref().unwrap().0;
+    let first = app
+        .state
+        .features
+        .settings
+        .active_save_for_test()
+        .unwrap()
+        .0;
     let mut old = original.clone();
     old.settings.ui.text_size_percent = 125;
     let _task = app.update(RootMessage::Settings(settings::Message::SaveCompleted(
@@ -156,11 +164,8 @@ fn matching_an_older_save_does_not_acknowledge_a_newer_display_edit() {
         Ok(Box::new(old)),
     )));
     assert!(
-        app.state
-            .features
-            .settings
-            .display_preferences_override()
-            .is_some()
+        app.state.features.settings.active_save_for_test().is_some()
+            || app.state.features.settings.queued_saves_for_test() > 0
     );
     let mut intermediate = original;
     intermediate.settings.ui.text_size_percent = 150;
@@ -175,17 +180,28 @@ fn matching_an_older_save_does_not_acknowledge_a_newer_display_edit() {
 #[test]
 fn settings_saves_are_serialized_in_the_order_they_were_requested() {
     let mut app = App::new_for_test();
-    let first = Generation::from_raw(12);
-    let second = Generation::from_raw(13);
-    let _task = app.enqueue_settings_save(first, settings::SettingsMutation::TextSize(125));
-    let _task = app.enqueue_settings_save(second, settings::SettingsMutation::TextSize(150));
+    let _ = open_settings(&mut app);
+    let _ = app.apply_settings_message(settings::Message::TextSizeChanged(125));
+    let _ = app.apply_settings_message(settings::Message::TextSizeCommitted);
+    let first = app
+        .state
+        .features
+        .settings
+        .active_save_for_test()
+        .unwrap()
+        .0;
+    let _ = app.apply_settings_message(settings::Message::TextSizeChanged(150));
+    let _ = app.apply_settings_message(settings::Message::TextSizeCommitted);
+    let second = app.state.features.settings.save_generation_for_test();
     assert_eq!(
-        app.settings_save_in_flight
-            .as_ref()
-            .map(|(generation, _)| *generation),
+        app.state
+            .features
+            .settings
+            .active_save_for_test()
+            .map(|(generation, _)| generation),
         Some(first)
     );
-    assert_eq!(app.settings_save_queue.len(), 1);
+    assert_eq!(app.state.features.settings.queued_saves_for_test(), 1);
     let _task = app.update(RootMessage::Settings(settings::Message::SaveCompleted(
         first,
         Err(UiError::detailed(
@@ -194,12 +210,83 @@ fn settings_saves_are_serialized_in_the_order_they_were_requested() {
         )),
     )));
     assert_eq!(
-        app.settings_save_in_flight
-            .as_ref()
-            .map(|(generation, _)| *generation),
+        app.state
+            .features
+            .settings
+            .active_save_for_test()
+            .map(|(generation, _)| generation),
         Some(second)
     );
-    assert!(app.settings_save_queue.is_empty());
+    assert!(app.state.features.settings.queued_saves_for_test() == 0);
+}
+
+#[test]
+fn a_successful_path_save_updates_runtime_even_if_the_following_scalar_save_fails() {
+    let mut app = App::new_for_test();
+    let mut durable = open_settings(&mut app);
+    let game = tempfile::tempdir().expect("game directory");
+    std::fs::create_dir_all(game.path().join("GarrysMod/addons")).unwrap();
+    let _ = app.apply_settings_message(settings::Message::PathEdited(
+        settings::PathSetting::Gmod,
+        game.path().to_string_lossy().into_owned(),
+    ));
+    let validation = app
+        .state
+        .features
+        .settings
+        .path_validation_request(settings::PathSetting::Gmod);
+    let _ = app.apply_settings_message(settings::Message::PathValidationCompleted(
+        settings::validate_path_request(validation),
+    ));
+    let path_generation = app
+        .state
+        .features
+        .settings
+        .active_save_for_test()
+        .expect("path save")
+        .0;
+    let _ = app.apply_settings_message(settings::Message::TextSizeChanged(150));
+    let _ = app.apply_settings_message(settings::Message::TextSizeCommitted);
+    let scalar_generation = app.state.features.settings.save_generation_for_test();
+    durable.settings.backend.gmod = Some(game.path().to_path_buf());
+    durable.paths = AppPaths::resolve_with_defaults(&durable.settings, durable.paths);
+    let _ = app.update(RootMessage::Settings(settings::Message::SaveCompleted(
+        path_generation,
+        Ok(Box::new(durable)),
+    )));
+    assert_eq!(
+        app.state.features.installed_addons.watch_gmod_dir(),
+        Some(game.path())
+    );
+    assert_eq!(
+        app.state
+            .features
+            .destination_select
+            .paths()
+            .gmod_dir
+            .as_deref(),
+        Some(game.path())
+    );
+    assert_eq!(app.state.text_size_percent, 150);
+    let _ = app.update(RootMessage::Settings(settings::Message::SaveCompleted(
+        scalar_generation,
+        Err(UiError::new(gmpublished_backend::error_keys::IO_ERROR)),
+    )));
+    assert_eq!(
+        app.state.features.installed_addons.watch_gmod_dir(),
+        Some(game.path())
+    );
+    assert_eq!(
+        app.state
+            .features
+            .destination_select
+            .settings()
+            .backend
+            .gmod
+            .as_deref(),
+        Some(game.path())
+    );
+    assert_eq!(app.state.text_size_percent, 150);
 }
 
 #[test]
@@ -258,11 +345,13 @@ fn capture_app_shell_display_fixtures() {
         );
         for index in 1..=8 {
             let _task = app.apply_downloader_message(
-                downloader::Message::EventReceived(downloader::DownloaderEvent::TaskStarted {
-                    kind: WorkshopDownloadTaskKind::Download,
-                    item_id: PublishedFileId::fixture(index),
-                    task_id: TaskId::from_raw(index),
-                }),
+                downloader::Message::TaskEventsReceived(vec![
+                    crate::test_support::workshop_task_started(
+                        WorkshopDownloadTaskKind::Download,
+                        PublishedFileId::fixture(index),
+                        TaskId::from_raw(index),
+                    ),
+                ]),
                 app.update_context,
             );
         }

@@ -1,8 +1,6 @@
 use super::{
     Arc, ContentPath, HashMap, MaterialResolutionOutcome, MaterialResolver, Mutex, OnceLock,
-    definition::MaterialSourceFailure,
-    material_paths,
-    texture_asset::{TextureAsset, TextureSourceError},
+    definition::MaterialSourceFailure, material_paths, texture_asset::TextureSourceError,
 };
 use vformats::{
     Limits,
@@ -17,7 +15,6 @@ pub enum SpriteSheetSourceFailure {
     Missing,
     Invalid,
     Read,
-    EncodedBudget,
     WorkingBudget,
     SourceUnavailable,
     Preparation,
@@ -164,7 +161,6 @@ pub(super) struct SpriteSheetCache {
     allocation_id: SpriteSheetAllocationId,
     reloadable_parsed: crate::preparation::FlightCell<Option<Arc<ReloadableSheet>>>,
     cost: OnceLock<Result<Option<SpriteSheetCost>, SpriteSheetError>>,
-    parsed: crate::preparation::FlightCell<Result<Option<Arc<SpriteSheet>>, SpriteSheetError>>,
     #[cfg(test)]
     parses: std::sync::atomic::AtomicUsize,
 }
@@ -175,7 +171,6 @@ impl Default for SpriteSheetCache {
             allocation_id: SpriteSheetAllocationId(super::texture_source::source_token()),
             reloadable_parsed: Default::default(),
             cost: OnceLock::new(),
-            parsed: Default::default(),
             #[cfg(test)]
             parses: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -186,7 +181,7 @@ impl std::fmt::Debug for SpriteSheetCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpriteSheetCache")
             .field("cost", &self.cost.get())
-            .field("parsed", &self.parsed.get().is_some())
+            .field("parsed", &self.reloadable_parsed.get().is_some())
             .finish()
     }
 }
@@ -243,6 +238,9 @@ impl SpriteSheetCache {
                     .ok_or(SpriteSheetError::InvalidResource)?;
                 let descriptor =
                     vformats::vtf::SpriteSheetDescriptor::from_payload(&payload.bytes)?;
+                #[cfg(test)]
+                self.parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let sheet = Arc::new(descriptor.decode(SpriteSheetLimits {
                     max_sequences: 1024,
                     max_frames_per_sequence: 4096,
@@ -263,52 +261,6 @@ impl SpriteSheetCache {
                 .admit(self.allocation_id, *cost)?;
         }
         Ok(parsed.as_ref().map(|parsed| Arc::clone(&parsed.sheet)))
-    }
-
-    fn cost(&self, asset: &TextureAsset) -> Result<Option<SpriteSheetCost>, SpriteSheetError> {
-        *self.cost.get_or_init(|| {
-            let bytes = asset.source_bytes();
-            let vtf = vformats::vtf::parse(bytes.as_slice(), &Limits::default())
-                .map_err(|_| SpriteSheetError::InvalidResource)?;
-            vtf.sprite_sheet_descriptor()
-                .map(|descriptor| descriptor.map(|descriptor| descriptor.cost()))
-        })
-    }
-
-    fn parse(
-        &self,
-        asset: &TextureAsset,
-        working: Option<super::texture_working::TextureWorkingRequest>,
-        cancellation: &crate::preparation::PreparationCancellation,
-    ) -> Result<Option<Arc<SpriteSheet>>, SpriteSheetResolveError> {
-        self.parsed
-            .get_or_try_init(cancellation, || {
-                let _working = working
-                    .map(|request| request.acquire_cancellable(cancellation))
-                    .transpose()?;
-                Ok((|| {
-                    #[cfg(test)]
-                    self.parses
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let bytes = asset.source_bytes();
-                    let vtf = vformats::vtf::parse(bytes.as_slice(), &Limits::default())
-                        .map_err(|_| SpriteSheetError::InvalidResource)?;
-                    vtf.sprite_sheet_descriptor()?
-                        .map(|descriptor| {
-                            let cost = descriptor.cost();
-                            descriptor
-                                .decode(SpriteSheetLimits {
-                                    max_sequences: 1024,
-                                    max_frames_per_sequence: 4096,
-                                    max_frames: cost.frames,
-                                    max_metadata_bytes: cost.metadata_bytes,
-                                })
-                                .map(Arc::new)
-                        })
-                        .transpose()
-                })())
-            })?
-            .map_err(SpriteSheetResolveError::Invalid)
     }
 }
 
@@ -350,41 +302,12 @@ impl MaterialResolver {
             name: name.to_owned(),
             outcome: MaterialResolutionOutcome::Unresolved,
         })?;
-        if self.config.texture_loading == super::TextureLoading::OnDemand {
-            let source = self.selected_reloadable_texture(&path).map_err(|error| {
-                SpriteSheetResolveError::Source {
-                    path: path.clone(),
-                    kind: match &error {
-                        TextureSourceError::Missing => SpriteSheetSourceFailure::Missing,
-                        TextureSourceError::Invalid { .. } => SpriteSheetSourceFailure::Invalid,
-                        TextureSourceError::EncodedBudget { .. } => {
-                            SpriteSheetSourceFailure::EncodedBudget
-                        }
-                        TextureSourceError::WorkingBudget { .. } => {
-                            SpriteSheetSourceFailure::WorkingBudget
-                        }
-                        TextureSourceError::Preparation { .. } => {
-                            SpriteSheetSourceFailure::Preparation
-                        }
-                        TextureSourceError::Read { .. } => SpriteSheetSourceFailure::Read,
-                        TextureSourceError::SourceUnavailable(_) => {
-                            SpriteSheetSourceFailure::SourceUnavailable
-                        }
-                    },
-                    message: error.to_string().into(),
-                }
-            })?;
-            return source.sprite_sheet_cache.parse_reloadable(&source, self);
-        }
-        let selected = self.selected_texture_asset(&path).map_err(|error| {
+        let source = self.selected_reloadable_texture(&path).map_err(|error| {
             SpriteSheetResolveError::Source {
-                path,
+                path: path.clone(),
                 kind: match &error {
                     TextureSourceError::Missing => SpriteSheetSourceFailure::Missing,
                     TextureSourceError::Invalid { .. } => SpriteSheetSourceFailure::Invalid,
-                    TextureSourceError::EncodedBudget { .. } => {
-                        SpriteSheetSourceFailure::EncodedBudget
-                    }
                     TextureSourceError::WorkingBudget { .. } => {
                         SpriteSheetSourceFailure::WorkingBudget
                     }
@@ -397,34 +320,14 @@ impl MaterialResolver {
                 message: error.to_string().into(),
             }
         })?;
-        let asset = &selected.asset;
-        let cache = asset.sprite_sheet_cache(&self.shared.texture_assets);
-        let Some(cost) = cache.cost(asset)? else {
-            return Ok(None);
-        };
-        let working = self
-            .config
-            .texture_working_budget
-            .as_ref()
-            .map(|budget| budget.request(cost.metadata_bytes))
-            .transpose()?;
-        let id = cache.allocation_id;
-        self.config.sprite_sheet_budget.admit(id, cost)?;
-        let result = cache.parse(asset, working, &self.config.cancellation);
-        if result.is_err() {
-            self.config.sprite_sheet_budget.release(id);
-        }
-        result
+        source.sprite_sheet_cache.parse_reloadable(&source, self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        bridge::materials::{EncodedTextureBudget, TextureWorkingBudget},
-        test_support::fixture_vtf_bytes,
-    };
+    use crate::{bridge::materials::TextureWorkingBudget, test_support::fixture_vtf_bytes};
     use std::sync::atomic::Ordering;
     use vformats::vtf::VtfFormat;
 
@@ -482,20 +385,11 @@ mod tests {
         )
     }
 
-    fn selected(
-        resolver: &MaterialResolver,
-        name: &str,
-    ) -> Arc<super::super::texture_asset::SelectedTextureAsset> {
-        resolver
-            .selected_texture_asset(&super::super::texture_path(name).unwrap())
-            .unwrap()
-    }
-
     #[test]
-    fn on_demand_sheets_reuse_only_metadata_and_readmit_stricter_budgets() {
-        let resolver = fixture_resolver(sheet_texture(&[2], 0.25), sheet_texture(&[1], 0.5))
-            .with_on_demand_textures()
-            .with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(8, 4096)));
+    fn sheets_share_source_metadata_and_recheck_stricter_budgets() {
+        let resolver = fixture_resolver(sheet_texture(&[2], 0.25), sheet_texture(&[1], 0.75));
+        let budget = Arc::new(SpriteSheetBudget::new(2, 4096));
+        let resolver = resolver.with_sprite_sheet_budget(Arc::clone(&budget));
         let first = resolver
             .resolve_particle_sprite_sheet("test/a")
             .unwrap()
@@ -505,17 +399,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(Arc::ptr_eq(&first, &alias));
-        assert_eq!(
-            resolver.config.sprite_sheet_budget.stats().admitted_frames,
-            2
-        );
-        let strict = resolver.with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(1, 4096)));
+        assert_eq!(budget.stats().admitted_frames, 2);
         assert!(matches!(
-            strict.resolve_particle_sprite_sheet("test/a"),
+            resolver.resolve_particle_sprite_sheet("test/b"),
             Err(SpriteSheetResolveError::Budget {
                 metric: SpriteSheetMetric::Frames,
                 ..
             })
+        ));
+        let strict = resolver.with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(1, 4096)));
+        assert!(matches!(
+            strict.resolve_particle_sprite_sheet("test/a"),
+            Err(SpriteSheetResolveError::Budget { .. })
         ));
         assert!(Arc::ptr_eq(
             &first,
@@ -524,232 +419,55 @@ mod tests {
                 .unwrap()
                 .unwrap()
         ));
-        assert!(resolver.shared.texture_assets.selected_paths().is_empty());
-    }
-
-    #[test]
-    fn effective_patch_and_profile_select_the_same_primary_as_rendering() {
-        let extra = MaterialResolver::prop_lighting_fixture(vec![
-            ("materials/test/base.vmt", br#"UnlitGeneric { "$basetexture" "test/a" }"#.to_vec()),
-            ("materials/test/patch.vmt", br#"Patch { "include" "materials/test/base.vmt" "replace" { "$basetexture" "test/b" } }"#.to_vec()),
-            ("materials/test/profile.vmt", br#"UnlitGeneric { "$basetexture" "test/a" "hdr" { "$basetexture" "test/b" } }"#.to_vec()),
-            ("materials/test/a.vtf", sheet_texture(&[1], 0.25)),
-            ("materials/test/b.vtf", sheet_texture(&[2], 0.75)),
-        ], Vec::new());
-        let resolver = extra;
-        let patch = resolver
-            .resolve_particle_sprite_sheet("test/patch")
-            .unwrap()
-            .unwrap();
-        assert_eq!(patch.sequences[0].frames.len(), 2);
-        assert_eq!(patch.sequences[0].frames[0].uv[0], 0.75);
-        let ldr = resolver
-            .resolve_particle_sprite_sheet("test/profile")
-            .unwrap()
-            .unwrap();
-        assert_eq!(ldr.sequences[0].frames[0].uv[0], 0.25);
-        let hdr = resolver.variant(super::super::ResolverConfig {
-            hardware_profile: super::super::profile::HardwareProfile::HDR,
-            ..resolver.config.clone()
-        });
-        let hdr = hdr
-            .resolve_particle_sprite_sheet("test/profile")
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&patch, &hdr));
-    }
-
-    #[test]
-    fn shared_asset_single_flight_charges_once_and_warm_strict_profiles_reject() {
-        let resolver = fixture_resolver(sheet_texture(&[2], 0.25), sheet_texture(&[2], 0.75));
-        let asset = selected(&resolver, "test/a");
-        let cost = asset
-            .asset
-            .sprite_sheet_cache(&resolver.shared.texture_assets)
-            .cost(&asset.asset)
-            .unwrap()
-            .unwrap();
-        let budget = Arc::new(SpriteSheetBudget::new(3, cost.metadata_bytes * 2));
-        let resolver = resolver.with_sprite_sheet_budget(Arc::clone(&budget));
-        let first = resolver
-            .resolve_particle_sprite_sheet("test/a")
-            .unwrap()
-            .unwrap();
-        std::thread::scope(|scope| {
-            let mut tasks = Vec::new();
-            for _ in 0..8 {
-                tasks.push(scope.spawn(|| {
-                    resolver
-                        .resolve_particle_sprite_sheet("test/alias")
-                        .unwrap()
-                        .unwrap()
-                }));
-            }
-            for task in tasks {
-                assert!(Arc::ptr_eq(&first, &task.join().unwrap()));
-            }
-        });
-        assert_eq!(budget.stats().admitted_frames, 2);
-        assert_eq!(budget.stats().admitted_metadata_bytes, cost.metadata_bytes);
-        assert!(matches!(
-            resolver.resolve_particle_sprite_sheet("test/b"),
-            Err(SpriteSheetResolveError::Budget {
-                metric: SpriteSheetMetric::Frames,
-                ..
-            })
-        ));
-        assert_eq!(budget.stats().rejected_sheets, 1);
-        let asset = selected(&resolver, "test/a");
-        assert_eq!(
-            asset
-                .asset
-                .sprite_sheet_cache(&resolver.shared.texture_assets)
-                .parses
-                .load(Ordering::Relaxed),
-            1
-        );
-        let strict =
-            resolver.with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(1, usize::MAX)));
-        assert!(matches!(
-            strict.resolve_particle_sprite_sheet("test/a"),
-            Err(SpriteSheetResolveError::Budget { .. })
-        ));
-        let strict = resolver
-            .with_sprite_sheet_budget(Arc::new(SpriteSheetBudget::new(2, cost.metadata_bytes - 1)));
-        assert!(matches!(
-            strict.resolve_particle_sprite_sheet("test/a"),
-            Err(SpriteSheetResolveError::Budget {
-                metric: SpriteSheetMetric::MetadataBytes,
-                ..
-            })
-        ));
-        let strict = resolver.with_texture_working_budget(Arc::new(TextureWorkingBudget::new(
-            cost.metadata_bytes - 1,
-        )));
-        assert!(matches!(
-            strict.resolve_particle_sprite_sheet("test/a"),
-            Err(SpriteSheetResolveError::Working(_))
-        ));
-        let strict =
-            resolver.with_texture_source_working_budget(Arc::new(TextureWorkingBudget::new(0)));
-        assert!(matches!(
-            strict.resolve_particle_sprite_sheet("test/a"),
-            Err(SpriteSheetResolveError::Source {
-                kind: SpriteSheetSourceFailure::WorkingBudget,
-                ..
-            })
-        ));
-        assert_eq!(
-            asset
-                .asset
-                .sprite_sheet_cache(&resolver.shared.texture_assets)
-                .parses
-                .load(Ordering::Relaxed),
-            1
-        );
-    }
-
-    #[test]
-    fn rendering_and_sheet_metadata_reuse_the_same_admitted_source_snapshot() {
-        let bytes = sheet_texture(&[2], 0.25);
-        let length = bytes.len();
-        let resolver = fixture_resolver(bytes, sheet_texture(&[1], 0.75));
-        let encoded = Arc::new(EncodedTextureBudget::new(length));
-        let source_working = Arc::new(TextureWorkingBudget::new(length));
-        let resolver = resolver
-            .with_encoded_texture_budget(Arc::clone(&encoded))
-            .with_texture_source_working_budget(Arc::clone(&source_working));
-        let material = resolver
+        let texture = resolver
             .resolve_primary(&[], "test/a")
             .into_material()
-            .unwrap();
-        assert_eq!(
-            material.texture.as_ref().unwrap().mapping_dimensions(),
-            Some((1, 1))
-        );
-        let source = selected(&resolver, "test/a");
-        let first = resolver
-            .resolve_particle_sprite_sheet("test/a")
             .unwrap()
+            .texture
             .unwrap();
-        let second = resolver
-            .resolve_particle_sprite_sheet("test/alias")
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
-        assert!(Arc::ptr_eq(&source, &selected(&resolver, "test/a")));
-        assert_eq!(encoded.encoded_bytes(), length as u64);
-        assert_eq!(encoded.admitted_textures(), 1);
-        assert_eq!(source_working.peak_bytes(), length);
-        assert_eq!(source_working.current_bytes(), 0);
+        assert!(texture.resident().is_none());
+        let source = texture.on_demand().unwrap().0;
+        assert!(Arc::ptr_eq(
+            source,
+            &resolver
+                .selected_reloadable_texture(&super::super::texture_path("test/a").unwrap())
+                .unwrap()
+        ));
     }
 
     #[test]
-    fn identical_content_under_distinct_paths_shares_the_charged_parsed_allocation() {
-        let bytes = sheet_texture(&[2], 0.25);
-        let resolver = fixture_resolver(bytes.clone(), bytes);
-        let first_asset = selected(&resolver, "test/a");
-        let second_asset = selected(&resolver, "test/b");
-        assert!(!Arc::ptr_eq(&first_asset, &second_asset));
-        let first_cache = first_asset
-            .asset
-            .sprite_sheet_cache(&resolver.shared.texture_assets);
-        let second_cache = second_asset
-            .asset
-            .sprite_sheet_cache(&resolver.shared.texture_assets);
-        assert!(std::ptr::eq(first_cache, second_cache));
-        let cost = first_cache.cost(&first_asset.asset).unwrap().unwrap();
-        let budget = Arc::new(SpriteSheetBudget::new(2, cost.metadata_bytes));
+    fn concurrent_aliases_parse_and_charge_one_sheet() {
+        let resolver = fixture_resolver(sheet_texture(&[2], 0.25), sheet_texture(&[1], 0.75));
+        let budget = Arc::new(SpriteSheetBudget::new(2, 4096));
         let resolver = resolver.with_sprite_sheet_budget(Arc::clone(&budget));
-        let first = resolver
-            .resolve_particle_sprite_sheet("test/a")
-            .unwrap()
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        resolver
+                            .resolve_particle_sprite_sheet("test/alias")
+                            .unwrap()
+                            .unwrap()
+                    })
+                })
+                .collect();
+            let first = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            assert!(first.iter().all(|sheet| Arc::ptr_eq(&first[0], sheet)));
+        });
+        let source = resolver
+            .selected_reloadable_texture(&super::super::texture_path("test/a").unwrap())
             .unwrap();
-        let second = resolver
-            .resolve_particle_sprite_sheet("test/b")
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(source.sprite_sheet_cache.parses.load(Ordering::Relaxed), 1);
         assert_eq!(budget.stats().admitted_frames, 2);
-        assert_eq!(budget.stats().admitted_metadata_bytes, cost.metadata_bytes);
-        assert_eq!(first_cache.parses.load(Ordering::Relaxed), 1);
-        assert!(format!("{first_cache:?}").len() < 256);
     }
 
     #[test]
-    fn a_budget_shared_across_independent_source_caches_charges_both_physical_sheets() {
-        let bytes = sheet_texture(&[2], 0.25);
-        let first = fixture_resolver(bytes.clone(), bytes.clone());
-        let second = fixture_resolver(bytes.clone(), bytes);
-        let cost = selected(&first, "test/a")
-            .asset
-            .sprite_sheet_cache(&first.shared.texture_assets)
-            .cost(&selected(&first, "test/a").asset)
-            .unwrap()
-            .unwrap();
-        let budget = Arc::new(SpriteSheetBudget::new(4, cost.metadata_bytes * 2));
-        let first = first.with_sprite_sheet_budget(Arc::clone(&budget));
-        let second = second.with_sprite_sheet_budget(Arc::clone(&budget));
-        let first = first
-            .resolve_particle_sprite_sheet("test/a")
-            .unwrap()
-            .unwrap();
-        let second = second
-            .resolve_particle_sprite_sheet("test/a")
-            .unwrap()
-            .unwrap();
-        assert!(!Arc::ptr_eq(&first, &second));
-        assert_eq!(budget.stats().admitted_frames, 4);
-        assert_eq!(
-            budget.stats().admitted_metadata_bytes,
-            cost.metadata_bytes * 2
-        );
-    }
-
-    #[test]
-    fn aggregate_count_rejection_does_not_parse_or_poison_asset() {
+    fn rejected_sheet_does_not_poison_a_larger_budget() {
         let resolver = fixture_resolver(sheet_texture(&[2, 2], 0.25), sheet_texture(&[1], 0.75));
-        let budget = Arc::new(SpriteSheetBudget::new(3, usize::MAX));
+        let budget = Arc::new(SpriteSheetBudget::new(3, 4096));
         let limited = resolver.with_sprite_sheet_budget(Arc::clone(&budget));
         assert!(matches!(
             limited.resolve_particle_sprite_sheet("test/a"),
@@ -759,15 +477,6 @@ mod tests {
                 ..
             })
         ));
-        let asset = selected(&resolver, "test/a");
-        assert_eq!(
-            asset
-                .asset
-                .sprite_sheet_cache(&resolver.shared.texture_assets)
-                .parses
-                .load(Ordering::Relaxed),
-            0
-        );
         assert_eq!(budget.stats().admitted_frames, 0);
         assert!(
             limited
@@ -775,25 +484,16 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(budget.stats().admitted_frames, 1);
         assert!(
             resolver
                 .resolve_particle_sprite_sheet("test/a")
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(
-            asset
-                .asset
-                .sprite_sheet_cache(&resolver.shared.texture_assets)
-                .parses
-                .load(Ordering::Relaxed),
-            1
-        );
     }
 
     #[test]
-    fn first_invalid_source_and_zero_encoded_budget_never_read_lower_sources() {
+    fn invalid_high_priority_source_does_not_fall_through() {
         let resolver = MaterialResolver::prop_lighting_fixture(
             vec![
                 (
@@ -817,52 +517,18 @@ mod tests {
             resolver.config.sprite_sheet_budget.stats().admitted_frames,
             0
         );
-        let resolver = fixture_resolver(sheet_texture(&[1], 0.25), sheet_texture(&[1], 0.75));
-        let budget = Arc::new(EncodedTextureBudget::new(0));
-        let rejected = resolver.with_encoded_texture_budget(Arc::clone(&budget));
-        assert!(matches!(
-            rejected.resolve_particle_sprite_sheet("test/a"),
-            Err(SpriteSheetResolveError::Source {
-                kind: SpriteSheetSourceFailure::EncodedBudget,
-                ..
-            })
-        ));
-        assert_eq!(budget.encoded_bytes(), 0);
-        assert_eq!(
-            resolver.config.sprite_sheet_budget.stats().admitted_frames,
-            0
-        );
-        assert!(
-            resolver
-                .resolve_particle_sprite_sheet("test/a")
-                .unwrap()
-                .is_some()
-        );
-        assert!(matches!(
-            rejected.resolve_particle_sprite_sheet("test/a"),
-            Err(SpriteSheetResolveError::Source {
-                kind: SpriteSheetSourceFailure::EncodedBudget,
-                ..
-            })
-        ));
     }
 
     #[test]
-    fn invalid_resource_keeps_admission_available_for_later_valid_sheet() {
+    fn invalid_resource_releases_sheet_admission_for_the_next_source() {
         let mut broken = sheet_texture(&[2], 0.25);
         broken.pop();
         let resolver = fixture_resolver(broken, sheet_texture(&[2], 0.75));
-        let budget = Arc::new(SpriteSheetBudget::new(2, usize::MAX));
+        let budget = Arc::new(SpriteSheetBudget::new(2, 4096));
         let resolver = resolver.with_sprite_sheet_budget(Arc::clone(&budget));
         for _ in 0..2 {
-            assert!(matches!(
-                resolver.resolve_particle_sprite_sheet("test/a"),
-                Err(SpriteSheetResolveError::Invalid(
-                    SpriteSheetError::InvalidResource
-                ))
-            ));
+            assert!(resolver.resolve_particle_sprite_sheet("test/a").is_err());
             assert_eq!(budget.stats().admitted_frames, 0);
-            assert_eq!(budget.stats().admitted_metadata_bytes, 0);
         }
         assert!(
             resolver
@@ -871,13 +537,30 @@ mod tests {
                 .is_some()
         );
         assert_eq!(budget.stats().admitted_frames, 2);
-        assert_eq!(
-            selected(&resolver, "test/a")
-                .asset
-                .sprite_sheet_cache(&resolver.shared.texture_assets)
-                .parsed
-                .get(),
-            None
-        );
+    }
+
+    #[test]
+    fn patch_selection_and_working_rejection_preserve_the_source() {
+        let resolver = MaterialResolver::prop_lighting_fixture(vec![
+            ("materials/test/base.vmt", br#"UnlitGeneric { "$basetexture" "test/a" }"#.to_vec()),
+            ("materials/test/patch.vmt", br#"Patch { "include" "materials/test/base.vmt" "replace" { "$basetexture" "test/b" } }"#.to_vec()),
+            ("materials/test/a.vtf", sheet_texture(&[1], 0.25)),
+            ("materials/test/b.vtf", sheet_texture(&[2], 0.75)),
+        ], Vec::new());
+        let strict =
+            resolver.with_texture_source_working_budget(Arc::new(TextureWorkingBudget::new(0)));
+        assert!(matches!(
+            strict.resolve_particle_sprite_sheet("test/patch"),
+            Err(SpriteSheetResolveError::Source {
+                kind: SpriteSheetSourceFailure::WorkingBudget,
+                ..
+            })
+        ));
+        let sheet = resolver
+            .resolve_particle_sprite_sheet("test/patch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sheet.sequences[0].frames.len(), 2);
+        assert_eq!(sheet.sequences[0].frames[0].uv[0], 0.75);
     }
 }

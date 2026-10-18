@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -17,7 +17,7 @@ use crate::bridge::{
     AppPaths, DownloadCountFormat, Settings, SystemColorScheme, ThemePreset, UiDensity,
     domain::{
         PublishedFileId, SearchFullRequest, SearchMode, SearchQuickRequest, WORKSHOP_LEGAL_URL,
-        WorkshopDownloadResult, WorkshopDownloadSuccess, workshop_url,
+        WorkshopDownloadSuccess, workshop_url,
     },
     effective_theme_preset, gma,
     library::{LibraryRefresh, LibraryRefreshReason, LibrarySnapshot},
@@ -113,10 +113,6 @@ pub struct App {
     /// Only sanitize one snapshot at a time so an older job cannot overwrite newer settings.
     appdata_snapshot_in_flight: bool,
     pending_appdata_snapshot: Option<Box<gmpublished_backend::AppDataSnapshot>>,
-    settings_save_in_flight: Option<(crate::generation::Generation, settings::SettingsMutation)>,
-    settings_save_queue: VecDeque<(crate::generation::Generation, settings::SettingsMutation)>,
-    pending_settings_reset: Option<settings::ResetAction>,
-    settings_reset_in_flight: bool,
 }
 
 #[derive(Debug)]
@@ -189,7 +185,6 @@ pub struct FeatureStates {
     destination_select: destination_select::State,
     file_preview: file_preview::State,
     model_preview: file_preview::State,
-    model_preview_loading: Option<side_effects_file_preview::ModelPreviewLoad>,
     prepare_publish: prepare_publish::State,
     preview_gma: preview_gma::State,
     settings: settings::State,
@@ -231,6 +226,7 @@ impl Default for State {
             i18n: I18n::from_user_or_system(None),
         };
         state.apply_localized_labels();
+        state.apply_download_count_formatter();
         state.initialize_ui_metrics();
         state
     }
@@ -325,7 +321,7 @@ impl State {
             .map(Path::to_path_buf);
         let destination_label = destination_select::destination_label(&settings, &paths);
 
-        self.apply_runtime_settings(&settings);
+        self.apply_runtime_settings(&settings, Instant::now(), self.viewport_size != Size::ZERO);
         self.features
             .installed_addons
             .set_watch_gmod_dir(paths.gmod_dir.clone());
@@ -343,32 +339,41 @@ impl State {
         }
     }
 
-    fn apply_runtime_settings(&mut self, settings: &Settings) {
+    fn apply_runtime_settings(&mut self, settings: &Settings, now: Instant, animate: bool) {
+        let accents = settings::accent_inputs_from_settings(settings);
+        let density_changed =
+            self.density != settings.ui.density || self.reduce_motion != settings.ui.reduce_motion;
+        let tokens_changed = density_changed
+            || self.theme_preset != settings.ui.theme_preset
+            || self.accent_inputs != accents
+            || self.text_size_percent != settings.ui.text_size_percent;
         self.theme_preset = settings.ui.theme_preset;
-        self.accent_inputs = settings::accent_inputs_from_settings(settings);
+        self.accent_inputs = accents;
         self.reduce_motion = settings.ui.reduce_motion;
-        self.transition_density(
-            settings.ui.density,
-            Instant::now(),
-            self.viewport_size != Size::ZERO,
-        );
+        if density_changed || !animate {
+            self.transition_density(settings.ui.density, now, animate);
+        }
         self.text_size_percent = settings.ui.text_size_percent;
-        self.resolve_ui_tokens();
+        if tokens_changed || !animate {
+            self.resolve_ui_tokens();
+        }
         self.chrome_strategy = shell::ChromeStrategy::resolve(settings.backend.titlebar);
+        let format_changed = self.download_count_format != settings.ui.download_count_format;
         self.download_count_format = settings.ui.download_count_format;
-        self.apply_runtime_language(settings.backend.language.as_deref());
+        let language_changed = self.apply_runtime_language(settings.backend.language.as_deref());
         self.set_play_gifs_by_default(settings.ui.play_gifs_by_default);
-        self.apply_download_count_formatter();
+        if format_changed && !language_changed {
+            self.apply_download_count_formatter();
+        }
     }
 
-    fn apply_runtime_language(&mut self, language: Option<&str>) {
-        if let Some(language) = language {
-            self.i18n.select_locale(Some(language));
-        } else {
-            self.i18n = I18n::from_user_or_system(None);
+    fn apply_runtime_language(&mut self, language: Option<&str>) -> bool {
+        if !self.i18n.select_user_or_system_locale(language) {
+            return false;
         }
         self.apply_localized_labels();
         self.apply_download_count_formatter();
+        true
     }
 
     fn apply_localized_labels(&mut self) {
@@ -694,6 +699,14 @@ impl App {
         let thumbnails = thumbnail_demand::Manager::new(thumbnail_config);
         let mut state = State::default();
         let (settings, paths) = ctx.settings_and_paths_snapshot();
+        state
+            .features
+            .settings
+            .observe_snapshot(settings::SettingsSnapshot::new(
+                settings.clone(),
+                paths.clone(),
+                state.system_scheme,
+            ));
         let _result = state.apply_settings_snapshot(settings, paths);
         state.initialize_ui_metrics();
         ctx.set_workshop_language(gmpublished_backend::WorkshopLanguage::from_locale(
@@ -713,10 +726,6 @@ impl App {
             update_context: UpdateContext::capture(),
             appdata_snapshot_in_flight: false,
             pending_appdata_snapshot: None,
-            settings_save_in_flight: None,
-            settings_save_queue: VecDeque::new(),
-            pending_settings_reset: None,
-            settings_reset_in_flight: false,
         };
         #[cfg(target_os = "macos")]
         app.install_macos_menu();
@@ -842,19 +851,8 @@ impl App {
                 self.apply_description_editor_message(message, update)
             }
             RootMessage::Settings(message) => {
-                let completed = matches!(&message, settings::Message::SaveCompleted(generation, _)
-                    if self.settings_save_in_flight.as_ref().is_some_and(|(active, _)| active == generation));
-                let reset_completed = matches!(&message, settings::Message::ResetCompleted(_, _));
                 let task = self.apply_settings_message(message);
-                if reset_completed {
-                    self.settings_reset_in_flight = false;
-                    Task::batch([task, self.start_next_settings_save()])
-                } else if completed {
-                    self.settings_save_in_flight = None;
-                    Task::batch([task, self.start_next_settings_save()])
-                } else {
-                    task
-                }
+                Task::batch([task, self.start_next_settings_save()])
             }
             RootMessage::ContextMenu(message) => self.apply_context_menu_message(message, update),
             RootMessage::SteamSession(message) => self.apply_steam_session_message(message),
@@ -1557,10 +1555,9 @@ impl App {
             settings::Effect::PathValidationRequested(request) => {
                 self.settings_path_validation_task(request)
             }
-            settings::Effect::MutationApplied(generation, mutation) => {
-                let runtime_task = self.apply_settings_mutation_runtime(&mutation);
-                let save_task = self.enqueue_settings_save(generation, mutation);
-                Task::batch([runtime_task, save_task])
+            settings::Effect::SettingsChanged => {
+                let runtime_task = self.sync_settings_runtime(false);
+                Task::batch([runtime_task, self.start_next_settings_save()])
             }
             settings::Effect::FocusMoved(reverse) => {
                 use iced::advanced::widget::operation::{focusable, scope};
@@ -1571,16 +1568,8 @@ impl App {
                     iced::advanced::widget::operate(scope(id, focusable::focus_next()))
                 }
             }
-            settings::Effect::PreviewApplied(mutation) => {
-                self.apply_settings_mutation_runtime(&mutation)
-            }
-            settings::Effect::SnapshotApplied(snapshot) => {
-                self.apply_settings_snapshot_runtime(&snapshot)
-            }
-            settings::Effect::ResetRunRequested(action) => {
-                self.pending_settings_reset = Some(action);
-                self.start_next_settings_save()
-            }
+            settings::Effect::SnapshotApplied => self.sync_settings_runtime(true),
+            settings::Effect::PersistenceRequested => self.start_next_settings_save(),
         }
     }
 

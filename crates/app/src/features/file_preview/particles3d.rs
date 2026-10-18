@@ -1068,21 +1068,18 @@ mod texture_tests {
             .unwrap()
             .texture
             .unwrap();
+        assert!(accepted.on_demand().is_some());
+        let accepted = accepted.materialized_for_test();
         assert_eq!(particle_texture_levels(&accepted, 2).unwrap().len(), 2);
         assert!(particle_texture_levels(&accepted, 1).is_none());
         let rejected = resolver
-            .with_encoded_texture_budget(std::sync::Arc::new(
-                crate::bridge::materials::EncodedTextureBudget::new(0),
-            ))
+            .with_texture_resource_limit(15)
             .resolve_primary(&[], "particle/base")
             .into_material()
             .unwrap()
             .texture
             .unwrap();
-        assert_eq!(
-            rejected.load_outcome(),
-            TextureLoadOutcome::SourceBudgetRejected
-        );
+        assert_eq!(rejected.load_outcome(), TextureLoadOutcome::QualityRejected);
         assert!(particle_texture_levels(&rejected, 32).is_none());
     }
 

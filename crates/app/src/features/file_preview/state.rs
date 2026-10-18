@@ -1017,6 +1017,15 @@ impl State {
         }
     }
 
+    pub(crate) fn apply_workspace_selection(&mut self, skin: usize, bodygroups: &[usize]) {
+        self.select_skin(skin);
+        for (group, &choice) in bodygroups.iter().enumerate() {
+            if self.bodygroup_choices().get(group) != Some(&choice) {
+                self.select_bodygroup_choice(group, choice);
+            }
+        }
+    }
+
     pub(super) fn select_bodygroup_choice(&mut self, group: usize, choice: usize) {
         let Some(choices) = self
             .current_model()

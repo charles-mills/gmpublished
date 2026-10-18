@@ -226,8 +226,9 @@ mod tests {
                 .texture
                 .as_ref()
                 .unwrap()
-                .resident()
-                .unwrap(),
+                .on_demand()
+                .unwrap()
+                .0,
             value
                 .diffuse_warp
                 .as_ref()
@@ -235,8 +236,9 @@ mod tests {
                 .texture
                 .as_ref()
                 .unwrap()
-                .resident()
+                .on_demand()
                 .unwrap()
+                .0
         ));
     }
 

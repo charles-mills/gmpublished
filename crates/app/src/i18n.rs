@@ -136,10 +136,17 @@ impl I18n {
     }
 
     pub(crate) fn select_locale(&mut self, locale_hint: Option<&str>) -> bool {
-        let next = Self::for_locale(locale_hint);
-        let changed = self.locale.id != next.locale.id;
-        *self = next;
-        changed
+        let locale = resolve_locale(locale_hint);
+        if self.locale.id == locale.id {
+            return false;
+        }
+        *self = Self::for_locale(Some(locale.id));
+        true
+    }
+
+    pub(crate) fn select_user_or_system_locale(&mut self, locale_hint: Option<&str>) -> bool {
+        let system_locale = locale_hint.is_none().then(sys_locale::get_locale).flatten();
+        self.select_locale(locale_hint.or(system_locale.as_deref()))
     }
 
     pub(crate) fn tr(&self, key: &str) -> String {
@@ -367,6 +374,23 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{Arg, CATALOGS, I18n, catalog_source, resolve_locale_id};
+
+    #[test]
+    fn reselecting_the_same_resolved_locale_preserves_the_runtime_bundles() {
+        let mut i18n = I18n::for_locale(Some("fr"));
+        let original = i18n.clone();
+        assert!(!i18n.select_locale(Some("fr-CA")));
+        assert!(std::rc::Rc::ptr_eq(&original.bundles, &i18n.bundles));
+        assert!(i18n.select_locale(Some("de")));
+        assert!(!std::rc::Rc::ptr_eq(&original.bundles, &i18n.bundles));
+        assert_eq!(i18n.locale_id(), "de");
+        let system = I18n::from_user_or_system(None);
+        i18n.select_user_or_system_locale(None);
+        assert_eq!(i18n.locale_id(), system.locale_id());
+        let system_bundles = i18n.clone();
+        assert!(!i18n.select_user_or_system_locale(None));
+        assert!(std::rc::Rc::ptr_eq(&system_bundles.bundles, &i18n.bundles));
+    }
 
     /// Translations allowed to match English, including loanwords and units.
     /// Keep brand names in `crate::APP_NAME`.

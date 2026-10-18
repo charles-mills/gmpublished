@@ -101,13 +101,14 @@ impl Toast {
             return;
         }
         match update {
-            TaskUpdate::Started { kind, status } => {
+            TaskUpdate::Started { kind, status, .. } => {
                 self.kind = kind;
                 self.status = status;
                 self.progress = 0.0;
                 self.total_bytes = 0;
                 self.outcome = Outcome::Pending;
             }
+            TaskUpdate::Extracted(_) => {}
             TaskUpdate::Status(status) => self.status = status,
             TaskUpdate::Progress(progress) => self.progress = progress.clamp(0.0, 1.0),
             TaskUpdate::ProgressIncr(delta) => {
@@ -196,6 +197,7 @@ impl State {
         if let TaskUpdate::Started {
             kind: kind @ (TaskKind::Publish | TaskKind::OverlayExtract | TaskKind::Notice),
             status,
+            ..
         } = update
         {
             let mut toast = Toast::new(task_id, kind, status, now);
@@ -244,7 +246,11 @@ mod tests {
     use super::*;
 
     fn started(kind: TaskKind, status: TransactionStatus) -> TaskUpdate {
-        TaskUpdate::Started { kind, status }
+        TaskUpdate::Started {
+            kind,
+            status,
+            identity: None,
+        }
     }
 
     fn event(id: u64, update: TaskUpdate) -> TaskEvent {

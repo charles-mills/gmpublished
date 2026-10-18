@@ -4,12 +4,9 @@ use std::{
     time::Instant,
 };
 
-use crate::bridge::domain::{
-    PublishedFileId, WorkshopDownloadResult, WorkshopDownloadSuccess, WorkshopMetadata,
-};
+use crate::bridge::domain::{PublishedFileId, WorkshopDownloadSuccess, WorkshopMetadata};
 use crate::bridge::tasks::{
-    CoalescedTaskTerminal, CoalescedTaskUpdate, TaskEvent, TaskId, TaskKind, TaskUpdate,
-    TransactionStatus, WorkshopDownloadTaskKind,
+    TaskEvent, TaskId, TaskIdentity, TaskUpdate, TransactionStatus, WorkshopDownloadTaskKind,
 };
 use crate::bridge::ui_error::UiError;
 use crate::theme::motion;
@@ -21,7 +18,6 @@ const PROGRESS_SMOOTH_DURATION: std::time::Duration = std::time::Duration::from_
 fn smoothed_ratio(initial: f32) -> motion::Presence<f32> {
     motion::Presence::new(initial, PROGRESS_SMOOTH_DURATION, Easing::EaseOut)
 }
-const MAX_PENDING_TASK_UPDATES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RowId {
@@ -59,35 +55,14 @@ impl Section {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DownloaderEvent {
-    TaskStarted {
-        kind: WorkshopDownloadTaskKind,
-        item_id: PublishedFileId,
-        task_id: TaskId,
-    },
     SubmissionFailed {
         item_ids: Vec<PublishedFileId>,
         error_key: UiError,
-    },
-    LocalExtractionStarted {
-        path: PathBuf,
-        task_id: TaskId,
-        total_bytes: u64,
-    },
-    LocalExtractionFinished {
-        task_id: TaskId,
-        outcome: LocalExtractionOutcome,
     },
     WorkshopMetadataResolved {
         requested_item_ids: Vec<PublishedFileId>,
         items: Vec<WorkshopMetadata>,
     },
-    WorkshopDownloadFinished(WorkshopDownloadResult),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LocalExtractionOutcome {
-    Success(PathBuf),
-    Error(UiError),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -295,8 +270,6 @@ pub struct Jobs {
     task_rows: HashMap<RowId, TaskId>,
     task_row_index: HashMap<TaskId, RowLocation>,
     workshop_row_index: HashMap<PublishedFileId, Vec<RowLocation>>,
-    pending_task_updates: HashMap<TaskId, CoalescedTaskUpdate>,
-    ignored_task_ids: HashSet<TaskId>,
     workshop_title_requests: HashSet<PublishedFileId>,
     /// Tasks that started for already-cancelled (hidden) items; drained by
     /// the update layer into a cancellation effect so they abort at birth.
@@ -353,16 +326,8 @@ impl Jobs {
         accepted
     }
 
-    pub(crate) fn apply_event(&mut self, event: DownloaderEvent, now: Instant) -> bool {
+    pub(crate) fn apply_event(&mut self, event: DownloaderEvent, _now: Instant) -> bool {
         match event {
-            DownloaderEvent::TaskStarted {
-                kind,
-                item_id,
-                task_id,
-            } => {
-                self.apply_task_started(kind, item_id, task_id, now);
-                true
-            }
             DownloaderEvent::SubmissionFailed {
                 item_ids,
                 error_key,
@@ -373,25 +338,10 @@ impl Jobs {
                 }
                 true
             }
-            DownloaderEvent::LocalExtractionStarted {
-                path,
-                task_id,
-                total_bytes,
-            } => {
-                self.apply_local_extraction_started(&path, task_id, total_bytes, now);
-                true
-            }
-            DownloaderEvent::LocalExtractionFinished { task_id, outcome } => {
-                self.apply_local_extraction_finished(task_id, outcome)
-            }
             DownloaderEvent::WorkshopMetadataResolved {
                 requested_item_ids,
                 items,
             } => self.apply_workshop_metadata(requested_item_ids, items),
-            DownloaderEvent::WorkshopDownloadFinished(result) => {
-                self.apply_result(result);
-                true
-            }
         }
     }
 
@@ -404,27 +354,40 @@ impl Jobs {
     }
 
     fn apply_task_update(&mut self, task_id: TaskId, update: TaskUpdate, now: Instant) -> bool {
-        if matches!(
-            &update,
-            TaskUpdate::Started {
-                kind: TaskKind::WorkshopSnapshot,
-                ..
+        if let TaskUpdate::Started {
+            identity: Some(identity),
+            ..
+        } = &update
+        {
+            match identity {
+                TaskIdentity::Workshop { kind, item_id } => {
+                    self.apply_task_started(*kind, *item_id, task_id, now);
+                }
+                TaskIdentity::LocalExtraction { path, total_bytes } => {
+                    self.apply_local_extraction_started(path, task_id, *total_bytes, now);
+                }
             }
-        ) {
-            self.ignored_task_ids.insert(task_id);
-            return false;
         }
-        if self.ignored_task_ids.contains(&task_id) {
-            if matches!(
-                update,
-                TaskUpdate::Finished | TaskUpdate::Error(_) | TaskUpdate::Abandoned
-            ) {
-                self.ignored_task_ids.remove(&task_id);
+        if let TaskUpdate::Extracted(output) = &update {
+            let Some(location) = self.task_row_index.get(&task_id) else {
+                return false;
+            };
+            let workshop_id = self
+                .section_jobs(location.section)
+                .get(location.index)
+                .and_then(|job| job.workshop_id);
+            if let Some(item_id) = workshop_id {
+                self.apply_success(WorkshopDownloadSuccess {
+                    item_id,
+                    installed_path: output.source_path.clone(),
+                    extracted_path: output.extracted_path.clone(),
+                });
+                return true;
             }
-            return false;
+            return self.apply_local_extraction_finished(task_id, output.extracted_path.clone());
         }
+
         let Some((section, index)) = self.running_row_index_for_task(task_id) else {
-            self.remember_pending_task_update(task_id, update);
             return false;
         };
 
@@ -439,11 +402,16 @@ impl Jobs {
         now: Instant,
     ) -> bool {
         match update {
-            TaskUpdate::Started { status, .. } => {
+            TaskUpdate::Started {
+                status, identity, ..
+            } => {
                 let Some(job) = self.job_mut(section, index) else {
                     return false;
                 };
-                job.total_bytes = 0;
+                job.total_bytes = match identity {
+                    Some(TaskIdentity::LocalExtraction { total_bytes, .. }) => total_bytes,
+                    _ => 0,
+                };
                 job.progress = JobProgress::Running {
                     ratio: 0.0,
                     status_key: status,
@@ -525,6 +493,7 @@ impl Jobs {
                 self.mark_error(section, index, UiError::new(keys::UNKNOWN));
                 true
             }
+            TaskUpdate::Extracted(_) => false,
         }
     }
 
@@ -540,7 +509,6 @@ impl Jobs {
             // was still resolving, or extraction started after its download
             // row was removed): cancel the task at birth instead of showing
             // a row for it.
-            self.pending_task_updates.remove(&task_id);
             self.pending_cancellations.push(task_id);
             return;
         }
@@ -609,24 +577,14 @@ impl Jobs {
 
         self.register_task_row(row_id, task_id);
         self.rebuild_row_indexes();
-        self.apply_pending_task_update(task_id, now);
-    }
-
-    pub(crate) fn apply_result(&mut self, result: WorkshopDownloadResult) {
-        let item_id = result.item_id;
-        self.active_items.remove(&item_id);
-        if self.hidden_active_items.remove(&item_id) {
-            return;
-        }
-
-        match result.outcome {
-            Ok(success) => self.apply_success(success),
-            Err(error) => self.apply_error(item_id, error),
-        }
     }
 
     fn apply_success(&mut self, success: WorkshopDownloadSuccess) {
         let item_id = success.item_id;
+        self.active_items.remove(&item_id);
+        if self.hidden_active_items.remove(&item_id) {
+            return;
+        }
         self.remove_download_rows_for_item(item_id);
         let preview_path = success.installed_path.filter(|path| is_gma_file(path));
 
@@ -742,14 +700,9 @@ impl Jobs {
         ));
         self.register_task_row(row_id, task_id);
         self.rebuild_row_indexes();
-        self.apply_pending_task_update(task_id, now);
     }
 
-    fn apply_local_extraction_finished(
-        &mut self,
-        task_id: TaskId,
-        outcome: LocalExtractionOutcome,
-    ) -> bool {
+    fn apply_local_extraction_finished(&mut self, task_id: TaskId, path: PathBuf) -> bool {
         let Some(index) = self
             .extracting
             .iter()
@@ -758,15 +711,8 @@ impl Jobs {
             return false;
         };
 
-        match outcome {
-            LocalExtractionOutcome::Success(path) => {
-                let row_id = self.extracting[index].mark_finished(path);
-                self.unregister_task_row(row_id);
-            }
-            LocalExtractionOutcome::Error(error_key) => {
-                self.mark_error(Section::Extracting, index, error_key);
-            }
-        }
+        let row_id = self.extracting[index].mark_finished(path);
+        self.unregister_task_row(row_id);
 
         true
     }
@@ -943,114 +889,6 @@ impl Jobs {
             .then_some((location.section, location.index))
     }
 
-    fn remember_pending_task_update(&mut self, task_id: TaskId, update: TaskUpdate) {
-        if self.running_row_index_for_task(task_id).is_some() {
-            return;
-        }
-
-        let should_track = self.pending_task_updates.contains_key(&task_id)
-            || matches!(
-                &update,
-                TaskUpdate::Started {
-                    kind: TaskKind::Download | TaskKind::Extract,
-                    ..
-                }
-            );
-        if !should_track {
-            return;
-        }
-
-        if !self.pending_task_updates.contains_key(&task_id)
-            && self.pending_task_updates.len() >= MAX_PENDING_TASK_UPDATES
-            && let Some(stale_id) = self.pending_task_updates.keys().next().copied()
-        {
-            self.pending_task_updates.remove(&stale_id);
-        }
-
-        self.pending_task_updates
-            .entry(task_id)
-            .or_default()
-            .observe(update, 0.0);
-    }
-
-    fn apply_pending_task_update(&mut self, task_id: TaskId, now: Instant) -> bool {
-        let Some(update) = self.pending_task_updates.remove(&task_id) else {
-            return false;
-        };
-        let Some((section, index)) = self.running_row_index_for_task(task_id) else {
-            return false;
-        };
-
-        self.apply_pending_task_update_at(section, index, update, now)
-    }
-
-    fn apply_pending_task_update_at(
-        &mut self,
-        section: Section,
-        index: usize,
-        update: CoalescedTaskUpdate,
-        now: Instant,
-    ) -> bool {
-        let unregister_task = {
-            let Some(job) = self.job_mut(section, index) else {
-                return false;
-            };
-
-            if let Some(started) = update.started {
-                job.total_bytes = 0;
-                job.progress = JobProgress::Running {
-                    ratio: 0.0,
-                    status_key: started.status,
-                };
-                if job.started_at.is_none() {
-                    job.started_at = Some(now);
-                }
-            }
-
-            if let Some(status) = update.status
-                && let JobProgress::Running { status_key, .. } = &mut job.progress
-            {
-                *status_key = status;
-            }
-
-            if let Some(total_bytes) = update.total_bytes {
-                job.total_bytes = total_bytes;
-            }
-
-            if let Some(progress) = update.progress
-                && let JobProgress::Running { ratio, .. } = &mut job.progress
-            {
-                *ratio = progress;
-            }
-
-            match update.terminal {
-                Some(CoalescedTaskTerminal::Finished) => {
-                    if let JobProgress::Running { ratio, .. } = &mut job.progress {
-                        *ratio = 1.0;
-                    }
-                    None
-                }
-                Some(CoalescedTaskTerminal::Error(error_key)) => {
-                    Some((job.mark_errored(error_key), job.workshop_id))
-                }
-                Some(CoalescedTaskTerminal::Abandoned) => Some((
-                    job.mark_errored(UiError::new(keys::UNKNOWN)),
-                    job.workshop_id,
-                )),
-                None => None,
-            }
-        };
-
-        if let Some((row_id, workshop_id)) = unregister_task {
-            if let Some(item_id) = workshop_id {
-                self.active_items.remove(&item_id);
-            }
-            self.unregister_task_row(row_id);
-        }
-
-        true
-    }
-
     fn job_mut(&mut self, section: Section, index: usize) -> Option<&mut DownloaderJob> {
         self.section_jobs_mut(section).get_mut(index)
     }
@@ -1202,27 +1040,4 @@ fn title_from_file_name(path: &Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
-}
-
-#[cfg(test)]
-pub fn workshop_result_success(item_id: u64, extracted_path: PathBuf) -> WorkshopDownloadResult {
-    workshop_result_success_with_gma(item_id, extracted_path, None)
-}
-
-#[cfg(test)]
-pub fn workshop_result_success_with_gma(
-    item_id: u64,
-    extracted_path: PathBuf,
-    installed_path: Option<PathBuf>,
-) -> WorkshopDownloadResult {
-    WorkshopDownloadResult {
-        item_id: crate::bridge::domain::PublishedFileId::new(item_id)
-            .expect("test fixture ids are always nonzero"),
-        outcome: Ok(WorkshopDownloadSuccess {
-            item_id: crate::bridge::domain::PublishedFileId::new(item_id)
-                .expect("test fixture ids are always nonzero"),
-            installed_path,
-            extracted_path,
-        }),
-    }
 }

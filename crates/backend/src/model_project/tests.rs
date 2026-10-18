@@ -729,7 +729,7 @@ fn portable_source_copy_rejects_escaped_dependencies_without_publishing() {
         "a%00b",
     ] {
         let relative = decode_source_uri(uri);
-        assert!(relative.is_err() || copier.find(&relative.unwrap()).is_err());
+        assert!(relative.is_err() || find_source_file(copier.base, &relative.unwrap()).is_err());
     }
 }
 
@@ -742,17 +742,8 @@ fn portable_source_copy_cannot_follow_symlinks_outside_the_source_root() {
     fs::write(&outside, b"private").unwrap();
     std::os::unix::fs::symlink(outside, request.source.parent().unwrap().join("escape.bin"))
         .unwrap();
-    let stage = root.path().join("stage");
-    fs::create_dir(&stage).unwrap();
-    let mut writes = Vec::new();
-    let copier = SourceCopier::new(
-        request.source.parent().unwrap(),
-        &stage,
-        "sources",
-        &mut writes,
-    );
     assert!(matches!(
-        copier.find(Path::new("escape.bin")),
+        find_source_file(request.source.parent().unwrap(), Path::new("escape.bin")),
         Err(ModelCompileError::UnsafePath(_))
     ));
 }

@@ -566,16 +566,6 @@ impl super::MaterialResolver {
         paths.sort();
         paths
     }
-
-    pub(crate) fn with_on_demand_textures(&self) -> Self {
-        self.variant(super::ResolverConfig {
-            texture_loading: super::TextureLoading::OnDemand,
-            ..self.config.clone()
-        })
-    }
-    pub(crate) fn texture_loading(&self) -> super::TextureLoading {
-        self.config.texture_loading
-    }
 }
 
 #[derive(Debug)]
@@ -642,6 +632,14 @@ impl super::MaterialResolver {
                             selected = Err(TextureSourceError::SourceUnavailable(error));
                             break;
                         }
+                        Err(super::SourceError::IndexLimit(error)) => {
+                            selected = Err(TextureSourceError::WorkingBudget {
+                                origin,
+                                error: TextureAssetError::ArchiveIndex(error),
+                                metadata: None,
+                            });
+                            break;
+                        }
                         Err(error) => {
                             selected = Err(TextureSourceError::Read {
                                 origin,
@@ -679,11 +677,9 @@ impl super::MaterialResolver {
                 origin: selected.origin.clone(),
                 error,
                 metadata: None,
-                inspection: None,
             },
             error => TextureSourceError::Invalid {
                 origin: selected.origin.clone(),
-                bytes: Arc::new(TextureBytes::owned(Vec::new())),
                 error,
             },
         })?;
@@ -705,7 +701,6 @@ impl super::MaterialResolver {
                 origin: origin.clone(),
                 error: TextureAssetError::WorkingLimit { required, capacity },
                 metadata: None,
-                inspection: None,
             });
         }
         Ok(())
@@ -818,10 +813,7 @@ impl super::MaterialResolver {
                     TextureLoadOutcome::Unplanned,
                 )));
             }
-            Err(
-                TextureSourceError::WorkingBudget { metadata, .. }
-                | TextureSourceError::EncodedBudget { metadata, .. },
-            ) => {
+            Err(TextureSourceError::WorkingBudget { metadata, .. }) => {
                 return Some(Arc::new(ResolvedTexture::unavailable(
                     metadata,
                     TextureLoadOutcome::SourceBudgetRejected,
@@ -901,58 +893,17 @@ impl ReloadableTextureSource {
     }
 }
 
-pub(super) enum SelectedTexture {
-    Resident(Arc<super::texture_asset::SelectedTextureAsset>),
-    Reloadable(Arc<ReloadableTextureSource>),
-}
-impl SelectedTexture {
-    pub(super) fn metadata(&self) -> &TextureMetadata {
-        match self {
-            Self::Resident(selected) => selected.asset.metadata(),
-            Self::Reloadable(source) => source.metadata(),
-        }
-    }
+impl ReloadableTextureSource {
     pub(super) fn metadata_arc(&self) -> Arc<TextureMetadata> {
-        match self {
-            Self::Resident(selected) => selected.asset.metadata_arc(),
-            Self::Reloadable(source) => Arc::clone(&source.metadata),
-        }
-    }
-    pub(super) fn validate_payload(&self) -> Result<(), vformats::vtf::VtfError> {
-        match self {
-            Self::Resident(selected) => selected.asset.validate_payload(),
-            Self::Reloadable(_) => Ok(()),
-        }
+        Arc::clone(&self.metadata)
     }
 }
 impl super::MaterialResolver {
-    pub(super) fn selected_texture_source(
-        &self,
-        path: &super::ContentPath,
-    ) -> Result<SelectedTexture, super::TextureSourceError> {
-        if self.config.texture_loading == super::TextureLoading::OnDemand {
-            self.selected_reloadable_texture(path)
-                .map(SelectedTexture::Reloadable)
-        } else {
-            self.selected_texture_asset(path)
-                .map(SelectedTexture::Resident)
-        }
-    }
-    pub(super) fn selected_source_residency(
-        &self,
-        source: &SelectedTexture,
-        frame: u32,
-        faces: Range<u32>,
-        force_rgba: bool,
-    ) -> Result<super::TextureResidency, TextureAssetError> {
-        match source {
-            SelectedTexture::Resident(selected) => {
-                self.resident_texture(selected, faces, force_rgba)
-            }
-            SelectedTexture::Reloadable(source) => {
-                self.reloadable_residency(Arc::clone(source), frame, faces, force_rgba)
-            }
-        }
+    pub(super) fn with_single_texture_mip(&self) -> Self {
+        self.variant(super::ResolverConfig {
+            single_texture_mip: true,
+            ..self.config.clone()
+        })
     }
 }
 
@@ -1102,7 +1053,7 @@ mod tests {
         let resolver=super::super::MaterialResolver::prop_lighting_fixture(vec![
             ("materials/test/image.vtf",fixture_vtf_bytes(4,4,VtfFormat::Rgba8888,&[&[7;64]])),
             ("materials/test/image.vmt",br#"LightmappedGeneric { "$basetexture" "test/image" "$bumpmap" "test/image" }"#.to_vec()),
-        ],Vec::new()).with_on_demand_textures();
+        ],Vec::new());
         let resolved = resolver.resolve_primary(&[], "test/image");
         let texture = resolved.into_material().unwrap().texture.unwrap();
         assert_eq!(
@@ -1111,8 +1062,56 @@ mod tests {
         );
         assert!(texture.resident().is_none());
         assert!(texture.on_demand().is_some());
-        assert_eq!(resolver.resident_texture_asset_count(), 0);
-        assert!(resolver.shared.texture_assets.selected_paths().is_empty());
+    }
+    #[test]
+    fn compressed_pages_preserve_mip_selection_and_rgba_conversion() {
+        let block = [0x03, 0, 0, 0, 0, 0, 0, 0];
+        let (source, _) = source(fixture_vtf_bytes(
+            4,
+            4,
+            VtfFormat::Dxt1,
+            &[&block, &block, &block],
+        ));
+        let compressed = source
+            .frame_request(
+                0,
+                0..1,
+                1,
+                2,
+                TextureStorage::Bc(vformats::vtf::BcFormat::Bc1),
+            )
+            .unwrap();
+        let mut converted = compressed.clone();
+        converted.storage = TextureStorage::Rgba8;
+        let working = Arc::new(TextureWorkingBudget::new(4096));
+        let bc = source
+            .load_page(&compressed, &Default::default(), &working)
+            .unwrap();
+        let rgba = source
+            .load_page(&converted, &Default::default(), &working)
+            .unwrap();
+        assert_eq!(bc.resident().id().first_source_mip, 1);
+        assert_eq!(bc.resident().layers()[0].mips[0].dimensions, [2, 2]);
+        for (compressed, decoded) in bc.resident().layers()[0]
+            .mips
+            .iter()
+            .zip(&rgba.resident().layers()[0].mips)
+        {
+            let image = vformats::vtf::decode_bc_rgba(
+                vformats::vtf::BcFormat::Bc1,
+                compressed.dimensions[0],
+                compressed.dimensions[1],
+                compressed.bytes.as_slice(),
+                &Limits::default(),
+            )
+            .unwrap();
+            assert_eq!(decoded.bytes.as_slice(), image.rgba);
+            assert_eq!(
+                compressed.bytes.backing_len(),
+                compressed.bytes.as_slice().len()
+            );
+        }
+        assert_eq!(working.current_bytes(), 0);
     }
 }
 

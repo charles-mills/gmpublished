@@ -119,17 +119,12 @@ impl App {
         }
 
         let ctx = self.environment.ctx.clone();
-        Task::stream(stream::channel(100, async move |output| {
-            let worker_ctx = ctx.clone();
-            spawn_blocking_detached_or_warn(
-                &ctx,
-                "downloader-local-extract",
-                "downloader local extraction",
-                move |app| {
-                    run_downloader_local_extraction(&worker_ctx, &app, paths, output);
-                },
-            );
-        }))
+        self.environment
+            .ctx
+            .run_blocking("downloader-local-extract", move |app| {
+                run_downloader_local_extraction(&ctx, app, paths);
+            })
+            .discard()
     }
 
     pub(super) fn downloader_submission_task(

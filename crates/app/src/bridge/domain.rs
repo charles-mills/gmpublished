@@ -223,12 +223,6 @@ pub struct WorkshopDownloadSuccess {
     pub(crate) extracted_path: PathBuf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkshopDownloadResult {
-    pub(crate) item_id: PublishedFileId,
-    pub(crate) outcome: Result<WorkshopDownloadSuccess, super::ui_error::UiError>,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SearchGeneration(u64);
 

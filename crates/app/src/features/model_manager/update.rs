@@ -5,7 +5,7 @@ use std::sync::{
 
 use super::state::RunningExport;
 use super::{Effect, ExportTarget, MapChoice, Message, SourceKind, State};
-use gmpublished_backend::model_project::{ModelSkin, ModelStage, SkinMaterial};
+use gmpublished_backend::model_project::{ModelSkin, SkinMaterial};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
     let revision = state.preview_revision;
@@ -64,7 +64,7 @@ fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
         _ => {}
     }
     if super::bodygroups::edit(state, &message) {
-        state.stage_bodygroups.clear();
+        state.workspace.bodygroups.clear();
         clear_outcome(state);
         return vec![];
     }
@@ -271,7 +271,7 @@ fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
                 name,
                 replacements: std::collections::BTreeMap::new(),
             });
-            state.stage_skin = state
+            state.workspace.skin = state
                 .inspection
                 .as_ref()
                 .map_or(1, |inspection| inspection.skins.len().max(1))
@@ -282,7 +282,7 @@ fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::SkinSelected(index) if !state.busy() && index < state.skins.len() => {
             state.selected_skin = Some(index);
-            state.stage_skin = state
+            state.workspace.skin = state
                 .inspection
                 .as_ref()
                 .map_or(1, |inspection| inspection.skins.len().max(1))
@@ -384,7 +384,7 @@ fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::MapSelected(map) if !state.busy() => {
             state.selected_map = Some(map);
-            state.stage = None;
+            state.workspace.placement = None;
             state.qc_saved = false;
         }
         Message::MapBrowseRequested if !state.busy() => {
@@ -400,38 +400,12 @@ fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
                     state.maps.push(map.clone());
                 }
                 state.selected_map = Some(map);
-                state.stage = None;
+                state.workspace.placement = None;
                 state.qc_saved = false;
             }
         }
         Message::StageRequested if state.selected_map.is_some() => {
             return request_preview(state, true);
-        }
-        Message::StageSnapshotCaptured {
-            position,
-            angles,
-            skin,
-            bodygroups,
-        } => {
-            if let Some(map) = &state.selected_map {
-                let stage = ModelStage {
-                    map: map.0.clone(),
-                    position,
-                    angles,
-                    selected_skin: skin,
-                    bodygroups: bodygroups.clone(),
-                };
-                if state.stage.as_ref() != Some(&stage) {
-                    state.qc_saved = false;
-                }
-                state.stage = Some(stage);
-                state.stage_skin = skin;
-                state.stage_bodygroups = bodygroups;
-            }
-        }
-        Message::PreviewSelectionCaptured { skin, bodygroups } => {
-            state.stage_skin = skin;
-            state.stage_bodygroups = bodygroups;
         }
         Message::InstallRequested
             if !state.busy() && !state.installed_mutation_busy() && state.can_preview() =>
@@ -665,8 +639,8 @@ fn select_source(state: &mut State, path: std::path::PathBuf) -> Vec<Effect> {
     state.collision = super::collision::Editor::for_kind(kind);
     state.collision_mass = "1".into();
     state.surface_property.clear();
-    state.stage_skin = 0;
-    state.stage_bodygroups.clear();
+    state.workspace.skin = 0;
+    state.workspace.bodygroups.clear();
     state.inspection = None;
     state.animations.clear();
     state.skins.clear();
@@ -678,7 +652,7 @@ fn select_source(state: &mut State, path: std::path::PathBuf) -> Vec<Effect> {
     state.selected_material = None;
     state.orientation = std::array::from_fn(|_| "0".into());
     state.qc_path = None;
-    state.stage = None;
+    state.workspace.placement = None;
     state.preview = None;
     state.previous_preview = None;
     state.displayed_transform = None;
@@ -1332,7 +1306,7 @@ mod tests {
             ],
         });
         update(&mut state, Message::SkinAdded("Black".into()));
-        assert_eq!(state.stage_skin, 2);
+        assert_eq!(state.workspace.skin, 2);
         update(&mut state, Message::MaterialSelected("paint".into()));
         update(&mut state, Message::MaterialTintChanged("#123456".into()));
         update(&mut state, Message::ApplyMaterialTint);
@@ -1344,7 +1318,7 @@ mod tests {
         );
         assert!(!state.skins[0].replacements.contains_key("glass"));
         update(&mut state, Message::SkinAdded("Blue".into()));
-        assert_eq!(state.stage_skin, 3);
+        assert_eq!(state.workspace.skin, 3);
         assert!(state.skins[1].replacements.is_empty());
         update(&mut state, Message::SkinSelected(0));
         assert_eq!(state.material_tint, "#123456");
@@ -1457,25 +1431,22 @@ mod tests {
             &mut state,
             Message::MapSelected(MapChoice("gm_construct.bsp".into())),
         );
-        update(
-            &mut state,
-            Message::StageSnapshotCaptured {
-                position: [1.0, 2.0, 3.0],
-                angles: [0.0, 45.0, 0.0],
-                skin: 2,
-                bodygroups: vec![1, 0],
-            },
-        );
+        state.set_workspace_selection(2, vec![1, 0]);
+        state.workspace.placement = Some(super::super::workspace::Placement {
+            map: "gm_construct.bsp".into(),
+            position: [1.0, 2.0, 3.0],
+            angles: [0.0, 45.0, 0.0],
+        });
         let request = state.qc_request().expect("QC request");
         assert_eq!(request.orientation, [0.0, 0.0, 90.0]);
         assert!(matches!(
             request.collision,
             gmpublished_backend::model_compile::ModelCollision::Automatic(_)
         ));
-        let scene = state.stage.as_ref().expect("scene");
+        let scene = state.workspace.placement.as_ref().expect("scene");
         assert_eq!(scene.position, [1.0, 2.0, 3.0]);
-        assert_eq!(scene.selected_skin, 2);
-        assert_eq!(scene.bodygroups, vec![1, 0]);
+        assert_eq!(state.workspace.skin, 2);
+        assert_eq!(state.workspace.bodygroups, vec![1, 0]);
         assert_eq!(
             state.request().expect("compile request").orientation,
             [0.0, 0.0, 90.0]

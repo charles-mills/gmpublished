@@ -18,44 +18,6 @@ fn resolver(authored: Option<Vec<u8>>, default: Option<Vec<u8>>) -> MaterialReso
 }
 
 #[test]
-fn named_invalid_fallback_is_planned_once_and_keeps_effective_metadata() {
-    let resolver = resolver(Some(b"FAIL".to_vec()), Some(modern_cube()));
-    let (planned, plan) = resolver.plan_texture_requests(|resolver| {
-        let first = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-        let second = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-        (first, second)
-    });
-    assert_eq!(plan.cost().resident_bytes, 504);
-    assert_eq!(plan.cost().image_count, 18);
-    assert_eq!(planned.0.load_outcome(), TextureLoadOutcome::Deferred);
-    assert_eq!(planned.1.load_outcome(), TextureLoadOutcome::Deferred);
-    let resolver = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
-    let cube = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-    assert!(matches!(
-        cube.resolution,
-        CubemapResolution::Default {
-            authored_failure: CubemapFailure::InvalidVtf(VtfError::BadMagic)
-        }
-    ));
-    assert_eq!(cube.effective_path.as_deref(), Some(DEFAULT_CUBEMAP));
-    assert_eq!(cube.source_metadata().unwrap().version_minor, Some(5));
-    assert_eq!(
-        cube.source_metadata().unwrap().flags,
-        Some(texture_flags::ENVMAP)
-    );
-    assert_eq!(cube.frame, 0);
-    assert_eq!(cube.load_outcome(), TextureLoadOutcome::Loaded);
-    assert!(Arc::ptr_eq(
-        cube.resident().unwrap(),
-        resolver
-            .resolve_named_cubemap("test/cube", 0)
-            .unwrap()
-            .resident()
-            .unwrap()
-    ));
-}
-
-#[test]
 fn missing_and_invalid_payload_fallback_is_bounded() {
     let cube = resolver(None, Some(modern_cube()))
         .resolve_named_cubemap("test/cube", 7)
@@ -95,71 +57,6 @@ fn missing_and_invalid_payload_fallback_is_bounded() {
 }
 
 #[test]
-fn policy_and_unplanned_failures_never_select_default() {
-    let resolver = resolver(Some(modern_cube()), Some(modern_cube()))
-        .with_decoded_texture_budget(Arc::new(super::super::DecodedTextureBudget::new(0)));
-    let (_, plan) =
-        resolver.plan_texture_requests(|resolver| resolver.resolve_named_cubemap("test/cube", 0));
-    let resolver = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
-    let cube = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-    assert_eq!(cube.load_outcome(), TextureLoadOutcome::QualityRejected);
-    assert!(matches!(
-        cube.failure,
-        Some(CubemapFailure::Texture(TextureAssetError::Budget))
-    ));
-    assert_eq!(cube.resolution, CubemapResolution::Authored);
-    assert_eq!(
-        resolver.selected_texture_paths(),
-        vec!["materials/test/cube.vtf"]
-    );
-
-    let resolver = super::named_tests::resolver(Some(modern_cube()), Some(modern_cube()));
-    let (_, empty) = resolver.plan_texture_requests(|_| ());
-    let resolver = resolver.with_texture_admissions(resolver.admit_texture_requests(empty));
-    let cube = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-    assert_eq!(cube.load_outcome(), TextureLoadOutcome::Unplanned);
-    assert_eq!(cube.resolution, CubemapResolution::Authored);
-    assert!(
-        !resolver
-            .selected_texture_paths()
-            .iter()
-            .any(|path| path.contains("defaultcubemap"))
-    );
-}
-
-#[test]
-fn source_budget_hdr_and_frame_failures_never_select_default() {
-    let resolver = resolver(Some(modern_cube()), Some(modern_cube()))
-        .with_encoded_texture_budget(Arc::new(super::super::EncodedTextureBudget::new(0)));
-    let cube = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-    assert_eq!(
-        cube.load_outcome(),
-        TextureLoadOutcome::SourceBudgetRejected
-    );
-    assert_eq!(cube.failure, Some(CubemapFailure::SourceBudget));
-    assert_eq!(
-        resolver.selected_texture_paths(),
-        vec!["materials/test/cube.vtf"]
-    );
-    let resolver = super::named_tests::resolver(Some(modern_cube()), Some(modern_cube()));
-    assert!(matches!(
-        resolver.resolve_named_cubemap("test/cube", 1),
-        Err(CubemapFailure::Frame {
-            requested: 1,
-            count: 1
-        })
-    ));
-    assert!(matches!(
-        resolver.resolve_named_cubemap("test/cube.hdr", 0),
-        Err(CubemapFailure::UnsupportedHdr)
-    ));
-    assert_eq!(
-        resolver.selected_texture_paths(),
-        vec!["materials/test/cube.vtf"]
-    );
-}
-
-#[test]
 fn environment_identity_stays_authored_when_resident_is_default() {
     let resolver = resolver(Some(b"FAIL".to_vec()), Some(modern_cube()));
     let document = vformats::vmt::parse(
@@ -178,24 +75,6 @@ fn environment_identity_stays_authored_when_resident_is_default() {
 }
 
 #[test]
-fn default_substitution_obeys_frozen_resident_admission() {
-    let resolver = resolver(Some(b"FAIL".to_vec()), Some(modern_cube()))
-        .with_decoded_texture_budget(Arc::new(super::super::DecodedTextureBudget::new(0)));
-    let (_, plan) = resolver
-        .plan_texture_requests(|resolver| resolver.resolve_named_cubemap("test/cube", 0).unwrap());
-    assert_eq!(plan.cost().resident_bytes, 504);
-    let resolver = resolver.with_texture_admissions(resolver.admit_texture_requests(plan));
-    let cube = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
-    assert!(matches!(cube.resolution, CubemapResolution::Default { .. }));
-    assert_eq!(cube.load_outcome(), TextureLoadOutcome::QualityRejected);
-    assert!(matches!(
-        cube.failure,
-        Some(CubemapFailure::Texture(TextureAssetError::Budget))
-    ));
-    assert_eq!(resolver.resident_texture_asset_count(), 0);
-}
-
-#[test]
 fn working_and_shape_failures_do_not_substitute_default() {
     let resolver = resolver(Some(modern_cube()), Some(modern_cube()))
         .with_texture_source_working_budget(Arc::new(super::super::TextureWorkingBudget::new(0)));
@@ -211,7 +90,7 @@ fn working_and_shape_failures_do_not_substitute_default() {
         ))
     ));
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         vec!["materials/test/cube.vtf"]
     );
     let mut bytes = modern_cube();
@@ -222,7 +101,7 @@ fn working_and_shape_failures_do_not_substitute_default() {
         Err(CubemapFailure::NotCubemap)
     ));
     assert_eq!(
-        resolver.selected_texture_paths(),
+        resolver.selected_reloadable_paths(),
         vec!["materials/test/cube.vtf"]
     );
 }
@@ -265,42 +144,38 @@ fn rejected_cold_and_warm_pak_indices_preserve_named_state_without_fallback() {
         )
         .unwrap();
         let material = EffectiveMaterial::from_document(&document);
-        let (_, plan) = strict.plan_texture_requests(|resolver| {
-            let environment = resolver.resolve_environment_map(&material).unwrap();
-            assert_eq!(environment.path, "test/cube");
-            let EnvironmentMapSource::Named(cube) = &environment.source else {
-                panic!("index rejection must preserve the authored named envmap");
-            };
-            assert_eq!(cube.resolution, CubemapResolution::Authored);
-            assert_eq!(cube.effective_path.as_deref(), Some("test/cube"));
-            assert_eq!(
-                cube.load_outcome(),
-                TextureLoadOutcome::SourceBudgetRejected
-            );
-            assert!(matches!(
-                cube.failure,
-                Some(CubemapFailure::Texture(TextureAssetError::ArchiveIndex(
-                    vformats::ArchiveIndexLimit {
-                        kind: vformats::ArchiveIndexLimitKind::Entries,
-                        ..
-                    }
-                )))
-            ));
-            assert!(cube.source_metadata().is_none());
-        });
-        assert_eq!(plan.cost().resident_bytes, 0);
-        assert_eq!(plan.cost().image_count, 0);
-        assert_eq!(strict.resident_texture_asset_count(), 0);
-        assert_eq!(strict.selected_texture_paths(), vec![path]);
+        let environment = strict.resolve_environment_map(&material).unwrap();
+        assert_eq!(environment.path, "test/cube");
+        let EnvironmentMapSource::Named(cube) = &environment.source else {
+            panic!("index rejection must preserve the authored named envmap");
+        };
+        assert_eq!(cube.resolution, CubemapResolution::Authored);
+        assert_eq!(cube.effective_path.as_deref(), Some("test/cube"));
+        assert_eq!(
+            cube.load_outcome(),
+            TextureLoadOutcome::SourceBudgetRejected
+        );
+        assert!(matches!(
+            cube.failure,
+            Some(CubemapFailure::Texture(TextureAssetError::ArchiveIndex(
+                vformats::ArchiveIndexLimit {
+                    kind: vformats::ArchiveIndexLimitKind::Entries,
+                    ..
+                }
+            )))
+        ));
+        assert!(cube.source_metadata().is_none());
+
+        assert_eq!(strict.selected_reloadable_paths(), vec![path]);
         assert_eq!(strict.archive_index_stats().archives, 0);
-        let admitted = strict.with_texture_admissions(strict.admit_texture_requests(plan));
+        let admitted = &strict;
         let cube = admitted.resolve_named_cubemap("test/cube", 0).unwrap();
         assert_eq!(
             cube.load_outcome(),
             TextureLoadOutcome::SourceBudgetRejected
         );
         assert_eq!(cube.resolution, CubemapResolution::Authored);
-        assert_eq!(admitted.selected_texture_paths(), vec![path]);
+        assert_eq!(admitted.selected_reloadable_paths(), vec![path]);
 
         let wide = MaterialResolver::with_pakfile_source(addon, None, pak);
         let cube = wide.resolve_named_cubemap("test/cube", 0).unwrap();
@@ -308,4 +183,87 @@ fn rejected_cold_and_warm_pak_indices_preserve_named_state_without_fallback() {
         assert_eq!(cube.resolution, CubemapResolution::Authored);
         assert_eq!(cube.source_metadata().unwrap().version_minor, Some(5));
     }
+}
+
+#[test]
+fn invalid_authored_cube_reuses_default_source_and_keeps_metadata() {
+    let resolver = resolver(Some(b"FAIL".to_vec()), Some(modern_cube()));
+    let cube = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
+    assert!(matches!(
+        cube.resolution,
+        CubemapResolution::Default {
+            authored_failure: CubemapFailure::InvalidVtf(VtfError::BadMagic)
+        }
+    ));
+    assert_eq!(cube.effective_path.as_deref(), Some(DEFAULT_CUBEMAP));
+    assert_eq!(cube.source_metadata().unwrap().version_minor, Some(5));
+    assert_eq!(
+        cube.source_metadata().unwrap().flags,
+        Some(texture_flags::ENVMAP)
+    );
+    assert_eq!(cube.load_outcome(), TextureLoadOutcome::Loaded);
+    assert!(cube.resident().is_none());
+    let again = resolver.resolve_named_cubemap("test/cube", 0).unwrap();
+    let (source, request) = cube.on_demand().unwrap();
+    assert!(Arc::ptr_eq(source, again.on_demand().unwrap().0));
+    assert_eq!(source.page_cost(request).unwrap().resident_bytes, 504);
+    assert_eq!(request.faces, 0..6);
+    assert_eq!(request.mip_count, 3);
+    assert_eq!(cube.read_for_test().byte_len(), 504);
+}
+
+#[test]
+fn per_page_rejection_never_substitutes_an_authored_cube_and_also_applies_to_default() {
+    for authored in [modern_cube(), b"FAIL".to_vec()] {
+        let resolver = resolver(Some(authored.clone()), Some(modern_cube()));
+        let strict = resolver.with_texture_resource_limit(503);
+        let cube = strict.resolve_named_cubemap("test/cube", 0).unwrap();
+        assert_eq!(cube.load_outcome(), TextureLoadOutcome::QualityRejected);
+        assert!(matches!(
+            cube.failure,
+            Some(CubemapFailure::Texture(TextureAssetError::Vtf(
+                VtfError::DecodedTooLarge {
+                    size: 504,
+                    max: 503
+                }
+            )))
+        ));
+        assert_eq!(
+            matches!(cube.resolution, CubemapResolution::Authored),
+            authored != b"FAIL"
+        );
+        if authored != b"FAIL" {
+            assert!(
+                !strict
+                    .selected_reloadable_paths()
+                    .iter()
+                    .any(|path| path.contains("defaultcubemap"))
+            );
+        }
+        let recovered = resolver
+            .with_texture_resource_limit(504)
+            .resolve_named_cubemap("test/cube", 0)
+            .unwrap();
+        assert_eq!(recovered.load_outcome(), TextureLoadOutcome::Loaded);
+    }
+}
+
+#[test]
+fn hdr_and_invalid_frame_failures_never_select_default() {
+    let resolver = resolver(Some(modern_cube()), Some(modern_cube()));
+    assert!(matches!(
+        resolver.resolve_named_cubemap("test/cube", 1),
+        Err(CubemapFailure::Frame {
+            requested: 1,
+            count: 1
+        })
+    ));
+    assert!(matches!(
+        resolver.resolve_named_cubemap("test/cube.hdr", 0),
+        Err(CubemapFailure::UnsupportedHdr)
+    ));
+    assert_eq!(
+        resolver.selected_reloadable_paths(),
+        vec!["materials/test/cube.vtf"]
+    );
 }

@@ -534,10 +534,9 @@ impl App {
         let schedule = ctx
             .clone()
             .spawn_blocking_detached("simulate-toast", move |_| {
-                let transaction = ctx.begin_transaction();
                 let task = ctx.create_task(TaskKind::OverlayExtract, TransactionStatus::Extracting);
                 task.total(SIMULATED_TOTAL_BYTES);
-                ctx.correlate_backend_transaction(transaction.id(), task);
+                let transaction = ctx.begin_correlated_transaction(task);
 
                 let last_step = match kind {
                     SimulatedToast::Error => 40,

@@ -35,13 +35,10 @@ pub mod sprite_sheet;
 pub use sprite_sheet::{
     DEFAULT_SPRITE_SHEET_FRAMES, DEFAULT_SPRITE_SHEET_METADATA_BYTES, SpriteSheetBudget,
 };
+mod reloadable;
 mod surface;
 mod texture;
 mod texture_asset;
-mod texture_budget;
-pub use texture_budget::DecodedTextureBudget;
-mod reloadable;
-mod texture_plan;
 mod texture_source;
 use reloadable::TexturePage;
 mod page_cache;
@@ -54,7 +51,6 @@ pub use reloadable::{
     TexturePageLimits, TextureSourceId,
 };
 mod texture_working;
-pub use texture_source::EncodedTextureBudget;
 
 pub use texture_working::TextureWorkingBudget;
 mod water;
@@ -84,12 +80,11 @@ pub use texture::decode_vtf_rgba;
 use texture::push_matching_path;
 #[cfg(test)]
 use texture::resolved_bc_texture;
+use texture_asset::TextureSourceError;
 pub use texture_asset::{
     ResidentTexture, ResidentTextureLayer, ResidentTextureMip, TextureAssetError, TextureBytes,
     TextureMetadata, TextureResidency, TextureResidentId, TextureStorage,
 };
-use texture_asset::{TextureAssetCache, TextureSourceError};
-pub use texture_plan::{TextureAdmissions, TextureRequestCost, TextureRequestPlan};
 
 use sibling_gma::{SiblingGmaIndex, SiblingGmaPath};
 #[cfg(test)]
@@ -117,25 +112,16 @@ pub const DEFAULT_WATER_FOG_LINEAR: Vec3 = Vec3::new(0.03, 0.10, 0.10);
 const ENVMAP_FALLBACK_RGBA: [u8; 4] = [128, 128, 128, 255];
 const NATIVE_ERROR_TEXTURE_FLAGS: u32 = 0x0008_0000;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum TextureLoading {
-    #[default]
-    Resident,
-    OnDemand,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureLoadOutcome {
     Loaded,
     Generated,
     MissingSource,
     InvalidSource,
-    InvalidPayload,
     QualityRejected,
     SourceBudgetRejected,
     SourceUnavailable,
     Unsupported,
-    Deferred,
     Unplanned,
 }
 
@@ -147,16 +133,12 @@ impl TextureLoadOutcome {
                 | Self::SourceBudgetRejected
                 | Self::SourceUnavailable
                 | Self::Unsupported
-                | Self::Deferred
                 | Self::Unplanned
         )
     }
 
     const fn uses_native_error_texture(self) -> bool {
-        matches!(
-            self,
-            Self::MissingSource | Self::InvalidSource | Self::InvalidPayload
-        )
+        matches!(self, Self::MissingSource | Self::InvalidSource)
     }
 }
 
@@ -184,6 +166,17 @@ pub struct ResolvedTextureMipRef<'a> {
 }
 
 impl ResolvedTexture {
+    #[cfg(test)]
+    pub(crate) fn read_for_test(&self) -> &Arc<ResidentTexture> {
+        self.resident.read_for_test()
+    }
+    #[cfg(test)]
+    pub(crate) fn materialized_for_test(&self) -> Self {
+        let mut texture = self.clone();
+        texture.resident = TextureResidency::Resident(Arc::clone(self.read_for_test()));
+        texture
+    }
+
     fn rgba(
         rgba: Vec<u8>,
         width: u32,
@@ -302,12 +295,10 @@ impl ResolvedTexture {
     fn dimensions(&self) -> [u32; 2] {
         match &self.resident {
             TextureResidency::Resident(resident) => resident.layers()[0].mips[0].dimensions,
-            TextureResidency::Deferred(_) | TextureResidency::OnDemand { .. } => {
-                self.resident.dimensions(
-                    self.source_metadata()
-                        .expect("deferred image retains source metadata"),
-                )
-            }
+            TextureResidency::OnDemand { .. } => self.resident.dimensions(
+                self.source_metadata()
+                    .expect("deferred image retains source metadata"),
+            ),
         }
     }
     pub(crate) fn flags(&self) -> Option<u32> {
@@ -335,7 +326,7 @@ impl ResolvedTexture {
     }
     #[cfg(test)]
     pub(crate) fn rgba_bytes(&self) -> Option<&[u8]> {
-        let resident = self.resident()?;
+        let resident = self.read_for_test();
         matches!(resident.id().storage, TextureStorage::Rgba8)
             .then(|| resident.layers()[0].mips[0].bytes.as_slice())
     }
@@ -539,16 +530,12 @@ struct ResolverConfig {
     hardware_profile: profile::HardwareProfile,
     pakfile: Option<Arc<PakSource>>,
     decoded_texture_max_dimension: Option<u32>,
-    decoded_texture_budget: Option<Arc<DecodedTextureBudget>>,
-    encoded_texture_budget: Option<Arc<EncodedTextureBudget>>,
     texture_working_budget: Option<Arc<TextureWorkingBudget>>,
     texture_source_working_budget: Option<Arc<TextureWorkingBudget>>,
     texture_decoder_limit: Option<usize>,
     texture_resource_limit: Option<usize>,
     sprite_sheet_budget: Arc<SpriteSheetBudget>,
     bc_textures: BcTextures,
-    texture_access: texture_plan::TextureAccess,
-    texture_loading: TextureLoading,
     single_texture_mip: bool,
 }
 
@@ -571,7 +558,6 @@ struct ResolverShared {
     sibling_gmas: crate::preparation::FlightCell<Arc<SiblingGmaIndex>>,
     game_vpks: crate::preparation::FlightCell<Arc<IndexedVpks>>,
     material_definitions: MaterialDefinitionCache,
-    texture_assets: TextureAssetCache,
     reloadable_sources: reloadable::TextureSourceCache,
     sound_scripts: crate::preparation::FlightCell<SoundScriptLibrary>,
     resolved_sound_cache: Mutex<HashMap<String, Option<ResolvedSoundReference>>>,
@@ -845,8 +831,6 @@ impl MaterialResolver {
                 hardware_profile: profile::HardwareProfile::LDR,
                 pakfile: None,
                 decoded_texture_max_dimension: None,
-                decoded_texture_budget: None,
-                encoded_texture_budget: None,
                 texture_working_budget: None,
                 texture_source_working_budget: None,
                 texture_decoder_limit: None,
@@ -856,8 +840,6 @@ impl MaterialResolver {
                     DEFAULT_SPRITE_SHEET_METADATA_BYTES,
                 )),
                 bc_textures: BcTextures::RetainAuthored,
-                texture_access: texture_plan::TextureAccess::Direct,
-                texture_loading: TextureLoading::Resident,
                 single_texture_mip: false,
             },
             shared: Arc::new(ResolverShared {
@@ -872,7 +854,6 @@ impl MaterialResolver {
                 sibling_gmas: Default::default(),
                 game_vpks: Default::default(),
                 material_definitions: MaterialDefinitionCache::default(),
-                texture_assets: TextureAssetCache::default(),
                 reloadable_sources: Default::default(),
                 sound_scripts: Default::default(),
                 resolved_sound_cache: Mutex::new(HashMap::new()),
@@ -960,13 +941,6 @@ impl MaterialResolver {
     pub(crate) fn with_decoded_texture_max_dimension(&self, max_dimension: u32) -> Self {
         self.variant(ResolverConfig {
             decoded_texture_max_dimension: Some(max_dimension.max(1)),
-            ..self.config.clone()
-        })
-    }
-
-    pub(crate) fn with_decoded_texture_budget(&self, budget: Arc<DecodedTextureBudget>) -> Self {
-        self.variant(ResolverConfig {
-            decoded_texture_budget: Some(budget),
             ..self.config.clone()
         })
     }
@@ -1201,88 +1175,7 @@ impl MaterialResolver {
         policy: TextureFailurePolicy,
     ) -> Option<Arc<ResolvedTexture>> {
         let path = texture_path(base_texture)?;
-        if self.config.texture_loading == TextureLoading::OnDemand {
-            return self.resolve_on_demand_texture(&path, policy);
-        }
-        let selected = match self.selected_texture_asset(&path) {
-            Ok(selected) => selected,
-            Err(TextureSourceError::Missing) => {
-                return (policy == TextureFailurePolicy::NativeErrorTexture).then(|| {
-                    Arc::new(ResolvedTexture::unavailable(
-                        None,
-                        TextureLoadOutcome::MissingSource,
-                    ))
-                });
-            }
-            Err(TextureSourceError::SourceUnavailable(_)) => {
-                return Some(Arc::new(ResolvedTexture::unavailable(
-                    None,
-                    TextureLoadOutcome::SourceUnavailable,
-                )));
-            }
-            Err(TextureSourceError::Preparation { .. }) => {
-                return Some(Arc::new(ResolvedTexture::unavailable(
-                    None,
-                    TextureLoadOutcome::Unplanned,
-                )));
-            }
-            Err(
-                TextureSourceError::EncodedBudget { metadata, .. }
-                | TextureSourceError::WorkingBudget { metadata, .. },
-            ) => {
-                return Some(Arc::new(ResolvedTexture::unavailable(
-                    metadata,
-                    TextureLoadOutcome::SourceBudgetRejected,
-                )));
-            }
-            Err(TextureSourceError::Invalid {
-                error: TextureAssetError::Vtf(error),
-                ..
-            }) if policy == TextureFailurePolicy::NativeErrorTexture
-                && native_invalid_texture(&error) =>
-            {
-                log::warn!("texture {path}: {error}");
-                return Some(Arc::new(ResolvedTexture::unavailable(
-                    None,
-                    TextureLoadOutcome::InvalidSource,
-                )));
-            }
-            Err(error) => {
-                log::warn!("texture {path}: {error}");
-                return None;
-            }
-        };
-        log::debug!("texture {path}: selected {:?}", selected.origin);
-        let source_metadata = selected.asset.metadata_arc();
-        let outcome = self.resident_texture(&selected, 0..1, !self.bc_textures_enabled());
-        let texture = match outcome {
-            Ok(resident) => ResolvedTexture::from_resident(resident, source_metadata),
-            Err(error) => {
-                log::warn!("texture {path}: {error}");
-                if matches!(&error,TextureAssetError::Vtf(error) if native_invalid_texture(error))
-                    && policy != TextureFailurePolicy::NativeErrorTexture
-                {
-                    return None;
-                }
-                let outcome = match &error {
-                    TextureAssetError::Vtf(error) if native_invalid_texture(error) => {
-                        TextureLoadOutcome::InvalidPayload
-                    }
-                    TextureAssetError::DimensionLimit(_)
-                    | TextureAssetError::Budget
-                    | TextureAssetError::ResidentImageBudget { .. }
-                    | TextureAssetError::WorkingLimit { .. }
-                    | TextureAssetError::Vtf(vformats::vtf::VtfError::DecodedTooLarge { .. })
-                    | TextureAssetError::ImageCount(_) => TextureLoadOutcome::QualityRejected,
-                    TextureAssetError::UnplannedRequest | TextureAssetError::ClosedPlan => {
-                        TextureLoadOutcome::Unplanned
-                    }
-                    _ => TextureLoadOutcome::Unsupported,
-                };
-                ResolvedTexture::unavailable(Some(source_metadata), outcome)
-            }
-        };
-        Some(Arc::new(texture))
+        self.resolve_on_demand_texture(&path, policy)
     }
 
     fn envmap_fallback_texture(

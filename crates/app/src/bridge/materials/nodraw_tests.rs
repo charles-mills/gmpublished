@@ -32,40 +32,29 @@ fn no_draw_wins_over_blend_flags_without_selecting_or_planning_surface_images() 
         "Water",
         "LightmappedReflective",
     ] {
-        for on_demand in [false, true] {
-            let resolver = resolver(shader);
-            let resolver = if on_demand {
-                resolver.with_on_demand_textures()
-            } else {
-                resolver
-            };
-            let (resolved, plan) = resolver
-                .plan_texture_requests(|resolver| resolver.resolve_primary(&[], "test/hidden"));
-            let material = resolved
-                .material()
-                .expect("hidden material remains resolved");
-            assert_eq!(resolved.canonical_name(), Some("test/hidden"));
-            assert_eq!(material.render_mode, RenderMode::NoDraw, "{shader}");
-            assert!(material.texture.is_none());
-            assert!(material.texture2.is_none());
-            assert_eq!(plan.cost(), TextureRequestCost::default());
-            assert!(resolver.selected_texture_paths().is_empty());
-            assert!(resolver.selected_reloadable_paths().is_empty());
-            assert_eq!(resolver.resident_texture_asset_count(), 0);
-            if let Some(surface) = material.shader.surface() {
-                assert_eq!(surface.shader, shader);
-                assert_eq!(surface.parameters["$no_draw"], "1");
-                for alpha in [0.0, 0.5, 1.0] {
-                    assert_eq!(
-                        surface.draw_render_mode(Some(u32::MAX), alpha),
-                        RenderMode::NoDraw
-                    );
-                }
-            } else if shader == "Water" {
-                assert!(material.shader.water().is_some());
-            } else {
-                assert!(material.shader.mirror().is_some());
+        let resolver = resolver(shader);
+        let resolved = resolver.resolve_primary(&[], "test/hidden");
+        let material = resolved
+            .material()
+            .expect("hidden material remains resolved");
+        assert_eq!(resolved.canonical_name(), Some("test/hidden"));
+        assert_eq!(material.render_mode, RenderMode::NoDraw, "{shader}");
+        assert!(material.texture.is_none());
+        assert!(material.texture2.is_none());
+        assert!(resolver.selected_reloadable_paths().is_empty());
+        if let Some(surface) = material.shader.surface() {
+            assert_eq!(surface.shader, shader);
+            assert_eq!(surface.parameters["$no_draw"], "1");
+            for alpha in [0.0, 0.5, 1.0] {
+                assert_eq!(
+                    surface.draw_render_mode(Some(u32::MAX), alpha),
+                    RenderMode::NoDraw
+                );
             }
+        } else if shader == "Water" {
+            assert!(material.shader.water().is_some());
+        } else {
+            assert!(material.shader.mirror().is_some());
         }
     }
 }
@@ -111,7 +100,7 @@ fn hidden_water_preserves_volume_and_overlay_but_does_not_request_surface_textur
         ("materials/test/water.vmt", br#"Water { "$no_draw" "1" "$normalmap" "test/surface" "$fogcolor" "[0.1 0.2 0.3]" "$fogstart" "12" "$fogend" "345" "$underwateroverlay" "test/overlay" }"#.to_vec()),
         ("materials/test/overlay.vmt", br#"Refract { "$normalmap" "test/volume" }"#.to_vec()),
         ("materials/test/volume.vtf", crate::test_support::fixture_vtf_bytes(1,1,vformats::vtf::VtfFormat::Rgba8888,&[&[128,128,255,255]])),
-    ], Vec::new()).with_on_demand_textures();
+    ], Vec::new());
     let material = resolver
         .resolve_with_base2(&[], "test/water")
         .into_material()
@@ -134,7 +123,6 @@ fn hidden_water_preserves_volume_and_overlay_but_does_not_request_surface_textur
         resolver.selected_reloadable_paths(),
         ["materials/test/volume.vtf"]
     );
-    assert_eq!(resolver.resident_texture_asset_count(), 0);
 }
 
 #[test]
@@ -148,6 +136,6 @@ fn hidden_sky_skips_face_and_star_sources_without_changing_authored_shader() {
         assert_eq!(sky.shader, shader);
         assert!(sky.texture.is_none());
         assert!(sky.painted.is_none());
-        assert!(resolver.selected_texture_paths().is_empty());
+        assert!(resolver.selected_reloadable_paths().is_empty());
     }
 }

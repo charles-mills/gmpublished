@@ -1,9 +1,6 @@
 use gmpublished_backend::BackendEventSink;
 
-use super::{
-    PublishedFileId, TaskId, TransactionStatus, UiError, WorkshopDownloadTaskKind,
-    WorkshopSnapshotId,
-};
+use super::{PublishedFileId, TransactionStatus, UiError, WorkshopSnapshotId};
 use gmpublished_backend::AppDataSnapshot as BackendAppDataSnapshot;
 use gmpublished_backend::BackendEvent as BackendSinkEvent;
 use gmpublished_backend::DownloadStartedEvent as BackendDownloadStartedEvent;
@@ -126,6 +123,7 @@ pub enum BackendRuntimeEvent {
     InstalledAddonsRefreshed,
     DownloadStarted {
         transaction_id: TransactionId,
+        workshop_id: Option<PublishedFileId>,
         request_id: Option<WorkshopSnapshotId>,
     },
     ExtractionStarted {
@@ -160,7 +158,10 @@ impl BackendRuntimeEvent {
             Self::DownloadStarted { .. }
                 | Self::ExtractionStarted { .. }
                 | Self::Transaction(
-                    TransactionRuntimeEvent::Finished { .. }
+                    TransactionRuntimeEvent::Data {
+                        payload: TransactionPayload::SourcePath(_),
+                        ..
+                    } | TransactionRuntimeEvent::Finished { .. }
                         | TransactionRuntimeEvent::Error { .. }
                 )
         )
@@ -207,13 +208,8 @@ impl BackendRuntimeEventEffects {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BackendRuntimeAction {
-    DownloadTaskStarted {
-        kind: WorkshopDownloadTaskKind,
-        item_id: PublishedFileId,
-        task_id: TaskId,
-    },
-    DownloadFinished {
-        request_id: Option<WorkshopSnapshotId>,
+    SnapshotDownloaded {
+        request_id: WorkshopSnapshotId,
         item_id: PublishedFileId,
         installed_path: Option<PathBuf>,
         extracted_path: PathBuf,
@@ -288,6 +284,7 @@ impl From<BackendDownloadStartedEvent> for BackendRuntimeEvent {
     fn from(event: BackendDownloadStartedEvent) -> Self {
         Self::DownloadStarted {
             transaction_id: event.transaction_id,
+            workshop_id: event.workshop_id.map(PublishedFileId::from),
             request_id: event.request_id,
         }
     }
@@ -330,13 +327,6 @@ impl TransactionRuntimeEvent {
             | Self::IncrProgress { id, .. }
             | Self::ResetProgress { id } => *id,
         }
-    }
-
-    pub(super) fn is_bufferable_pre_start(&self) -> bool {
-        matches!(
-            self,
-            Self::Status { status, .. } if *status == TransactionStatus::Locating
-        )
     }
 
     pub(super) const fn is_terminal(&self) -> bool {

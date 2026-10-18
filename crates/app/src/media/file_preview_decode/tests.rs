@@ -8,7 +8,7 @@ use std::sync::Arc;
 use vformats::vtf::VtfFormat;
 
 use super::*;
-use crate::bridge::materials::{DecodedTextureBudget, TextureLoadOutcome};
+use crate::bridge::materials::TextureLoadOutcome;
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::generation::Generation;
 use crate::media::preview_model::{MapStats, ModelVertex};
@@ -934,36 +934,6 @@ fn painted_material_defaults_and_parameters_are_independent_of_lua_controller_de
 }
 
 #[test]
-fn decoded_texture_budget_counts_deduped_bytes_once() {
-    let archive = PreviewArchive::from_gma(
-        GmaFixtureBuilder::new("Map Texture Budget Fixture")
-            .entry(
-                "materials/test/first.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/shared" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/second.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/shared" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/shared.vtf",
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[64; 4], &[64; 16]]),
-            )
-            .build(),
-    )
-    .expect("fixture archive should load");
-    let budget = Arc::new(DecodedTextureBudget::new(20));
-    let resolver = MaterialResolver::new(Arc::new(archive), None)
-        .with_decoded_texture_budget(Arc::clone(&budget));
-
-    assert!(resolver.resolve(&[], "test/first").is_some());
-    assert!(resolver.resolve(&[], "test/second").is_some());
-
-    assert_eq!(budget.decoded_bytes(), 20);
-    assert_eq!(budget.rejected_textures(), 0);
-}
-
-#[test]
 fn material_slots_preserve_missing_identity_and_canonical_error_state() {
     use crate::bridge::materials::{MaterialResolutionOutcome, SurfaceFamily};
     let resolver = MaterialResolver::prop_lighting_fixture(
@@ -1017,86 +987,6 @@ fn material_slots_preserve_missing_identity_and_canonical_error_state() {
 }
 
 #[test]
-fn decoded_texture_budget_counts_full_mip_chain_bytes() {
-    let archive = PreviewArchive::from_gma(
-        GmaFixtureBuilder::new("Map Texture Budget Fixture")
-            .entry(
-                "materials/test/first.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/first" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/first.vtf",
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[10; 4], &[10; 16]]),
-            )
-            .build(),
-    )
-    .expect("fixture archive should load");
-    let budget = Arc::new(DecodedTextureBudget::new(16));
-    let resolver = MaterialResolver::new(Arc::new(archive), None)
-        .with_decoded_texture_budget(Arc::clone(&budget));
-
-    assert_eq!(
-        resolver.resolve(&[], "test/first").unwrap().load_outcome(),
-        TextureLoadOutcome::QualityRejected
-    );
-
-    assert_eq!(budget.decoded_bytes(), 0);
-    assert_eq!(budget.rejected_textures(), 1);
-    let table = resolve_map_material_slots_serial(&["test/first".to_owned()], &resolver);
-    assert_eq!(table.resolved_count(), 0);
-    assert!(!table.slots()[0].has_resolved_base());
-}
-
-#[test]
-fn decoded_texture_budget_stops_and_counts_rejected_textures() {
-    let archive = PreviewArchive::from_gma(
-        GmaFixtureBuilder::new("Map Texture Budget Fixture")
-            .entry(
-                "materials/test/first.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/first" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/second.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/second" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/third.vmt",
-                br#""LightmappedGeneric" { "$basetexture" "test/third" }"#.to_vec(),
-            )
-            .entry(
-                "materials/test/first.vtf",
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[10; 4], &[10; 16]]),
-            )
-            .entry(
-                "materials/test/second.vtf",
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[20; 4], &[20; 16]]),
-            )
-            .entry(
-                "materials/test/third.vtf",
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[30; 4], &[30; 16]]),
-            )
-            .build(),
-    )
-    .expect("fixture archive should load");
-    let budget = Arc::new(DecodedTextureBudget::new(20));
-    let resolver = MaterialResolver::new(Arc::new(archive), None)
-        .with_decoded_texture_budget(Arc::clone(&budget));
-
-    assert!(resolver.resolve(&[], "test/first").is_some());
-    assert_eq!(
-        resolver.resolve(&[], "test/second").unwrap().load_outcome(),
-        TextureLoadOutcome::QualityRejected
-    );
-    assert_eq!(
-        resolver.resolve(&[], "test/third").unwrap().load_outcome(),
-        TextureLoadOutcome::QualityRejected
-    );
-
-    assert_eq!(budget.decoded_bytes(), 20);
-    assert_eq!(budget.rejected_textures(), 2);
-}
-
-#[test]
 fn parallel_material_resolution_matches_serial_slots_in_order() {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Parallel Material Fixture")
@@ -1146,60 +1036,6 @@ fn parallel_material_resolution_matches_serial_slots_in_order() {
         parallel.water_material_count(),
         serial.water_material_count()
     );
-}
-
-#[test]
-fn parallel_material_resolution_respects_atomic_texture_budget() {
-    let mut builder = GmaFixtureBuilder::new("Parallel Budget Fixture");
-    for index in 0..4 {
-        builder = builder
-            .entry(
-                format!("materials/test/{index}.vmt"),
-                format!(r#""LightmappedGeneric" {{ "$basetexture" "test/{index}" }}"#).into_bytes(),
-            )
-            .entry(
-                format!("materials/test/{index}.vtf"),
-                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[index; 4], &[index; 16]]),
-            );
-    }
-    let archive = PreviewArchive::from_gma(builder.build()).expect("fixture archive should load");
-    let budget = Arc::new(DecodedTextureBudget::new(40));
-    let resolver = MaterialResolver::new(Arc::new(archive), None)
-        .with_decoded_texture_budget(Arc::clone(&budget));
-    let names = (0..4)
-        .map(|index| format!("test/{index}"))
-        .collect::<Vec<_>>();
-
-    let resolved = resolve_map_material_slots_parallel(&names, &resolver);
-
-    assert!(budget.decoded_bytes() <= 40);
-    assert_eq!(
-        resolved
-            .slots()
-            .iter()
-            .filter(|slot| slot
-                .texture
-                .as_ref()
-                .is_some_and(|texture| texture.load_outcome() == TextureLoadOutcome::Loaded))
-            .count(),
-        2
-    );
-    assert_eq!(
-        resolved
-            .slots()
-            .iter()
-            .filter(|slot| slot.texture.as_ref().is_some_and(
-                |texture| texture.load_outcome() == TextureLoadOutcome::QualityRejected
-            ))
-            .count(),
-        2
-    );
-    assert!(resolved.slots().iter().all(|slot| {
-        slot.texture
-            .as_ref()
-            .is_some_and(|texture| texture.has_effective_base_texture())
-    }));
-    assert_eq!(budget.rejected_textures(), 2);
 }
 
 #[test]
@@ -2651,7 +2487,7 @@ fn static_decal_mapping_uses_original_dimensions_after_stored_mip_selection() {
     assert_eq!([texture.width(), texture.height()], [1, 1]);
     assert_eq!(texture.original_dimensions(), (64, 32));
     assert_eq!(texture.load_outcome(), TextureLoadOutcome::Loaded);
-    assert_eq!(texture.resident().unwrap().id().first_source_mip, 6);
+    assert_eq!(texture.read_for_test().id().first_source_mip, 6);
     assert_eq!(texture.rgba_bytes(), Some(&[17, 31, 47, 255][..]));
     let vertices = &world.overlays[0].vertices;
     let max = vertices

@@ -107,7 +107,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::TextSizeChanged(value) => state
             .preview_text_size(value)
-            .map(Effect::PreviewApplied)
+            .map(|_| Effect::SettingsChanged)
             .into_iter()
             .collect(),
         Message::TextSizeIdle(now) => {
@@ -134,6 +134,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             let motion_mutation =
                 state.scalar_mutation(super::SettingsMutation::ReduceMotion(false));
             effects.extend(mutation_effect(motion_mutation, state));
+            effects.truncate(1);
             effects
         }
         Message::ThemeSelected(option) => {
@@ -193,13 +194,13 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::ResetConfirmed => state
             .begin_reset()
-            .map(Effect::ResetRunRequested)
+            .map(|_| Effect::PersistenceRequested)
             .into_iter()
             .collect(),
         Message::SaveCompleted(generation, result) => {
             let snapshot = state.apply_save_completed(generation, result.map(|snapshot| *snapshot));
             snapshot
-                .map(|snapshot| Effect::SnapshotApplied(Box::new(snapshot)))
+                .map(|_| Effect::SnapshotApplied)
                 .into_iter()
                 .collect()
         }
@@ -209,7 +210,7 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
                 result.map(|snapshot| snapshot.map(|snapshot| *snapshot)),
             );
             snapshot
-                .map(|snapshot| Effect::SnapshotApplied(Box::new(snapshot)))
+                .map(|_| Effect::SnapshotApplied)
                 .into_iter()
                 .collect()
         }
@@ -232,7 +233,10 @@ fn close_effects(state: &mut State) -> Vec<Effect> {
 
 fn mutation_effect(mutation: Option<super::SettingsMutation>, state: &mut State) -> Vec<Effect> {
     mutation
-        .map(|mutation| Effect::MutationApplied(state.apply_save_started(), mutation))
+        .map(|mutation| {
+            state.apply_save_started(mutation);
+            Effect::SettingsChanged
+        })
         .into_iter()
         .collect()
 }
@@ -290,7 +294,9 @@ fn keyboard_event(
 
 #[cfg(test)]
 mod tests {
+    use crate::bridge::ui_error::UiError;
     use crate::bridge::{AppPaths, Settings, SystemColorScheme};
+    use crate::generation::Generation;
 
     use super::super::state::{
         ColorSetting, PathSetting, ResetAction, SettingsMutation, SettingsSnapshot, Tab,
@@ -347,17 +353,14 @@ mod tests {
         for value in [110, 125, 150] {
             assert_eq!(
                 update(&mut state, Message::TextSizeChanged(value)),
-                vec![Effect::PreviewApplied(SettingsMutation::TextSize(value))]
+                vec![Effect::SettingsChanged]
             );
         }
         assert_eq!(state.save_generation_for_test(), generation);
         assert_eq!(state.settings().ui.text_size_percent, 150);
         assert_eq!(
             update(&mut state, Message::TextSizeCommitted),
-            vec![Effect::MutationApplied(
-                generation.next(),
-                SettingsMutation::TextSize(150)
-            )]
+            vec![Effect::SettingsChanged]
         );
         assert!(update(&mut state, Message::TextSizeCommitted).is_empty());
     }
@@ -427,7 +430,7 @@ mod tests {
                 Message::TextSizeIdle(now + std::time::Duration::from_millis(400))
             )
             .as_slice(),
-            [Effect::MutationApplied(_, SettingsMutation::TextSize(125))]
+            [Effect::SettingsChanged]
         ));
         assert!(!state.has_text_preview());
         assert!(
@@ -453,13 +456,10 @@ mod tests {
             Message::SaveCompleted(generation, Ok(Box::new(saved))),
         );
         assert_eq!(state.settings().ui.text_size_percent, 150);
-        assert!(
-            matches!(effects.as_slice(), [Effect::SnapshotApplied(snapshot)]
-            if snapshot.settings.ui.text_size_percent == 150)
-        );
+        assert!(matches!(effects.as_slice(), [Effect::SnapshotApplied]));
         assert!(matches!(
             update(&mut state, Message::TextSizeCommitted).as_slice(),
-            [Effect::MutationApplied(_, SettingsMutation::TextSize(150))]
+            [Effect::SettingsChanged]
         ));
     }
 
@@ -471,10 +471,7 @@ mod tests {
             update(&mut state, Message::TextSizeChanged(125));
             assert!(matches!(
                 update(&mut state, close).as_slice(),
-                [
-                    Effect::MutationApplied(_, SettingsMutation::TextSize(125)),
-                    Effect::ModalCloseRequested,
-                ]
+                [Effect::SettingsChanged, Effect::ModalCloseRequested,]
             ));
         }
     }
@@ -486,152 +483,194 @@ mod tests {
         update(&mut state, Message::TextSizeChanged(125));
         assert!(matches!(
             update(&mut state, Message::CloseFinished).as_slice(),
-            [Effect::MutationApplied(_, SettingsMutation::TextSize(125))]
+            [Effect::SettingsChanged]
         ));
         assert!(!state.open());
     }
 
+    fn complete_next_save(state: &mut State, durable: &mut SettingsSnapshot) -> Generation {
+        let Some(super::super::PersistenceCommand::Save(generation, mutation)) =
+            state.next_persistence()
+        else {
+            panic!("expected queued save");
+        };
+        super::super::apply_settings_mutation(&mut durable.settings, mutation);
+        update(
+            state,
+            Message::SaveCompleted(generation, Ok(Box::new(durable.clone()))),
+        );
+        generation
+    }
+
     #[test]
-    fn durable_display_override_survives_drafts_close_and_failed_writes() {
+    fn optimistic_preferences_survive_drafts_close_failed_writes_and_reopen() {
         let mut state = State::default();
         open_settings(&mut state);
-        assert_eq!(state.display_preferences_override(), None);
         update(
             &mut state,
             Message::DensitySelected(crate::bridge::UiDensity::Compact),
         );
+        let first = state.next_persistence();
         update(&mut state, Message::TextSizeChanged(125));
         update(&mut state, Message::TextSizeCommitted);
-        let generation = state.save_generation_for_test();
-        let expected = Some((crate::bridge::UiDensity::Compact, 125));
         update(
             &mut state,
             Message::PathEdited(PathSetting::Temp, "/tmp/draft".into()),
         );
-        assert_eq!(state.display_preferences_override(), expected);
         update(&mut state, Message::CloseFinished);
-        assert_eq!(state.display_preferences_override(), expected);
+        let Some(super::super::PersistenceCommand::Save(generation, _)) = first else {
+            panic!("save");
+        };
         update(
             &mut state,
             Message::SaveCompleted(
                 generation,
-                Err(crate::bridge::ui_error::UiError::new(
-                    gmpublished_backend::error_keys::IO_ERROR,
-                )),
+                Err(UiError::new(gmpublished_backend::error_keys::IO_ERROR)),
             ),
         );
-        assert_eq!(state.display_preferences_override(), expected);
-        assert_eq!(state.status_key(), Some("settings-save-failed"));
-        let mut durable = test_snapshot();
-        durable.settings.ui.density = crate::bridge::UiDensity::Compact;
-        durable.settings.ui.text_size_percent = 125;
-        update(
-            &mut state,
-            Message::SaveCompleted(generation, Ok(Box::new(durable))),
+        state.open_with_snapshot(test_snapshot());
+        assert_eq!(
+            state.settings().ui.density,
+            crate::bridge::UiDensity::Compact
         );
-        assert_eq!(state.display_preferences_override(), None);
+        assert_eq!(state.settings().ui.text_size_percent, 125);
+        let mut durable = test_snapshot();
+        complete_next_save(&mut state, &mut durable);
+        assert_eq!(
+            state.settings().ui.density,
+            crate::bridge::UiDensity::Compact
+        );
+        durable.settings.ui.density = crate::bridge::UiDensity::Compact;
+        state.observe_snapshot(durable);
+        assert!(state.saves_acknowledged_for_test());
     }
 
     #[test]
-    fn unrelated_save_cannot_revert_a_pending_durable_display_mutation() {
+    fn older_completions_and_external_snapshots_replay_the_entire_pending_queue() {
         let mut state = State::default();
         open_settings(&mut state);
         update(
             &mut state,
             Message::DensitySelected(crate::bridge::UiDensity::Compact),
         );
-        let display_generation = state.save_generation_for_test();
         update(&mut state, Message::SoundsToggled(false));
-        let latest_generation = state.save_generation_for_test();
-        let mut unrelated = test_snapshot();
-        unrelated.settings.backend.sounds = false;
-        update(
-            &mut state,
-            Message::SaveCompleted(latest_generation, Ok(Box::new(unrelated))),
-        );
-        assert_eq!(
-            state.settings().ui.density,
-            crate::bridge::UiDensity::Compact
-        );
-        assert!(state.display_preferences_override().is_some());
+        update(&mut state, Message::ReduceMotionToggled(true));
         let mut durable = test_snapshot();
-        durable.settings.ui.density = crate::bridge::UiDensity::Compact;
-        update(
-            &mut state,
-            Message::SaveCompleted(display_generation, Ok(Box::new(durable))),
-        );
-        assert!(state.display_preferences_override().is_some());
-        let mut durable = test_snapshot();
-        durable.settings.ui.density = crate::bridge::UiDensity::Compact;
-        durable.settings.backend.sounds = false;
-        state.reconcile_display_preferences(&durable.settings);
-        assert_eq!(state.display_preferences_override(), None);
+        complete_next_save(&mut state, &mut durable);
+        state.observe_snapshot(test_snapshot());
+        // The external snapshot may acknowledge older values; pending fields still win.
         assert!(!state.settings().backend.sounds);
+        assert!(state.settings().ui.reduce_motion);
+        complete_next_save(&mut state, &mut durable);
+        complete_next_save(&mut state, &mut durable);
+        assert!(state.saves_acknowledged_for_test());
+        assert!(state.settings().ui.reduce_motion);
     }
 
     #[test]
-    fn reduced_motion_updates_immediately_and_survives_stale_snapshots() {
+    fn reduced_motion_is_live_and_a_matching_snapshot_does_not_acknowledge_a_newer_write() {
         let mut state = State::default();
         open_settings(&mut state);
-        let effects = update(&mut state, Message::ReduceMotionToggled(true));
-        assert!(state.settings().ui.reduce_motion);
-        assert_eq!(state.reduce_motion_override(), Some(true));
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::MutationApplied(
-                _,
-                SettingsMutation::ReduceMotion(true)
-            )]
-        ));
-        assert!(update(&mut state, Message::ReduceMotionToggled(true)).is_empty());
-        state.reconcile_display_preferences(&Settings::default());
-        assert_eq!(state.reduce_motion_override(), Some(true));
+        for enabled in [true, false, true] {
+            update(&mut state, Message::ReduceMotionToggled(enabled));
+        }
+        let mut durable = test_snapshot();
+        complete_next_save(&mut state, &mut durable);
         state.close();
-        state.open_with_snapshot(test_snapshot());
+        state.open_with_snapshot(durable.clone());
         assert!(state.settings().ui.reduce_motion);
-        let mut durable = test_snapshot();
-        durable.settings.ui.reduce_motion = true;
-        state.reconcile_display_preferences(&durable.settings);
-        assert_eq!(state.reduce_motion_override(), None);
+        assert!(!state.saves_acknowledged_for_test());
+        complete_next_save(&mut state, &mut durable);
+        assert!(state.settings().ui.reduce_motion);
+        complete_next_save(&mut state, &mut durable);
+        assert!(state.saves_acknowledged_for_test());
     }
 
     #[test]
-    fn unrelated_or_failed_save_cannot_revert_pending_motion_preference() {
+    fn a_newer_successful_write_supersedes_a_failed_value_for_the_same_setting() {
         let mut state = State::default();
         open_settings(&mut state);
         update(&mut state, Message::ReduceMotionToggled(true));
-        update(&mut state, Message::SoundsToggled(false));
-        let latest = state.save_generation_for_test();
-        let mut unrelated = test_snapshot();
-        unrelated.settings.backend.sounds = false;
-        state.apply_save_completed(latest, Ok(unrelated));
-        assert!(state.settings().ui.reduce_motion);
-        assert_eq!(state.reduce_motion_override(), Some(true));
-        state.apply_save_completed(
-            latest,
-            Err(crate::bridge::ui_error::UiError::new(
-                gmpublished_backend::error_keys::IO_ERROR,
-            )),
+        let Some(super::super::PersistenceCommand::Save(generation, _)) = state.next_persistence()
+        else {
+            panic!("save");
+        };
+        update(
+            &mut state,
+            Message::SaveCompleted(
+                generation,
+                Err(UiError::new(gmpublished_backend::error_keys::IO_ERROR)),
+            ),
         );
-        assert_eq!(state.reduce_motion_override(), Some(true));
-        let mut durable = test_snapshot();
-        durable.settings.ui.reduce_motion = true;
-        state.apply_save_completed(latest, Ok(durable));
-        assert_eq!(state.reduce_motion_override(), None);
+        assert_eq!(state.status_key(), Some("settings-save-failed"));
+        state.observe_snapshot(test_snapshot());
+        assert!(state.settings().ui.reduce_motion);
+        update(&mut state, Message::ReduceMotionToggled(false));
+        complete_next_save(&mut state, &mut test_snapshot());
+        assert!(!state.settings().ui.reduce_motion);
+        assert!(state.saves_acknowledged_for_test());
     }
 
     #[test]
-    fn superseded_motion_save_does_not_clear_latest_toggle_protection() {
+    fn successful_color_edit_overrides_only_its_field_in_a_failed_theme_write() {
         let mut state = State::default();
         open_settings(&mut state);
-        update(&mut state, Message::ReduceMotionToggled(true));
-        let older = state.save_generation_for_test();
-        update(&mut state, Message::ReduceMotionToggled(false));
-        update(&mut state, Message::ReduceMotionToggled(true));
+        update(
+            &mut state,
+            Message::ThemeSelected(crate::bridge::ThemePreset::Light),
+        );
+        let Some(super::super::PersistenceCommand::Save(generation, _)) = state.next_persistence()
+        else {
+            panic!("save");
+        };
+        update(
+            &mut state,
+            Message::SaveCompleted(
+                generation,
+                Err(UiError::new(gmpublished_backend::error_keys::IO_ERROR)),
+            ),
+        );
+        update(
+            &mut state,
+            Message::ColorEdited(ColorSetting::Neutral, "#123456".into()),
+        );
+        complete_next_save(&mut state, &mut test_snapshot());
+        assert_eq!(state.settings().backend.color_neutral, 0x123456);
+        assert_eq!(state.theme_preset(), crate::bridge::ThemePreset::Light);
+        assert!(!state.saves_acknowledged_for_test());
+    }
+
+    #[test]
+    fn reset_waits_for_queued_saves_and_remains_busy_when_reopened() {
+        let mut state = State::default();
+        open_settings(&mut state);
+        update(&mut state, Message::SoundsToggled(false));
+        update(&mut state, Message::TextSizeChanged(125));
+        update(&mut state, Message::TextSizeCommitted);
+        update(&mut state, Message::ResetRequested(ResetAction::Settings));
+        update(&mut state, Message::ResetConfirmed);
         let mut durable = test_snapshot();
-        durable.settings.ui.reduce_motion = true;
-        state.apply_save_completed(older, Ok(durable));
-        assert_eq!(state.reduce_motion_override(), Some(true));
+        complete_next_save(&mut state, &mut durable);
+        complete_next_save(&mut state, &mut durable);
+        assert_eq!(
+            state.next_persistence(),
+            Some(super::super::PersistenceCommand::Reset(
+                ResetAction::Settings
+            ))
+        );
+        assert_eq!(state.next_persistence(), None);
+        state.open_with_snapshot(durable);
+        assert!(state.reset_busy());
+        update(
+            &mut state,
+            Message::ResetCompleted(ResetAction::Settings, Ok(Some(Box::new(test_snapshot())))),
+        );
+        assert!(!state.reset_busy());
+        assert_eq!(state.settings().ui.text_size_percent, 100);
+        assert_eq!(
+            state.status_key(),
+            Some("settings-resets-reset-settings-done")
+        );
     }
 
     #[test]
@@ -656,26 +695,12 @@ mod tests {
         );
         assert_eq!(state.settings().ui.text_size_percent, 100);
         assert!(!state.settings().ui.reduce_motion);
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::MutationApplied(_, SettingsMutation::ReduceMotion(false))
-        )));
         assert_eq!(
             state.settings().ui.theme_preset,
             crate::bridge::ThemePreset::Light
         );
         assert!(!state.settings().backend.sounds);
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::MutationApplied(_, SettingsMutation::TextSize(100))
-        )));
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::MutationApplied(
-                _,
-                SettingsMutation::Density(crate::bridge::UiDensity::Comfortable)
-            )
-        )));
+        assert_eq!(effects, vec![Effect::SettingsChanged]);
     }
 
     #[test]
@@ -740,10 +765,10 @@ mod tests {
     }
 
     #[test]
-    fn a_save_completing_after_a_later_edit_is_discarded() {
+    fn an_older_completion_publishes_durable_changes_with_newer_edits_overlaid() {
         let mut state = State::default();
-        let stale = state.apply_save_started();
-        let current = state.apply_save_started();
+        let stale = state.apply_save_started(SettingsMutation::Sounds(false));
+        let current = state.apply_save_started(SettingsMutation::Sounds(true));
         assert_ne!(stale, current);
 
         let snapshot = test_snapshot();
@@ -751,10 +776,8 @@ mod tests {
             &mut state,
             Message::SaveCompleted(stale, Ok(Box::new(snapshot.clone()))),
         );
-        assert!(
-            effects.is_empty(),
-            "a superseded save must not re-publish its snapshot"
-        );
+        assert_eq!(effects, vec![Effect::SnapshotApplied]);
+        assert!(state.settings().backend.sounds);
 
         let effects = update(
             &mut state,
@@ -831,13 +854,7 @@ mod tests {
 
         let effects = update(&mut state, Message::SoundsToggled(enabled));
 
-        assert_eq!(
-            effects,
-            vec![Effect::MutationApplied(
-                state.save_generation_for_test(),
-                SettingsMutation::Sounds(enabled)
-            )]
-        );
+        assert_eq!(effects, vec![Effect::SettingsChanged]);
         assert_eq!(state.status_key(), Some("settings-saving"));
     }
 
@@ -866,13 +883,14 @@ mod tests {
         let mut state = State::default();
         let snapshot = test_snapshot();
 
-        let generation = state.save_generation_for_test();
+        let generation =
+            state.apply_save_started(SettingsMutation::Sounds(snapshot.settings.backend.sounds));
         let effects = update(
             &mut state,
-            Message::SaveCompleted(generation, Ok(Box::new(snapshot.clone()))),
+            Message::SaveCompleted(generation, Ok(Box::new(snapshot))),
         );
 
-        assert_eq!(effects, vec![Effect::SnapshotApplied(Box::new(snapshot))]);
+        assert_eq!(effects, vec![Effect::SnapshotApplied]);
 
         let effects = update(
             &mut state,
@@ -896,10 +914,7 @@ mod tests {
 
         let effects = update(&mut state, Message::ResetConfirmed);
 
-        assert_eq!(
-            effects,
-            vec![Effect::ResetRunRequested(ResetAction::Settings)]
-        );
+        assert_eq!(effects, vec![Effect::PersistenceRequested]);
         assert!(state.reset_busy());
     }
 }

@@ -46,21 +46,6 @@ impl SiblingGmaIndex {
             })
     }
 
-    pub(super) fn texture_decoder_working_bytes(
-        &self,
-        path: &ContentPath,
-    ) -> Result<usize, SourceError> {
-        let entry = self
-            .entries
-            .get(path.as_str())
-            .ok_or_else(|| SourceError::SiblingGma("entry vanished".to_owned()))?;
-        let archive = &self.archives[entry.archive_index];
-        match &archive.kind {
-            SiblingGmaArchiveKind::Plain { .. } => Ok(0),
-            SiblingGmaArchiveKind::LegacyBin { header, .. } => Ok(header.working_bytes),
-        }
-    }
-
     pub(super) fn reloadable_reader(
         &self,
         path: &ContentPath,
@@ -105,57 +90,6 @@ impl SiblingGmaIndex {
                 prefix: Arc::from([]),
             }))
         }
-    }
-
-    pub(super) fn texture_entry_range(
-        &self,
-        path: &ContentPath,
-        max_bytes: u64,
-        decoder_limit: usize,
-    ) -> Result<Vec<u8>, SourceError> {
-        let entry = self
-            .entries
-            .get(path.as_str())
-            .ok_or_else(|| SourceError::SiblingGma("entry vanished".to_owned()))?;
-        let archive = self
-            .archives
-            .get(entry.archive_index)
-            .ok_or_else(|| SourceError::SiblingGma("archive vanished".to_owned()))?;
-        let result = match (&archive.kind, &entry.location) {
-            (
-                SiblingGmaArchiveKind::Plain { path },
-                SiblingGmaEntryLocation::Plain { offset, len },
-            ) => {
-                return GmaView::open(path)
-                    .and_then(|view| view.read_payload_bytes(*offset, (*len).min(max_bytes)))
-                    .map_err(|error| SourceError::SiblingGma(error.to_string()));
-            }
-            (
-                SiblingGmaArchiveKind::LegacyBin { path, header, .. },
-                SiblingGmaEntryLocation::LegacyBin { offset, len },
-            ) => {
-                let mut reader = LegacyBinSource::open_matching(path, *header)
-                    .and_then(|source| source.into_decoder(decoder_limit))
-                    .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
-                let skipped = io::copy(&mut reader.by_ref().take(*offset), &mut io::sink())
-                    .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
-                if skipped != *offset {
-                    return Err(SourceError::SiblingGma(
-                        "truncated archive prefix".to_owned(),
-                    ));
-                }
-                let count = usize::try_from((*len).min(max_bytes))
-                    .map_err(|error| SourceError::SiblingGma(error.to_string()))?;
-                let mut bytes = vec![0; count];
-                reader.read_exact(&mut bytes).map(|()| bytes)
-            }
-            _ => {
-                return Err(SourceError::SiblingGma(
-                    "inconsistent entry location".to_owned(),
-                ));
-            }
-        };
-        result.map_err(|error| SourceError::SiblingGma(error.to_string()))
     }
 
     pub(super) fn entry_bytes(&self, path: &ContentPath) -> Result<Option<Vec<u8>>, SourceError> {
@@ -783,17 +717,13 @@ mod tests {
         let header = LegacyBinSource::open(&path).unwrap().header;
         let index = build_sibling_gma_index(&[SiblingGmaPath::legacy_bin(path.clone())]);
         let content = ContentPath::new("materials/a.vmt").unwrap();
-        assert_eq!(
-            index.texture_decoder_working_bytes(&content).unwrap(),
-            header.working_bytes
-        );
+        let reader = index.reloadable_reader(&content).unwrap();
+        assert_eq!(reader.decoder_working_bytes(), header.working_bytes);
         larger_dictionary(&path, header.bytes);
-        assert_eq!(
-            index.texture_decoder_working_bytes(&content).unwrap(),
-            header.working_bytes
-        );
-        assert!(
-            matches!(index.texture_entry_range(&content, 64, usize::MAX), Err(SourceError::SiblingGma(error)) if error == "legacy GMA header changed after indexing")
-        );
+        assert_eq!(reader.decoder_working_bytes(), header.working_bytes);
+        assert!(matches!(
+            reader.read_range(0..64.min(reader.len()), &Default::default()),
+            Err(super::super::TextureAssetError::SourceChanged)
+        ));
     }
 }

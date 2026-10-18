@@ -5,7 +5,7 @@ use gmpublished_backend::model_compile::{
     AnimationEvent, AnimationEventView, AnimationSettings, AnimationSettingsView, ModelBodygroup,
     ModelCollision, ModelInspection,
 };
-use gmpublished_backend::model_project::{ModelSkin, ModelStage};
+use gmpublished_backend::model_project::ModelSkin;
 
 use crate::generation::Generation;
 
@@ -289,7 +289,8 @@ pub struct State {
     pub(super) maps: Vec<MapChoice>,
     pub(super) map_generation: Option<Generation>,
     pub(super) selected_map: Option<MapChoice>,
-    pub(super) stage: Option<ModelStage>,
+    pub(super) workspace: super::workspace::Workspace,
+    pub(super) presentation: Option<super::workspace::Presentation>,
     pub(super) preview: Option<PreviewBuild>,
     pub(super) preview_for_stage: bool,
     pub(super) install_confirmation: bool,
@@ -301,8 +302,6 @@ pub struct State {
     pub(super) installed_models_error: Option<String>,
     pub(super) remove_installed_confirmation: Option<PathBuf>,
     pub(super) remove_installed_generation: Option<(Generation, PathBuf)>,
-    pub(super) stage_skin: usize,
-    pub(super) stage_bodygroups: Vec<usize>,
 }
 
 impl Default for State {
@@ -361,7 +360,8 @@ impl Default for State {
             maps: vec![],
             map_generation: None,
             selected_map: None,
-            stage: None,
+            workspace: Default::default(),
+            presentation: None,
             preview: None,
             preview_for_stage: false,
             install_confirmation: false,
@@ -373,8 +373,6 @@ impl Default for State {
             installed_models_error: None,
             remove_installed_confirmation: None,
             remove_installed_generation: None,
-            stage_skin: 0,
-            stage_bodygroups: vec![],
         }
     }
 }
@@ -396,6 +394,7 @@ impl State {
             && self.can_preview()
     }
 
+    #[cfg(test)]
     pub fn preview_dirty(&self) -> bool {
         self.preview_dirty
     }
@@ -441,13 +440,14 @@ impl State {
     }
 
     pub fn saved_stage_placement(&self) -> Option<([f32; 3], [f32; 3])> {
-        self.stage
+        self.workspace
+            .placement
             .as_ref()
             .map(|stage| (stage.position, stage.angles))
     }
 
     pub fn preview_selection(&self) -> (usize, Vec<usize>) {
-        (self.stage_skin, self.stage_bodygroups.clone())
+        (self.workspace.skin, self.workspace.bodygroups.clone())
     }
 
     pub fn kind(&self) -> Option<SourceKind> {

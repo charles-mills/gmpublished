@@ -214,9 +214,8 @@ fn run_publish_submit(
         return Err(error);
     }
 
-    let transaction = backend_ctx.begin_transaction();
+    let transaction = backend_ctx.begin_correlated_transaction(task);
     let transaction_id = transaction.id();
-    backend_ctx.correlate_backend_transaction(transaction_id, task);
 
     match publish.submit_publish(request, &transaction) {
         Ok(outcome) => {
@@ -248,9 +247,8 @@ fn run_publish_icon_submit(
         return Err(error);
     }
 
-    let transaction = backend_ctx.begin_transaction();
+    let transaction = backend_ctx.begin_correlated_transaction(task);
     let transaction_id = transaction.id();
-    backend_ctx.correlate_backend_transaction(transaction_id, task);
 
     match publish.update_publish_icon(
         &request.icon_source_path,

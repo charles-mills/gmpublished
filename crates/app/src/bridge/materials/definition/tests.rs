@@ -187,7 +187,6 @@ fn profile_variants_share_selected_document_but_keep_effective_parameters_separa
             .len(),
         2
     );
-    assert_eq!(resolver.shared.texture_assets.resident_count(), 0);
 }
 
 #[test]

@@ -43,6 +43,7 @@ pub enum BackendEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadStartedEvent {
     pub transaction_id: TransactionId,
+    pub workshop_id: Option<WorkshopId>,
     pub request_id: Option<WorkshopSnapshotId>,
 }
 

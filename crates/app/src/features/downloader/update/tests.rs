@@ -8,10 +8,7 @@ use crate::bridge::tasks::{
 use crate::bridge::ui_error::UiError;
 use gmpublished_backend::error_keys as keys;
 
-use super::super::jobs::{
-    DownloaderEvent, JobProgress, LocalExtractionOutcome, RowId, Section, workshop_result_success,
-    workshop_result_success_with_gma,
-};
+use super::super::jobs::{DownloaderEvent, JobProgress, RowId, Section};
 use super::{Effect, Message, State, update};
 
 #[test]
@@ -87,11 +84,11 @@ fn task_started_creates_download_row_and_metadata_updates_title() {
 
     let effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(7),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(7),
+        )]),
     );
 
     assert_eq!(state.downloading().len(), 1);
@@ -124,12 +121,12 @@ fn task_backed_row_ids_preserve_the_full_task_id_domain() {
     let mut state = State::default();
     let task_id = TaskId::from_raw(u64::MAX);
 
-    let _ = state.apply_event(
-        DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+    let _ = state.apply_task_events(
+        vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
             task_id,
-        },
+        )],
         Instant::now(),
     );
 
@@ -144,6 +141,7 @@ fn workshop_snapshot_tasks_never_create_downloader_rows() {
     for update_message in [
         TaskUpdate::Started {
             kind: TaskKind::WorkshopSnapshot,
+            identity: None,
             status: TransactionStatus::Downloading,
         },
         TaskUpdate::Progress(0.5),
@@ -164,20 +162,20 @@ fn workshop_snapshot_tasks_never_create_downloader_rows() {
 fn extract_start_moves_item_from_downloading_to_extracting() {
     let mut state = State::default();
     let now = Instant::now();
-    let _ = state.apply_event(
-        DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(1),
-        },
+    let _ = state.apply_task_events(
+        vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(1),
+        )],
         now,
     );
-    let _ = state.apply_event(
-        DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(2),
-        },
+    let _ = state.apply_task_events(
+        vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(2),
+        )],
         now,
     );
 
@@ -195,21 +193,21 @@ fn compact_section_follows_the_only_job_across_download_and_extract() {
 
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(1),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(1),
+        )]),
     );
     assert_eq!(state.compact_section(), Section::Downloading);
 
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(2),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(2),
+        )]),
     );
     assert_eq!(state.compact_section(), Section::Extracting);
 }
@@ -219,27 +217,27 @@ fn compact_section_does_not_jump_while_both_sections_have_jobs() {
     let mut state = State::default();
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(1),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(1),
+        )]),
     );
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(2),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(2),
+        )]),
     );
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(3),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(3),
+        )]),
     );
 
     assert_eq!(state.downloading().len(), 1);
@@ -252,12 +250,12 @@ fn task_events_update_running_row_progress() {
     let mut state = State::default();
     let task_id = TaskId::from_raw(99);
     let now = Instant::now();
-    let _ = state.apply_event(
-        DownloaderEvent::LocalExtractionStarted {
-            path: PathBuf::from("/tmp/local/addon.gma"),
+    let _ = state.apply_task_events(
+        vec![crate::test_support::local_extraction_started(
+            PathBuf::from("/tmp/local/addon.gma"),
             task_id,
-            total_bytes: 1024,
-        },
+            1024,
+        )],
         now,
     );
 
@@ -290,12 +288,12 @@ fn progress_animation_uses_the_reducer_clock() {
     let task_id = TaskId::from_raw(1000);
     let started_at = Instant::now();
     let update_at = started_at + Duration::from_secs(10);
-    let _ = state.apply_event(
-        DownloaderEvent::LocalExtractionStarted {
-            path: PathBuf::from("/tmp/local/clock.gma"),
+    let _ = state.apply_task_events(
+        vec![crate::test_support::local_extraction_started(
+            PathBuf::from("/tmp/local/clock.gma"),
             task_id,
-            total_bytes: 1024,
-        },
+            1024,
+        )],
         started_at,
     );
 
@@ -318,11 +316,11 @@ fn task_error_event_emits_active_job_count_effect() {
     let task_id = TaskId::from_raw(100);
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::LocalExtractionStarted {
-            path: PathBuf::from("/tmp/local/error.gma"),
+        Message::TaskEventsReceived(vec![crate::test_support::local_extraction_started(
+            PathBuf::from("/tmp/local/error.gma"),
             task_id,
-            total_bytes: 1024,
-        }),
+            1024,
+        )]),
     );
 
     let effects = update(
@@ -379,11 +377,11 @@ fn cancellation_removes_the_running_row_and_requests_task_cancel() {
     let task_id = TaskId::from_raw(42);
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
             task_id,
-        }),
+        )]),
     );
     let row_id = state.downloading()[0].id();
 
@@ -419,19 +417,20 @@ fn cancellation_removes_the_running_row_and_requests_task_cancel() {
 #[test]
 fn cancellation_dismisses_a_terminal_row_without_effects() {
     let mut state = State::default();
-    let _ = state.apply_event(
-        DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(77),
-        },
+    let _ = state.apply_task_events(
+        vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(77),
+        )],
         Instant::now(),
     );
-    let _ = state.apply_event(
-        DownloaderEvent::WorkshopDownloadFinished(workshop_result_success(
-            123,
+    let _ = state.apply_task_events(
+        crate::test_support::extraction_finished(
+            TaskId::from_raw(77),
+            None,
             PathBuf::from("/tmp/extracted/Done"),
-        )),
+        ),
         Instant::now(),
     );
     assert!(matches!(
@@ -458,11 +457,11 @@ fn cancelled_item_extraction_follow_up_task_is_cancelled_at_birth() {
     let item_id = PublishedFileId::new(123).expect("test fixture ids are always nonzero");
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
             item_id,
-            task_id: TaskId::from_raw(1),
-        }),
+            TaskId::from_raw(1),
+        )]),
     );
     let row_id = state.downloading()[0].id();
     let _effects = update(
@@ -479,11 +478,11 @@ fn cancelled_item_extraction_follow_up_task_is_cancelled_at_birth() {
     let extract_task = TaskId::from_raw(2);
     let effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
             item_id,
-            task_id: extract_task,
-        }),
+            extract_task,
+        )]),
     );
 
     assert_eq!(
@@ -514,19 +513,19 @@ fn remove_all_emits_cancellation_effect_for_running_rows() {
     let mut state = State::default();
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(1),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(1),
+        )]),
     );
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
-            item_id: PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(2),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
+            PublishedFileId::new(456).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(2),
+        )]),
     );
 
     let effects = update(
@@ -577,11 +576,11 @@ fn remove_all_cancels_late_tasks_for_items_still_resolving() {
     let task_id = TaskId::from_raw(7);
     let effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
             item_id,
             task_id,
-        }),
+        )]),
     );
     assert_eq!(
         effects,
@@ -598,11 +597,11 @@ fn cancelled_item_can_be_resubmitted() {
     let _effects = update(&mut state, Message::WorkshopIdsSubmitted(vec![item_id]));
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
             item_id,
             task_id,
-        }),
+        )]),
     );
 
     let row_id = state.downloading()[0].id();
@@ -629,11 +628,11 @@ fn errored_item_can_be_resubmitted() {
     let _effects = update(&mut state, Message::WorkshopIdsSubmitted(vec![item_id]));
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Download,
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Download,
             item_id,
             task_id,
-        }),
+        )]),
     );
     let _effects = update(
         &mut state,
@@ -656,16 +655,18 @@ fn open_requested_emits_path_effect_for_finished_row() {
     let path = PathBuf::from("/tmp/extracted/Open Me");
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(77),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(77),
+        )]),
     );
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::WorkshopDownloadFinished(
-            workshop_result_success(123, path.clone()),
+        Message::TaskEventsReceived(crate::test_support::extraction_finished(
+            TaskId::from_raw(77),
+            None,
+            path.clone(),
         )),
     );
     let row_id = state.extracting()[0].id();
@@ -689,20 +690,18 @@ fn preview_requested_emits_target_only_when_the_source_gma_survives() {
     let gma = PathBuf::from("/tmp/workshop/content/4000/123/addon_123.gma");
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(78),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(78),
+        )]),
     );
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::WorkshopDownloadFinished(
-            workshop_result_success_with_gma(
-                123,
-                PathBuf::from("/tmp/extracted/Addon"),
-                Some(gma.clone()),
-            ),
+        Message::TaskEventsReceived(crate::test_support::extraction_finished(
+            TaskId::from_raw(78),
+            Some(gma.clone()),
+            PathBuf::from("/tmp/extracted/Addon"),
         )),
     );
     assert!(state.extracting()[0].previewable());
@@ -727,16 +726,18 @@ fn preview_requested_emits_target_only_when_the_source_gma_survives() {
     let mut ephemeral = State::default();
     let _effects = update(
         &mut ephemeral,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(124).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(79),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(124).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(79),
+        )]),
     );
     let _effects = update(
         &mut ephemeral,
-        Message::EventReceived(DownloaderEvent::WorkshopDownloadFinished(
-            workshop_result_success(124, PathBuf::from("/tmp/extracted/Open Me")),
+        Message::TaskEventsReceived(crate::test_support::extraction_finished(
+            TaskId::from_raw(79),
+            None,
+            PathBuf::from("/tmp/extracted/Open Me"),
         )),
     );
     assert!(!ephemeral.extracting()[0].previewable());
@@ -761,18 +762,19 @@ fn local_extraction_rows_preview_their_source_gma() {
     let task_id = TaskId::from_raw(80);
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::LocalExtractionStarted {
-            path: source.clone(),
+        Message::TaskEventsReceived(vec![crate::test_support::local_extraction_started(
+            source.clone(),
             task_id,
-            total_bytes: 42,
-        }),
+            42,
+        )]),
     );
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::LocalExtractionFinished {
+        Message::TaskEventsReceived(crate::test_support::extraction_finished(
             task_id,
-            outcome: LocalExtractionOutcome::Success(PathBuf::from("/tmp/extracted/funny_barrel")),
-        }),
+            None,
+            PathBuf::from("/tmp/extracted/funny_barrel"),
+        )),
     );
     assert!(state.extracting()[0].previewable());
     let row_id = state.extracting()[0].id();
@@ -797,11 +799,11 @@ fn open_requested_for_running_or_unknown_row_emits_no_effect() {
     let mut state = State::default();
     let _effects = update(
         &mut state,
-        Message::EventReceived(DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(77),
-        }),
+        Message::TaskEventsReceived(vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(77),
+        )]),
     );
     let row_id = state.extracting()[0].id();
 
@@ -832,12 +834,28 @@ fn open_all_emits_all_finished_extract_paths() {
     let mut state = State::default();
     let first = PathBuf::from("/tmp/extracted/First");
     let second = PathBuf::from("/tmp/extracted/Second");
-    let _ = state.apply_event(
-        DownloaderEvent::WorkshopDownloadFinished(workshop_result_success(123, first.clone())),
+    let _ = state.apply_task_events(
+        [
+            vec![crate::test_support::workshop_task_started(
+                WorkshopDownloadTaskKind::Extract,
+                PublishedFileId::fixture(123),
+                TaskId::from_raw(123),
+            )],
+            crate::test_support::extraction_finished(TaskId::from_raw(123), None, first.clone()),
+        ]
+        .concat(),
         Instant::now(),
     );
-    let _ = state.apply_event(
-        DownloaderEvent::WorkshopDownloadFinished(workshop_result_success(456, second.clone())),
+    let _ = state.apply_task_events(
+        [
+            vec![crate::test_support::workshop_task_started(
+                WorkshopDownloadTaskKind::Extract,
+                PublishedFileId::fixture(456),
+                TaskId::from_raw(456),
+            )],
+            crate::test_support::extraction_finished(TaskId::from_raw(456), None, second.clone()),
+        ]
+        .concat(),
         Instant::now(),
     );
 
@@ -909,20 +927,21 @@ fn destination_label_change_emits_no_effects() {
 #[test]
 fn terminal_download_result_finishes_extract_row_with_open_path() {
     let mut state = State::default();
-    let _ = state.apply_event(
-        DownloaderEvent::TaskStarted {
-            kind: WorkshopDownloadTaskKind::Extract,
-            item_id: PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
-            task_id: TaskId::from_raw(77),
-        },
+    let _ = state.apply_task_events(
+        vec![crate::test_support::workshop_task_started(
+            WorkshopDownloadTaskKind::Extract,
+            PublishedFileId::new(123).expect("test fixture ids are always nonzero"),
+            TaskId::from_raw(77),
+        )],
         Instant::now(),
     );
 
-    let _ = state.apply_event(
-        DownloaderEvent::WorkshopDownloadFinished(workshop_result_success(
-            123,
+    let _ = state.apply_task_events(
+        crate::test_support::extraction_finished(
+            TaskId::from_raw(77),
+            None,
             PathBuf::from("/tmp/extracted/My Addon"),
-        )),
+        ),
         Instant::now(),
     );
 
@@ -942,20 +961,21 @@ fn terminal_download_result_finishes_extract_row_with_open_path() {
 fn local_extraction_result_finishes_local_row() {
     let mut state = State::default();
     let task_id = TaskId::from_raw(88);
-    let _ = state.apply_event(
-        DownloaderEvent::LocalExtractionStarted {
-            path: PathBuf::from("/tmp/source/selected.gma"),
+    let _ = state.apply_task_events(
+        vec![crate::test_support::local_extraction_started(
+            PathBuf::from("/tmp/source/selected.gma"),
             task_id,
-            total_bytes: 2048,
-        },
+            2048,
+        )],
         Instant::now(),
     );
 
-    assert!(state.apply_event(
-        DownloaderEvent::LocalExtractionFinished {
+    assert!(state.apply_task_events(
+        crate::test_support::extraction_finished(
             task_id,
-            outcome: LocalExtractionOutcome::Success(PathBuf::from("/tmp/extracted/Local Addon")),
-        },
+            None,
+            PathBuf::from("/tmp/extracted/Local Addon")
+        ),
         Instant::now(),
     ));
 

@@ -41,13 +41,11 @@ fn outcome(
         TextureLoadOutcome::Loaded
         | TextureLoadOutcome::Generated
         | TextureLoadOutcome::MissingSource
-        | TextureLoadOutcome::InvalidSource
-        | TextureLoadOutcome::InvalidPayload => Ok(()),
+        | TextureLoadOutcome::InvalidSource => Ok(()),
         TextureLoadOutcome::QualityRejected
         | TextureLoadOutcome::SourceBudgetRejected
         | TextureLoadOutcome::SourceUnavailable
         | TextureLoadOutcome::Unsupported
-        | TextureLoadOutcome::Deferred
         | TextureLoadOutcome::Unplanned => Err(TextureBarrier {
             material: material.to_owned(),
             role,
@@ -182,7 +180,6 @@ mod tests {
             TextureLoadOutcome::Generated,
             TextureLoadOutcome::MissingSource,
             TextureLoadOutcome::InvalidSource,
-            TextureLoadOutcome::InvalidPayload,
         ] {
             assert_eq!(outcome("fixture", TextureRole::Base, accepted), Ok(()));
         }
@@ -191,7 +188,6 @@ mod tests {
             TextureLoadOutcome::SourceBudgetRejected,
             TextureLoadOutcome::SourceUnavailable,
             TextureLoadOutcome::Unsupported,
-            TextureLoadOutcome::Deferred,
             TextureLoadOutcome::Unplanned,
         ] {
             let error = outcome("fixture", TextureRole::Normal, rejected).unwrap_err();
