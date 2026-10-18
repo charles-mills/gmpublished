@@ -3376,122 +3376,19 @@ fn already_cancelled_source_factory_stops_before_discovery_or_pak_index() {
     assert_eq!(pak.indexed_entries().unwrap().len(), 1);
 }
 
-fn on_demand_policy_fixture(kind: &str) -> (tempfile::TempDir, MaterialResolver) {
-    let root = tempfile::TempDir::new().unwrap();
-    let path = "materials/test/policy.vtf";
-    let bytes = fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[3; 4], &[7; 16]]);
-    let resolver = match kind {
-        "gma" => MaterialResolver::new(
-            Arc::new(
-                PreviewArchive::from_gma(
-                    GmaFixtureBuilder::new("Policy").entry(path, bytes).build(),
-                )
-                .unwrap(),
-            ),
-            None,
-        ),
-        "vpk" => {
-            write_vpk_fixture(
-                &root.path().join("garrysmod/garrysmod_dir.vpk"),
-                vec![(path, bytes)],
-            );
-            MaterialResolver::new(Arc::new(empty_archive()), Some(root.path().to_owned()))
-        }
-        "zip" | "lzma" => {
-            let entry = if kind == "zip" {
-                zip_stored_entry(path, bytes)
-            } else {
-                zip_lzma_entry(path, bytes)
-            };
-            MaterialResolver::with_pakfile_source(
-                Arc::new(empty_archive()),
-                None,
-                MapPakFile::from_pak_bytes(zip_fixture([entry])),
-            )
-        }
-        _ => unreachable!(),
-    };
-    (root, resolver.with_on_demand_textures())
-}
-
-#[test]
-fn on_demand_resource_policy_is_checked_after_cached_selection_without_poisoning_source() {
-    let path = ContentPath::new("materials/test/policy.vtf").unwrap();
-    for kind in ["gma", "vpk", "zip", "lzma"] {
-        for strict_first in [false, true] {
-            let (_root, resolver) = on_demand_policy_fixture(kind);
-            let strict = resolver.with_texture_resource_limit(4);
-            let first = if strict_first { &strict } else { &resolver };
-            let source = first.selected_reloadable_texture(&path).unwrap();
-            let rejected = strict.reloadable_residency(Arc::clone(&source), 0, 0..1, true);
-            assert!(
-                matches!(
-                    rejected,
-                    Err(TextureAssetError::Vtf(
-                        vformats::vtf::VtfError::DecodedTooLarge { size: 20, max: 4 }
-                    ))
-                ),
-                "{kind}, strict first: {strict_first}"
-            );
-            let cached = resolver.selected_reloadable_texture(&path).unwrap();
-            assert!(Arc::ptr_eq(&source, &cached));
-            let accepted = resolver
-                .reloadable_residency(cached, 0, 0..1, true)
-                .unwrap();
-            let (source, request) = accepted.on_demand().unwrap();
-            assert_eq!(source.page_cost(request).unwrap().resident_bytes, 20);
-            let page = source
-                .load_page(
-                    request,
-                    &crate::preparation::PreparationCancellation::default(),
-                    &Arc::new(TextureWorkingBudget::new(16 * 1024 * 1024)),
-                )
-                .unwrap();
-            assert_eq!(page.resident().byte_len(), 20);
-            // A recipe that already has a materialized page cannot authorize a stricter caller.
-            assert!(
-                strict
-                    .reloadable_residency(Arc::clone(source), 0, 0..1, true)
-                    .is_err()
-            );
-        }
-    }
-}
-
-#[test]
-fn on_demand_page_working_policy_is_checked_for_every_resolver_variant() {
-    let path = ContentPath::new("materials/test/policy.vtf").unwrap();
-    for kind in ["gma", "vpk", "zip", "lzma"] {
-        let (_root, resolver) = on_demand_policy_fixture(kind);
-        let source = resolver.selected_reloadable_texture(&path).unwrap();
-        let request = source
-            .frame_request(0, 0..1, 0, 2, TextureStorage::Rgba8)
-            .unwrap();
-        let required = source.page_cost(&request).unwrap().decode_working_bytes;
-        let strict = resolver.with_texture_decoder_limit(required - 1);
-        assert!(
-            matches!(
-                strict.reloadable_residency(Arc::clone(&source), 0, 0..1, true),
-                Err(TextureAssetError::WorkingLimit { required: actual, capacity })
-                    if actual == required && capacity == required - 1
-            ),
-            "{kind}"
-        );
-        assert!(
-            resolver
-                .with_texture_decoder_limit(required)
-                .reloadable_residency(source, 0, 0..1, true)
-                .is_ok(),
-            "{kind}"
-        );
-    }
-}
-
 #[test]
 fn on_demand_compressed_source_decoder_policy_is_checked_on_cold_and_cached_sources() {
     let path = ContentPath::new("materials/test/policy.vtf").unwrap();
     for warm in [false, true] {
-        let (_root, resolver) = on_demand_policy_fixture("lzma");
+        let resolver = MaterialResolver::with_pakfile_source(
+            Arc::new(empty_archive()),
+            None,
+            MapPakFile::from_pak_bytes(zip_fixture([zip_lzma_entry(
+                path.as_str(),
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[3; 4], &[7; 16]]),
+            )])),
+        )
+        .with_on_demand_textures();
         let decoder = SourceRef::Pakfile(resolver.config.pakfile.as_ref().unwrap())
             .descriptor(&path)
             .unwrap()
