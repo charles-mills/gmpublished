@@ -50,18 +50,6 @@ impl RenderTargets {
         proportional_size(size, device.limits().max_texture_dimension_2d)
     }
 
-    #[cfg(feature = "map-capture")]
-    pub fn estimated_bytes(&self) -> u64 {
-        u64::from(self.size.0)
-            * u64::from(self.size.1)
-            * (bytes_per_pixel_for_samples(self.format, self.sample_count)
-                + if self.glass.get().is_some() {
-                    u64::from(self.format.block_copy_size(None).unwrap_or(4))
-                } else {
-                    0
-                })
-    }
-
     pub fn ensure(
         slot: &mut Option<Self>,
         device: &wgpu::Device,

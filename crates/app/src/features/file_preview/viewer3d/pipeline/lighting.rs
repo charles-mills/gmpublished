@@ -7,8 +7,6 @@ pub struct Frame {
     animated_contexts:
         std::collections::BTreeMap<usize, crate::media::preview_model::ModelLightingContext>,
     dynamic_cache: crate::media::preview_model::ModelLightingDynamicCache,
-    #[cfg(feature = "map-capture")]
-    capture_timeline: Option<std::sync::Arc<super::super::capture::ModelLightingTimeline>>,
 }
 
 impl Frame {
@@ -22,52 +20,7 @@ impl Frame {
             model,
             animated_contexts: std::collections::BTreeMap::new(),
             dynamic_cache: Default::default(),
-            #[cfg(feature = "map-capture")]
-            capture_timeline: None,
         }
-    }
-
-    #[cfg(feature = "map-capture")]
-    pub fn apply_capture_timeline(
-        &mut self,
-        map: Option<&MapPreview>,
-        timeline: Option<&std::sync::Arc<super::super::capture::ModelLightingTimeline>>,
-    ) {
-        if self
-            .capture_timeline
-            .as_ref()
-            .zip(timeline)
-            .is_some_and(|(old, new)| std::sync::Arc::ptr_eq(old, new))
-        {
-            return;
-        }
-        if self.capture_timeline.is_some() || timeline.is_some() {
-            self.model.reset_history();
-        }
-        if let Some(timeline) = timeline {
-            let map = map.expect("native model timeline needs a map");
-            let matches = map
-                .model_lighting
-                .iter()
-                .enumerate()
-                .filter(|(_, context)| {
-                    context.entity
-                        && context.model_path == timeline.model
-                        && context.origin.to_array() == timeline.origin
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                matches.len(),
-                1,
-                "native history must identify exactly one renderable"
-            );
-            let (index, context) = matches[0];
-            for &time in &timeline.draw_times_before_capture {
-                self.model
-                    .replay(index, context, &styles(Some(map), time), time);
-            }
-        }
-        self.capture_timeline = timeline.cloned();
     }
 
     pub fn update(
@@ -77,13 +30,7 @@ impl Frame {
         time: f64,
         active_contexts: &[bool],
         animated_origins: &std::collections::BTreeMap<usize, super::Vec3>,
-        #[cfg(feature = "map-capture")] observer: Option<
-            &super::super::capture::CaptureDiagnostics,
-        >,
     ) {
-        #[cfg(feature = "map-capture")]
-        let _model_span = observer
-            .and_then(|observer| observer.span(super::super::capture::Phase::ModelLightingUpdate));
         let contexts = map.map_or(&[][..], |map| map.model_lighting.as_slice());
         let origins_changed = map
             .and_then(|map| map.model_lighting_inputs.as_ref())

@@ -174,8 +174,6 @@ pub struct SceneView {
     pub transparency: Vec<super::transparency::Draw>,
     pub skybox_transparency: Vec<super::transparency::Draw>,
     pub(super) transparent_indirect: super::transparent_indirect::Slots,
-    #[cfg(feature = "map-capture")]
-    pub(super) optical_cpu_planning: Option<super::optical_planning::Diagnostics>,
     pub transparency_diagnostics: super::transparency::TransparencyDiagnostics,
     pub skybox_transparency_diagnostics: super::transparency::TransparencyDiagnostics,
 }
@@ -202,8 +200,6 @@ impl SceneView {
             transparency: Vec::new(),
             skybox_transparency: Vec::new(),
             transparent_indirect: super::transparent_indirect::Slots::default(),
-            #[cfg(feature = "map-capture")]
-            optical_cpu_planning: None,
             transparency_diagnostics: super::transparency::TransparencyDiagnostics::default(),
             skybox_transparency_diagnostics: super::transparency::TransparencyDiagnostics::default(
             ),

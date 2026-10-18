@@ -350,10 +350,7 @@ impl ReloadableTextureSource {
             page_read_gate: Arc::default(),
         }))
     }
-    #[cfg(all(test, feature = "map-capture"))]
-    pub(crate) fn pause_page_reads_for_test(&self) -> test_gate::PageReadPause {
-        self.page_read_gate.pause()
-    }
+
     pub fn source_id(&self) -> TextureSourceId {
         self.id
     }

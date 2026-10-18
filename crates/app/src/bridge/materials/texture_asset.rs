@@ -156,7 +156,7 @@ impl TextureResidency {
             Self::Deferred(_) => super::TextureLoadOutcome::Deferred,
         }
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(super) fn dimensions(&self, metadata: &TextureMetadata) -> [u32; 2] {
         self.resident().map_or_else(
             || {
@@ -299,7 +299,7 @@ impl ResidentTexture {
             .checked_add(face - self.id.faces.start)
     }
 
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub fn layer(&self, frame: u32, face: u32) -> Option<&ResidentTextureLayer> {
         self.layers.get(self.layer_index(frame, face)? as usize)
     }

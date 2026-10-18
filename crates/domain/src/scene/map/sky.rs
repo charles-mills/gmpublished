@@ -408,7 +408,6 @@ mod tests {
         assert_eq!(sun.hdr_color_scale, 1.5);
         assert!(sun.start_disabled);
         assert_eq!(sun.spawn_flags, 4);
-        // CSun does not bind StartDisabled or use a spawn flag to change m_bOn.
         assert!(sun.enabled);
     }
 

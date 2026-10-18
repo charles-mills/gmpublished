@@ -22,7 +22,6 @@ pub(super) enum DoorMotion {
     #[default]
     Idle,
     Moving,
-    /// Resumes closing when the obstruction clears.
     BlockedClosing,
     HoldingOpen {
         remaining: f32,

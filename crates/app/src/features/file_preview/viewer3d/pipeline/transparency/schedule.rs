@@ -14,20 +14,14 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::OnceLock;
 
-// Local admission membership borrows the existing plan; the resulting schedule
-// stores copied DrawItems and never retains this index or its references.
 enum MeshItems<'a> {
     Dense(Vec<Option<&'a DrawItem>>),
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     Standard(HashMap<usize, DrawItem>),
 }
 
 impl<'a> MeshItems<'a> {
     fn new(mesh_count: usize, items: impl Iterator<Item = &'a DrawItem>) -> Self {
-        #[cfg(any(test, feature = "map-capture"))]
-        if !dense_mesh_membership_enabled() {
-            return Self::standard(items);
-        }
         Self::dense(mesh_count, items)
     }
 
@@ -39,14 +33,13 @@ impl<'a> MeshItems<'a> {
         let mut selected = vec![None; mesh_count];
         for item in items {
             if let Some(slot) = selected.get_mut(item.mesh_index) {
-                // As with HashMap::collect, the last admission for a mesh wins.
                 *slot = Some(item);
             }
         }
         Self::Dense(selected)
     }
 
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     fn standard(items: impl Iterator<Item = &'a DrawItem>) -> Self {
         Self::Standard(items.map(|&item| (item.mesh_index, item)).collect())
     }
@@ -54,28 +47,12 @@ impl<'a> MeshItems<'a> {
     fn get(&self, mesh: usize) -> Option<DrawItem> {
         match self {
             Self::Dense(selected) => selected.get(mesh).copied().flatten().copied(),
-            #[cfg(any(test, feature = "map-capture"))]
+            #[cfg(test)]
             Self::Standard(selected) => selected.get(&mesh).copied(),
         }
     }
 }
 
-#[cfg(any(test, feature = "map-capture"))]
-fn dense_mesh_membership_enabled() -> bool {
-    #[cfg(feature = "map-capture")]
-    {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_DENSE_MESH_MEMBERSHIP").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    true
-}
-
-// Borrow one immutable mesh's coverage for all of its transparent parts.
-// Range containment intentionally remains the original single-interval scan.
 #[derive(Clone, Copy)]
 pub(super) enum MeshCoverage<'a> {
     World,
@@ -93,19 +70,6 @@ impl MeshCoverage<'_> {
             }),
         }
     }
-}
-
-fn static_prop_frustum_culling_enabled() -> bool {
-    #[cfg(feature = "map-capture")]
-    {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_STATIC_PROP_FRUSTUM_CULLING").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    true
 }
 
 struct WorldFace {
@@ -373,14 +337,12 @@ impl Schedule {
         }
         // The extra owner query pays off when PVS has stood down; ordinary
         // cluster-limited queues already reject most of these placements.
-        let bounds_query = (!pvs_limited && static_prop_frustum_culling_enabled())
-            .then(|| uniforms.bounds_query());
+        let bounds_query = (!pvs_limited).then(|| uniforms.bounds_query());
         for (owner_index, renderable) in upload.assets.renderables.iter().enumerate() {
             if renderable.map_skybox != skybox {
                 continue;
             }
             let mut ranges = admitted_ranges(&renderable.ranges, &items).peekable();
-            // Empty depth barriers are retained only for admitted geometry.
             if ranges.peek().is_none() {
                 continue;
             }
@@ -970,7 +932,6 @@ mod tests {
                 indices: 15..18,
             },
         ];
-        // Returning owned items must not extend the admission plan's lifetime.
         let actual = {
             let admissions = [
                 DrawItem {

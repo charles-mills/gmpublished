@@ -42,7 +42,6 @@ pub struct MapDoor {
     pub local_bounds_min: Vec3,
     pub local_bounds_max: Vec3,
     pub visibility: MapVisibilityBucket,
-    /// None disables auto-return.
     pub auto_close_after: Option<f32>,
     pub initial_progress: f32,
     pub motion: MapDoorMotion,
@@ -598,7 +597,6 @@ fn door_auto_close_after(entity: &MapEntity, class: MapDoorClass) -> Option<f32>
     auto_close_after(entity.prop("wait"), 3.0, class, "wait")
 }
 
-/// Prop doors use returndelay and default to no auto-return.
 fn prop_door_auto_close_after(entity: &MapEntity, class: MapDoorClass) -> Option<f32> {
     auto_close_after(entity.prop("returndelay"), -1.0, class, "returndelay")
 }

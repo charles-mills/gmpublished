@@ -125,52 +125,25 @@ struct Entry {
     output: Arc<WorldOpaquePlan>,
 }
 
-#[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
-struct Stats {
-    hits: u64,
-    misses: u64,
-    uncached_builds: u64,
-    key_ns: u64,
-    lookup_ns: u64,
-    build_ns: u64,
-    reuse_ns: u64,
-    apply_ns: u64,
-    retired_entries: u64,
-}
-
 #[derive(Debug)]
 pub(in crate::features::file_preview::viewer3d) struct Cache {
     assets: Weak<super::super::super::pipeline::UploadedModel>,
     entries: [Option<Entry>; 2],
     input: Input,
     first_sources: Vec<bool>,
-    enabled: bool,
-    #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-    stats: [Stats; 2],
 }
 impl Default for Cache {
     fn default() -> Self {
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        let enabled = !matches!(
-            std::env::var("GMPUBLISHED_SEMANTIC_WORLD_CACHE").as_deref(),
-            Ok("0")
-        );
-        #[cfg(not(any(feature = "gui-benchmark", feature = "map-capture")))]
-        let enabled = true;
-        Self::new(enabled)
+        Self::new()
     }
 }
 impl Cache {
-    fn new(enabled: bool) -> Self {
+    fn new() -> Self {
         Self {
             assets: Weak::new(),
             entries: [None, None],
             input: Input::default(),
             first_sources: Vec::new(),
-            enabled,
-            #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-            stats: [Stats::default(); 2],
         }
     }
     fn slot(partition: PartitionFilter) -> usize {
@@ -181,17 +154,11 @@ impl Cache {
     }
     pub fn retire(&mut self, partition: PartitionFilter) {
         let slot = Self::slot(partition);
-        if self.entries[slot].take().is_some() {
-            #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-            {
-                self.stats[slot].retired_entries += 1;
-            }
-        }
+        self.entries[slot] = None;
     }
     fn reuse(&self, slot: usize) -> Option<Arc<WorldOpaquePlan>> {
-        self.enabled
-            .then(|| self.entries[slot].as_ref())
-            .flatten()
+        self.entries[slot]
+            .as_ref()
             .filter(|entry| entry.input == self.input)
             .map(|entry| Arc::clone(&entry.output))
     }
@@ -209,8 +176,7 @@ impl Cache {
             self.retire(PartitionFilter::MapSkybox);
             self.assets = Arc::downgrade(&upload.assets);
         }
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        let key_start = std::time::Instant::now();
+
         let prepared = self.input.prepare(
             plan,
             upload,
@@ -219,92 +185,29 @@ impl Cache {
             world_only,
             &mut self.first_sources,
         );
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        {
-            self.stats[slot].key_ns += elapsed(key_start);
-        }
         if !prepared {
             self.retire(partition);
             return;
         }
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        let lookup_start = std::time::Instant::now();
+
         let reused = self.reuse(slot);
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        let hit = reused.is_some();
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        {
-            self.stats[slot].lookup_ns += elapsed(lookup_start);
-        }
         let output = if let Some(output) = reused {
-            #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-            {
-                self.stats[slot].hits += 1;
-            }
             output
         } else {
-            #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-            let build_start = std::time::Instant::now();
             let output = Arc::new(build(upload, &self.input));
-            #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-            {
-                self.stats[slot].build_ns += elapsed(build_start);
-                if self.enabled {
-                    self.stats[slot].misses += 1;
-                } else {
-                    self.stats[slot].uncached_builds += 1;
-                }
-            }
-            if self.enabled {
-                let old = self.entries[slot].take();
-                #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-                if old.is_some() {
-                    self.stats[slot].retired_entries += 1;
-                }
-                let input = std::mem::replace(
-                    &mut self.input,
-                    old.map_or_else(Input::default, |entry| entry.input),
-                );
-                self.entries[slot] = Some(Entry {
-                    input,
-                    output: Arc::clone(&output),
-                });
-            }
+            let old = self.entries[slot].take();
+            let input = std::mem::replace(
+                &mut self.input,
+                old.map_or_else(Input::default, |entry| entry.input),
+            );
+            self.entries[slot] = Some(Entry {
+                input,
+                output: Arc::clone(&output),
+            });
             output
         };
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        let apply_start = std::time::Instant::now();
-        apply(output, plan);
-        #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-        {
-            let duration = elapsed(apply_start);
-            self.stats[slot].apply_ns += duration;
-            if hit {
-                self.stats[slot].reuse_ns += duration;
-            }
-        }
-    }
-    #[cfg(feature = "map-capture")]
-    pub fn diagnostics(&self) -> serde_json::Value {
-        serde_json::json!({"enabled":self.enabled,"partitions":self.stats,"retained_entries":self.entries.iter().flatten().count()})
-    }
-}
-#[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-fn elapsed(start: std::time::Instant) -> u64 {
-    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
 
-#[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-impl Drop for Cache {
-    fn drop(&mut self) {
-        self.retire(PartitionFilter::World);
-        self.retire(PartitionFilter::MapSkybox);
-        log::info!(
-            "semantic world cache enabled={} world={:?} sky={:?}",
-            self.enabled,
-            self.stats[0],
-            self.stats[1]
-        );
+        apply(output, plan);
     }
 }
 
@@ -338,7 +241,7 @@ mod tests {
     fn exact_semantics_reuse_cpu_arc_and_every_changed_dependency_misses() {
         let original = input();
         let output = Arc::new(WorldOpaquePlan::default());
-        let mut cache = Cache::new(true);
+        let mut cache = Cache::new();
         cache.input = original.clone();
         cache.entries[0] = Some(Entry {
             input: original.clone(),
@@ -372,8 +275,6 @@ mod tests {
             assert!(cache.reuse(0).is_none());
         }
         cache.input = original;
-        cache.enabled = false;
-        assert!(cache.reuse(0).is_none());
     }
 
     #[test]
@@ -391,7 +292,7 @@ mod tests {
         };
         let mut original = input();
         original.marks = vec![mark(0), mark(1)];
-        let mut cache = Cache::new(true);
+        let mut cache = Cache::new();
         cache.input = original.clone();
         cache.entries[0] = Some(Entry {
             input: original.clone(),

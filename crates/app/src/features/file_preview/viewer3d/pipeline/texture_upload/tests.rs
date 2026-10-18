@@ -188,11 +188,9 @@ fn cached_staging_remains_charged_and_excess_or_closed_returns_release_ownership
     let mut submitted: Vec<_> = (0..3)
         .map(|id| Some((id, StagingPermit::new(&ledger, 256))))
         .collect();
-    // Completion can return slots in a different order from submission.
     for index in [2, 0, 1] {
         return_staging(submitted[index].take().unwrap(), &Ok(()), &sender, &failed);
     }
-    // Three completed slots fit the live budget, but only two may stay idle.
     assert_eq!(ledger.peak_staging.load(Ordering::Acquire), 768);
     assert_eq!(ledger.staging.load(Ordering::Acquire), 512);
     assert!(!failed.load(Ordering::Acquire));
@@ -203,7 +201,6 @@ fn cached_staging_remains_charged_and_excess_or_closed_returns_release_ownership
     assert_eq!(ledger.staging.load(Ordering::Acquire), 256);
     drop(receiver);
     assert_eq!(ledger.staging.load(Ordering::Acquire), 0);
-    // A callback after uploader shutdown must not block or retain its buffer.
     return_staging(
         (3, StagingPermit::new(&ledger, 256)),
         &Ok(()),
@@ -517,15 +514,10 @@ fn gpu_bc_roundtrips_with_budget(
         );
         assert!(stats.submissions > 1);
         assert!(stats.peak_staging_bytes <= aggregate_staging_bytes);
-        if staging_reuse_enabled() {
-            assert!(stats.staging_reuses > 0);
-            assert!(stats.staging_allocations <= aggregate_staging_bytes / 256);
-            assert!(stats.staging_bytes > 0);
-            assert!(stats.staging_bytes <= aggregate_staging_bytes);
-        } else {
-            assert_eq!(stats.staging_reuses, 0);
-            assert_eq!(stats.staging_bytes, 0);
-        }
+        assert!(stats.staging_reuses > 0);
+        assert!(stats.staging_allocations <= aggregate_staging_bytes / 256);
+        assert!(stats.staging_bytes > 0);
+        assert!(stats.staging_bytes <= aggregate_staging_bytes);
         assert_eq!(stats.owned_image_allocations, 1);
         assert_eq!(
             stats.owned_image_texel_bytes,
@@ -675,8 +667,6 @@ fn gpu_scoped_image_lease_batches_preserve_uploads_pressure_and_cancellation() {
         .unwrap()
     };
 
-    // Two padded rows fit per batch. A full batch must still submit before
-    // the outer scope ends, even with only one staging slot available.
     let pressure = uploader(512);
     let mut cache = ImageCache::default();
     let mut views = Vec::new();
@@ -710,8 +700,6 @@ fn gpu_scoped_image_lease_batches_preserve_uploads_pressure_and_cancellation() {
         );
     }
 
-    // An unrelated standalone lease on the same uploader retains its immediate
-    // submission contract while a group is alive.
     let standalone = uploader(1024);
     let mut cache = ImageCache::default();
     let first = frames([17, 31, 47, 255]);
@@ -752,9 +740,7 @@ fn gpu_scoped_image_lease_batches_preserve_uploads_pressure_and_cancellation() {
         [59, 73, 89, 255]
     );
 
-    // A Result early return drops the outer guard. Dropping an unfinished
-    // participating lease must keep its pending-copy permit until submission
-    // completes, even after its view and image owners have been canceled.
+    // Unfinished leases retain pending-copy permits until GPU completion.
     let canceled = uploader(1024);
     let mut cache = ImageCache::default();
     let mut retained = None;
@@ -894,45 +880,6 @@ fn completion_timeout_is_bounded_and_distinguished_from_invalid_submission() {
         UploadError::from(wgpu::PollError::WrongSubmissionIndex(2, 1)),
         UploadError::Poll(wgpu::PollError::WrongSubmissionIndex(2, 1))
     ));
-}
-
-#[test]
-fn capture_policy_preserves_defaults_and_declared_pressure_overrides() {
-    let defaults = capture_policy(None, None).unwrap();
-    assert_eq!(defaults.aggregate_staging_bytes, 64 * 1024 * 1024);
-    assert_eq!(defaults.batch_bytes, 8 * 1024 * 1024);
-    let override_policy = capture_policy(Some("513"), Some("1024")).unwrap();
-    assert_eq!(override_policy.aggregate_staging_bytes, 513);
-    assert_eq!(override_policy.batch_bytes, 1024);
-    assert_eq!(batch_capacity(override_policy, u64::MAX).unwrap(), 512);
-    let batch_only = capture_policy(None, Some("256")).unwrap();
-    assert_eq!(
-        batch_only.aggregate_staging_bytes,
-        defaults.aggregate_staging_bytes
-    );
-    assert_eq!(batch_only.batch_bytes, 256);
-}
-
-#[test]
-fn capture_policy_rejects_unusable_or_malformed_budgets() {
-    for value in [
-        "",
-        "0",
-        "255",
-        "-1",
-        "1.5",
-        "NaN",
-        " 256",
-        "18446744073709551616",
-    ] {
-        assert!(
-            capture_policy(Some(value), None).is_err(),
-            "staging={value}"
-        );
-        assert!(capture_policy(None, Some(value)).is_err(), "batch={value}");
-    }
-    let policy = capture_policy(Some("256"), Some("256")).unwrap();
-    assert_eq!(batch_capacity(policy, 256).unwrap(), 256);
 }
 
 #[test]

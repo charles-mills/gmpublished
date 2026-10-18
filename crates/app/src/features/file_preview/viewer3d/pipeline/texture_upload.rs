@@ -35,19 +35,6 @@ impl Drop for UploadLeaseBatch {
     }
 }
 
-pub(super) fn lease_batching_enabled() -> bool {
-    #[cfg(feature = "map-capture")]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_TEXTURE_UPLOAD_BATCHING").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    true
-}
-
 const PRESSURE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(in crate::features::file_preview::viewer3d) const RETIREMENT_TIMEOUT: Duration =
@@ -134,63 +121,6 @@ impl Default for UploadPolicy {
             sampled_image_allocations: 65_536,
         }
     }
-}
-
-pub(in crate::features::file_preview::viewer3d) fn configured_policy() -> UploadPolicy {
-    #[cfg(feature = "map-capture")]
-    {
-        static POLICY: std::sync::OnceLock<UploadPolicy> = std::sync::OnceLock::new();
-        *POLICY.get_or_init(|| {
-            let read = |name| match std::env::var(name) {
-                Ok(value) => Some(value),
-                Err(std::env::VarError::NotPresent) => None,
-                Err(std::env::VarError::NotUnicode(_)) => panic!("{name} must be UTF-8"),
-            };
-            let mut policy = capture_policy(
-                read("GMPUBLISHED_MAP_CAPTURE_UPLOAD_STAGING_BYTES").as_deref(),
-                read("GMPUBLISHED_MAP_CAPTURE_UPLOAD_BATCH_BYTES").as_deref(),
-            )
-            .unwrap_or_else(|error| panic!("{error}"));
-            for (name, target) in [
-                (
-                    "GMPUBLISHED_MAP_CAPTURE_GPU_IMAGE_BYTES",
-                    &mut policy.sampled_image_bytes,
-                ),
-                (
-                    "GMPUBLISHED_MAP_CAPTURE_GPU_IMAGE_ALLOCATIONS",
-                    &mut policy.sampled_image_allocations,
-                ),
-            ] {
-                if let Some(value) = read(name) {
-                    *target = value
-                        .parse::<u64>()
-                        .ok()
-                        .filter(|value| *value > 0)
-                        .unwrap_or_else(|| panic!("{name} must be a positive integer"));
-                }
-            }
-            policy
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    UploadPolicy::default()
-}
-
-#[cfg(any(test, feature = "map-capture"))]
-fn capture_policy(
-    staging: Option<&str>,
-    batch: Option<&str>,
-) -> Result<UploadPolicy, &'static str> {
-    let mut policy = UploadPolicy::default();
-    if let Some(value) = staging {
-        policy.aggregate_staging_bytes = value.parse::<u64>().ok().filter(|value| *value >= 256)
-            .ok_or("GMPUBLISHED_MAP_CAPTURE_UPLOAD_STAGING_BYTES must be an integer of at least 256 bytes")?;
-    }
-    if let Some(value) = batch {
-        policy.batch_bytes = value.parse::<u64>().ok().filter(|value| *value >= 256)
-            .ok_or("GMPUBLISHED_MAP_CAPTURE_UPLOAD_BATCH_BYTES must be an integer of at least 256 bytes")?;
-    }
-    Ok(policy)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -286,11 +216,10 @@ impl ImageAdmission {
     }
 }
 
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(super) struct UploadStats {
     pub policy: UploadPolicy,
-    pub lease_batching_enabled: bool,
     pub completion: super::completion::CompletionStats,
     #[serde(rename = "material_image_scope")]
     pub sampled_image_scope: &'static str,
@@ -587,7 +516,6 @@ fn return_staging<T>(
         map_failed.store(true, Ordering::Release);
         drop(slot);
     } else {
-        // Full/disconnected channels drop the excess slot and its permit.
         drop(sender.try_send(slot));
     }
 }
@@ -597,19 +525,6 @@ fn staging_idle_limit(batch_bytes: u64, aggregate_bytes: u64) -> usize {
     (MAX_IDLE_BYTES / batch_bytes)
         .min(aggregate_bytes / batch_bytes)
         .min(2) as usize
-}
-
-fn staging_reuse_enabled() -> bool {
-    #[cfg(feature = "map-capture")]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_TEXTURE_STAGING_REUSE").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    true
 }
 
 #[derive(Debug)]
@@ -701,8 +616,7 @@ impl TextureUploader {
         let completion = super::completion::CompletionDriver::shared(device)
             .map_err(|error| UploadError::CompletionWorker(error.to_string().into()))?;
         let idle_limit = staging_idle_limit(batch_bytes, policy.aggregate_staging_bytes);
-        let staging_returns =
-            (staging_reuse_enabled() && idle_limit != 0).then(|| StagingReturns::new(idle_limit));
+        let staging_returns = (idle_limit != 0).then(|| StagingReturns::new(idle_limit));
         let ledger = Arc::new(Ledger::default());
         completion.register_retirement(&ledger.retirements);
         Ok(Arc::new(Mutex::new(Self {
@@ -717,7 +631,7 @@ impl TextureUploader {
             in_flight: VecDeque::new(),
         })))
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(super) fn stats(&self) -> UploadStats {
         let images = self
             .ledger
@@ -726,7 +640,6 @@ impl TextureUploader {
             .expect("image admission lock");
         UploadStats {
             policy: self.policy,
-            lease_batching_enabled: lease_batching_enabled(),
             completion: self.completion.stats(),
             sampled_image_scope: "shared renderer pool material textures and lightmap pages; excludes generated fallbacks and render targets",
             image_byte_measurement: "descriptor texel payload estimate; excludes driver, alignment and view overhead",
@@ -776,8 +689,6 @@ impl TextureUploader {
         desc: &wgpu::TextureDescriptor<'_>,
         sampled: bool,
     ) -> Result<UploadedTexture, UploadError> {
-        #[cfg(feature = "gui-benchmark")]
-        let _scope = iced_wgpu::profiling::begin_cpu_scope("map.upload.allocate");
         let limits = self.device.limits();
         if desc.dimension != wgpu::TextureDimension::D2
             || desc.size.width == 0
@@ -848,8 +759,6 @@ impl TextureUploader {
         })
     }
     fn start_batch(&mut self) -> Result<(), UploadError> {
-        #[cfg(feature = "gui-benchmark")]
-        let _scope = iced_wgpu::profiling::begin_cpu_scope("map.upload.batch");
         self.completion.check()?;
         self.device.poll(wgpu::PollType::Poll)?;
         while self
@@ -900,8 +809,6 @@ impl TextureUploader {
                 .ok_or(UploadError::CompletionTimeout(PRESSURE_WAIT_TIMEOUT))?;
             let oldest = self.in_flight.front().ok_or(UploadError::InvalidPolicy)?;
             self.ledger.pressure_waits.fetch_add(1, Ordering::Relaxed);
-            #[cfg(feature = "gui-benchmark")]
-            let _wait = iced_wgpu::profiling::begin_cpu_scope("map.upload.pressure_wait");
             self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(oldest.index.clone()),
                 timeout: Some(timeout),
@@ -1065,8 +972,7 @@ impl TextureUploader {
         let Some(batch) = self.pending.take() else {
             return;
         };
-        #[cfg(feature = "gui-benchmark")]
-        let _scope = iced_wgpu::profiling::begin_cpu_scope("map.upload.flush");
+
         batch.slot.buffer.unmap();
         let mut encoder = self
             .device

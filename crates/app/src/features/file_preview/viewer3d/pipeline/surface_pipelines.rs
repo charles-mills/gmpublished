@@ -7,7 +7,21 @@ pub(super) struct SurfaceRaster {
     pub no_cull: bool,
     pub ignore_z: bool,
     pub decal_bias: bool,
-    pub refraction: u32,
+    pub refraction: Option<RefractionRaster>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct RefractionRaster {
+    pub depth_write: bool,
+    pub alpha_write: bool,
+    pub blend: RefractionBlend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum RefractionBlend {
+    Opaque,
+    Alpha,
+    Masked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -68,24 +82,29 @@ impl SurfacePipelineVariants {
                         no_cull: surface.no_cull,
                         ignore_z: surface.ignore_z,
                         decal_bias: surface.decal,
-                        refraction: surface.refraction.as_ref().map_or(0, |glass| {
+                        refraction: surface.refraction.as_ref().map(|glass| {
                             let alpha = surface.normal.as_ref().is_some_and(|n| {
                                 n.flags()
                                     & (vformats::vtf::texture_flags::ONEBITALPHA
                                         | vformats::vtf::texture_flags::EIGHTBITALPHA)
                                     != 0
                             });
-                            1 | (u32::from(!glass.no_write_z) << 1)
-                                | (u32::from(surface.envmap.is_none() && alpha) << 2)
-                                | (u32::from(glass.masked) << 3)
-                                | (u32::from(
-                                    glass.force_alpha_write
-                                        || (!alpha
-                                            && !glass.masked
-                                            && !surface.alpha_test
-                                            && !surface.translucent
-                                            && !surface.additive),
-                                ) << 4)
+                            RefractionRaster {
+                                depth_write: !glass.no_write_z,
+                                alpha_write: glass.force_alpha_write
+                                    || (!alpha
+                                        && !glass.masked
+                                        && !surface.alpha_test
+                                        && !surface.translucent
+                                        && !surface.additive),
+                                blend: if glass.masked {
+                                    RefractionBlend::Masked
+                                } else if surface.envmap.is_none() && alpha {
+                                    RefractionBlend::Alpha
+                                } else {
+                                    RefractionBlend::Opaque
+                                },
+                            }
                         }),
                     })
             })
@@ -104,7 +123,7 @@ impl SurfacePipelineVariants {
             ] {
                 for view in [ViewKind::Main, ViewKind::Reflection, ViewKind::Refraction] {
                     for overlay in [false, true] {
-                        if state.refraction == 0
+                        if state.refraction.is_none()
                             && !state.ignore_z
                             && (overlay || (!state.no_cull && !state.decal_bias))
                         {

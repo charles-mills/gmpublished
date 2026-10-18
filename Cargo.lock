@@ -1528,7 +1528,6 @@ dependencies = [
  "iced",
  "iced_runtime",
  "iced_test",
- "iced_wgpu",
  "image",
  "jiff",
  "log",

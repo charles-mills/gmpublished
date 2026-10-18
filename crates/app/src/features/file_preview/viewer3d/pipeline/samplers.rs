@@ -2,83 +2,16 @@ use super::wgpu;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SamplerQuality {
     pub anisotropy: u16,
     pub force_trilinear: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub(super) enum QualitySource {
-    Application,
-    #[cfg(any(test, feature = "map-capture"))]
-    CaptureConfigured,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub(super) struct QualityProfile {
-    pub source: QualitySource,
-    pub quality: SamplerQuality,
-}
-
-const APPLICATION_QUALITY: QualityProfile = QualityProfile {
-    source: QualitySource::Application,
-    quality: SamplerQuality {
-        anisotropy: 16,
-        force_trilinear: true,
-    },
+const APPLICATION_QUALITY: SamplerQuality = SamplerQuality {
+    anisotropy: 16,
+    force_trilinear: true,
 };
-
-pub(super) fn quality_profile() -> QualityProfile {
-    #[cfg(feature = "map-capture")]
-    {
-        static PROFILE: std::sync::OnceLock<QualityProfile> = std::sync::OnceLock::new();
-        *PROFILE.get_or_init(|| {
-            capture_quality(
-                std::env::var("GMPUBLISHED_MAP_CAPTURE_SAMPLER_PROFILE")
-                    .ok()
-                    .as_deref(),
-                std::env::var("GMPUBLISHED_MAP_CAPTURE_ANISOTROPY")
-                    .ok()
-                    .as_deref(),
-            )
-            .unwrap_or_else(|error| panic!("{error}"))
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    APPLICATION_QUALITY
-}
-
-#[cfg(any(test, feature = "map-capture"))]
-fn capture_quality(
-    profile: Option<&str>,
-    anisotropy: Option<&str>,
-) -> Result<QualityProfile, &'static str> {
-    let mut quality = match profile {
-        None | Some("application") => APPLICATION_QUALITY,
-        Some("source-flags") => QualityProfile {
-            source: QualitySource::CaptureConfigured,
-            quality: SamplerQuality {
-                anisotropy: 1,
-                force_trilinear: false,
-            },
-        },
-        Some(_) => {
-            return Err(
-                "GMPUBLISHED_MAP_CAPTURE_SAMPLER_PROFILE must be application or source-flags",
-            );
-        }
-    };
-    if let Some(anisotropy) = anisotropy {
-        quality.quality.anisotropy = anisotropy
-            .parse::<u16>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or("GMPUBLISHED_MAP_CAPTURE_ANISOTROPY must be an integer from 1 to 65535")?;
-        quality.source = QualitySource::CaptureConfigured;
-    }
-    Ok(quality)
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TextureKind {
@@ -179,12 +112,13 @@ impl SamplerKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RequestedSamplerPolicy {
     descriptor: SamplerKey,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SamplerLimitation {
     PortableAnisotropyLimit { requested: u16, maximum: u16 },
     AnisotropyUnavailable,
@@ -192,53 +126,20 @@ pub(super) enum SamplerLimitation {
     IndependentAnisotropicMipUnavailable,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SamplerCapabilities {
     pub anisotropy: bool,
     pub independent_anisotropic_mip: bool,
     pub native_anisotropic_point: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AppliedSamplerPolicy {
-    pub capabilities: SamplerCapabilities,
+    #[cfg(test)]
     pub requested: RequestedSamplerPolicy,
     pub descriptor: SamplerKey,
+    #[cfg(test)]
     pub limitations: Vec<SamplerLimitation>,
-}
-
-impl serde::Serialize for SamplerKey {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("SamplerDescriptor", 5)?;
-        state.serialize_field("address", &self.address.map(|axis| format!("{axis:?}")))?;
-        state.serialize_field("min_filter", &format!("{:?}", self.min_filter))?;
-        state.serialize_field("mag_filter", &format!("{:?}", self.mag_filter))?;
-        state.serialize_field("mip_filter", &format!("{:?}", self.mip_filter))?;
-        state.serialize_field("anisotropy", &self.anisotropy)?;
-        state.end()
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub(in crate::features::file_preview::viewer3d) struct SamplerDiagnostic {
-    material: String,
-    role: &'static str,
-    texture_flags: Option<u32>,
-    quality: QualityProfile,
-    policy: AppliedSamplerPolicy,
-}
-
-impl SamplerDiagnostic {
-    #[cfg(feature = "map-capture")]
-    pub(in crate::features::file_preview::viewer3d) fn capture_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "material": self.material, "role": self.role, "texture_flags": self.texture_flags,
-            "quality": self.quality, "requested": self.policy.requested.descriptor(),
-            "capabilities": self.policy.capabilities,
-            "applied": self.policy.descriptor, "limitations": self.policy.limitations,
-        })
-    }
 }
 
 impl RequestedSamplerPolicy {
@@ -248,8 +149,10 @@ impl RequestedSamplerPolicy {
 
     pub fn apply(self, capabilities: SamplerCapabilities) -> AppliedSamplerPolicy {
         let mut descriptor = self.descriptor();
+        #[cfg(test)]
         let mut limitations = Vec::new();
         if descriptor.anisotropy > 16 {
+            #[cfg(test)]
             limitations.push(SamplerLimitation::PortableAnisotropyLimit {
                 requested: descriptor.anisotropy,
                 maximum: 16,
@@ -262,12 +165,15 @@ impl RequestedSamplerPolicy {
             let min_mag_supported = min_mag_linear || capabilities.native_anisotropic_point;
             let mip_supported = descriptor.mip_filter == wgpu::FilterMode::Linear
                 || capabilities.independent_anisotropic_mip;
+            #[cfg(test)]
             if !capabilities.anisotropy {
                 limitations.push(SamplerLimitation::AnisotropyUnavailable);
             }
+            #[cfg(test)]
             if !min_mag_supported {
                 limitations.push(SamplerLimitation::NativeAnisotropicPointUnavailable);
             }
+            #[cfg(test)]
             if !mip_supported {
                 limitations.push(SamplerLimitation::IndependentAnisotropicMipUnavailable);
             }
@@ -276,9 +182,10 @@ impl RequestedSamplerPolicy {
             }
         }
         AppliedSamplerPolicy {
-            capabilities,
+            #[cfg(test)]
             requested: self,
             descriptor,
+            #[cfg(test)]
             limitations,
         }
     }
@@ -294,6 +201,7 @@ pub(super) struct SamplerCache {
 #[derive(Clone, Debug)]
 pub(super) struct ResolvedSampler {
     pub sampler: wgpu::Sampler,
+    #[cfg(test)]
     pub policy: AppliedSamplerPolicy,
 }
 
@@ -319,34 +227,23 @@ impl SamplerCache {
         let sampler = intern(&self.samplers, policy.descriptor, || {
             self.device.create_sampler(&policy.descriptor.descriptor())
         });
-        ResolvedSampler { sampler, policy }
+        ResolvedSampler {
+            sampler,
+            #[cfg(test)]
+            policy,
+        }
     }
 
-    pub fn texture(
-        &self,
-        material: &str,
-        role: &'static str,
-        flags: Option<u32>,
-        kind: TextureKind,
-        profile: QualityProfile,
-        diagnostics: &mut Vec<SamplerDiagnostic>,
-    ) -> wgpu::Sampler {
+    pub fn texture(&self, flags: Option<u32>, kind: TextureKind) -> wgpu::Sampler {
         let policy = TextureSamplerPolicy::from_flags(
             flags.unwrap_or(vformats::vtf::texture_flags::TRILINEAR),
             kind,
         );
         let resolved = self.resolve(
             policy
-                .request(profile.quality)
+                .request(APPLICATION_QUALITY)
                 .expect("validated sampler quality"),
         );
-        diagnostics.push(SamplerDiagnostic {
-            material: material.to_owned(),
-            role,
-            texture_flags: flags,
-            quality: profile,
-            policy: resolved.policy,
-        });
         resolved.sampler
     }
 }
@@ -439,24 +336,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn capture_quality_is_explicit_and_strictly_validated() {
-        assert_eq!(capture_quality(None, None).unwrap(), APPLICATION_QUALITY);
-        let configured = capture_quality(Some("source-flags"), Some("4")).unwrap();
-        assert_eq!(configured.source, QualitySource::CaptureConfigured);
-        assert_eq!(
-            configured.quality,
-            SamplerQuality {
-                anisotropy: 4,
-                force_trilinear: false
-            }
-        );
-        for value in ["0", "-1", "65536", "", "no", " 4"] {
-            assert!(capture_quality(Some("source-flags"), Some(value)).is_err());
-        }
-        assert!(capture_quality(Some("unknown"), None).is_err());
     }
 
     #[test]

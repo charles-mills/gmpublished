@@ -73,9 +73,7 @@ impl OpaquePlacementIndex {
             return Self::default();
         };
         let mut parts = (0..meshes.len()).map(|_| Vec::new()).collect::<Vec<_>>();
-        // Assets::upload builds mesh_instances from these same immutable source
-        // bindings and each UploadedMesh::receiver_source. Include every binding,
-        // even when an animation has not produced a viewer buffer yet.
+        // Include bindings whose animation buffers have not been created yet.
         let animated_sources: HashSet<_> = map
             .model_animations
             .iter()

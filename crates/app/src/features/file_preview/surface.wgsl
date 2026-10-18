@@ -80,8 +80,7 @@ fn surface_uv(uv:vec2<f32>,s:vec4<f32>,t:vec4<f32>)->vec2<f32> {
 }
 
 fn surface_scroll_uv(uv:vec2<f32>,s:vec4<f32>,t:vec4<f32>,scroll:vec4<f32>)->vec2<f32> {
-    // Wrap the translation, including negative scroll rates, before applying
-    // detail scale. The clock belongs to this view, not the cached material.
+    // Wrap before detail scaling, including for negative rates.
     let offset=fract(uniforms.water_time_sky_tint.x*scroll.xy)*scroll.zw;
     return surface_uv(uv,s,t)+offset;
 }

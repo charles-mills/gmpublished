@@ -154,8 +154,7 @@ pub(super) fn brush_instances(bsp: &MapBsp) -> Vec<BrushInstance> {
             _ if utility => (false, false),
             _ => (true, true),
         };
-        // SetParent computes a parent-relative pose from the child's world
-        // pose. A map's parentname does NOT make its origin parent-relative.
+        // Map parenting preserves authored world poses.
         instances.push(BrushInstance {
             entity_index: Some(entity_index),
             model_index: index,

@@ -52,16 +52,6 @@ impl MaterialShader {
                 .map_or(Some((32, 32)), dimensions),
         }
     }
-    #[cfg(feature = "map-capture")]
-    pub(crate) fn shader_name(&self) -> &str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Unsupported(name) => name,
-            Self::Surface(surface) => &surface.shader,
-            Self::Water(water) => &water.shader,
-            Self::Mirror(mirror) => &mirror.shader,
-        }
-    }
 
     pub(crate) fn bind_environment_map(&mut self, environment: Arc<super::EnvironmentMapMaterial>) {
         let Self::Surface(surface) = self else {
@@ -78,7 +68,7 @@ impl MaterialShader {
         }
     }
 
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn unlit(&self) -> Option<&super::SurfaceMaterial> {
         self.surface()
             .filter(|surface| surface.family == super::SurfaceFamily::Unlit)

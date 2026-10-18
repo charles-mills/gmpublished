@@ -55,8 +55,7 @@ pub use reloadable::{
 };
 mod texture_working;
 pub use texture_source::EncodedTextureBudget;
-#[cfg(feature = "map-capture")]
-pub use texture_working::TextureHostLimits;
+
 pub use texture_working::TextureWorkingBudget;
 mod water;
 #[cfg(test)]
@@ -291,15 +290,15 @@ impl ResolvedTexture {
     pub(crate) fn load_outcome(&self) -> TextureLoadOutcome {
         self.load_outcome
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn width(&self) -> u32 {
         self.dimensions()[0]
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn height(&self) -> u32 {
         self.dimensions()[1]
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     fn dimensions(&self) -> [u32; 2] {
         match &self.resident {
             TextureResidency::Resident(resident) => resident.layers()[0].mips[0].dimensions,
@@ -318,7 +317,7 @@ impl ResolvedTexture {
             self.source_metadata().and_then(|metadata| metadata.flags)
         }
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn reflectivity_bits(&self) -> Option<[u32; 3]> {
         if self.load_outcome.uses_native_error_texture() {
             Some([0.5_f32.to_bits(); 3])
@@ -330,7 +329,7 @@ impl ResolvedTexture {
     pub(crate) fn has_effective_base_texture(&self) -> bool {
         !self.water_fallback
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn is_water_fallback(&self) -> bool {
         self.water_fallback
     }
@@ -366,7 +365,7 @@ impl ResolvedTexture {
                 height: mip.dimensions[1],
             })
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn original_dimensions(&self) -> (u32, u32) {
         let [width, height] = self
             .source_metadata()

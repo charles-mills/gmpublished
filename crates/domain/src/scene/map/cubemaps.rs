@@ -1,6 +1,5 @@
 use crate::math::Vec3;
 
-/// Authored sample position, independent of cameras and 3D skybox projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MapCubemapProbe {
     /// Integer coordinates identify the packed `cX_Y_Z.vtf` asset exactly.

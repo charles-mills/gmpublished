@@ -14,12 +14,6 @@ pub use message::Message;
 pub use state::State;
 pub use update::update;
 pub use view::pane;
-#[cfg(feature = "map-capture")]
-pub use viewer3d::capture::capture_map_reference_frames;
-#[cfg(feature = "gui-benchmark")]
-pub use viewer3d::capture::{
-    CaptureDiagnostics, Pause as DiagnosticsPause, Profile as DiagnosticsProfile,
-};
 
 pub fn embedded_expanded(state: &State) -> bool {
     state.is_open() && state.expanded()

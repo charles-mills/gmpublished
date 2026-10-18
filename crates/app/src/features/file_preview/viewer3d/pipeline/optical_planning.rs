@@ -1,4 +1,3 @@
-//! Only per-view CPU plan/queue work can run on the explicitly owned CPU pool.
 use super::super::draw_plan::{DrawPlanRequest, DrawPlanSelection};
 use super::draw::ViewKind;
 use super::reflections::{PlanarView, Plane, SceneView};
@@ -11,7 +10,7 @@ use gmpublished_backend::CpuExecutor;
 
 const MAX_JOBS: usize = 4;
 
-/// Values computed by the serial GPU/visibility prefix; never camera history.
+/// Prepared worker inputs; camera history remains on the render thread.
 #[derive(Clone, Copy)]
 pub(super) struct Input {
     pub world: Uniforms,
@@ -65,16 +64,6 @@ impl<'a> Common<'a> {
     }
 }
 
-#[cfg(feature = "map-capture")]
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-pub(super) struct Diagnostics {
-    parallel: bool,
-    // Worker duration is separate from the owner-thread join wall scope.
-    cpu_job_ms: f64,
-    // Fixed-size evidence survives later owner-thread cache hits.
-    parallel_preparations: u64,
-}
-
 pub(super) fn prepare_view(
     view: &mut SceneView,
     input: &Input,
@@ -82,15 +71,6 @@ pub(super) fn prepare_view(
     common: Common<'_>,
     parallel: bool,
 ) {
-    #[cfg(feature = "gui-benchmark")]
-    let _cpu_plan_queue = iced_wgpu::profiling::begin_cpu_scope(match input.kind {
-        ViewKind::Reflection => "map.optics.reflection.cpu_plan_queue",
-        ViewKind::Refraction => "map.optics.refraction.cpu_plan_queue",
-        ViewKind::Main => unreachable!("optical planning excludes the main view"),
-    });
-    #[cfg(feature = "map-capture")]
-    let started = std::time::Instant::now();
-    #[cfg(not(feature = "map-capture"))]
     let _ = parallel;
     let plans = view.plan_cache.prepare(
         upload,
@@ -107,31 +87,6 @@ pub(super) fn prepare_view(
         input.water_side,
         input.include_water,
     );
-    #[cfg(feature = "map-capture")]
-    {
-        let parallel_preparations = view
-            .optical_cpu_planning
-            .map_or(0, |previous| previous.parallel_preparations)
-            .saturating_add(u64::from(parallel));
-        view.optical_cpu_planning = Some(Diagnostics {
-            parallel,
-            cpu_job_ms: started.elapsed().as_secs_f64() * 1000.0,
-            parallel_preparations,
-        });
-    }
-}
-
-fn enabled() -> bool {
-    #[cfg(any(feature = "map-capture", feature = "gui-benchmark"))]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_PARALLEL_OPTICAL_PLANNING").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(any(feature = "map-capture", feature = "gui-benchmark")))]
-    true
 }
 
 struct Inputs {
@@ -165,9 +120,8 @@ pub(super) fn prepare(
     let executor = primitive
         .cpu_executor
         .as_ref()
-        .filter(|executor| executor.thread_count() > 1 && task_count > 1 && enabled());
+        .filter(|executor| executor.thread_count() > 1 && task_count > 1);
     let Some(executor) = executor else {
-        // Preserve reflection->refraction->bindings for each original surface.
         for surface in surfaces {
             surface.prepare_optics(device, queue, resources, primitive, upload, inputs);
             prepare_bindings(surface, device, resources);
@@ -214,10 +168,7 @@ pub(super) fn prepare(
         }
     }
     let common = Common::new(primitive, upload);
-    #[cfg(feature = "gui-benchmark")]
-    let wall = iced_wgpu::profiling::begin_cpu_scope("map.optics.cpu_plan_queue_wall");
-    // Cached-plan views stay on the owner thread; their queues may still rebuild.
-    // Both the probe and prepare use PlanCache's existing exact cache predicate.
+    // Reuse PlanCache's predicate so cached views stay on the render thread.
     jobs.retain_mut(|job| {
         let cached = job.view.plan_cache.is_cached(
             upload,
@@ -230,8 +181,7 @@ pub(super) fn prepare(
         }
         !cached
     });
-    // Upload/visibility work is complete, and shared animation has not advanced.
-    // Each job retains world->sky sequencing inside its original view cache.
+    // Workers prepare each view's world and sky plans after visibility, before animation advances.
     if jobs.len() <= 1 {
         for job in &mut jobs {
             prepare_view(job.view, job.input, upload, common, false);
@@ -241,11 +191,8 @@ pub(super) fn prepare(
             prepare_view(job.view, job.input, upload, common, parallel);
         });
     }
-    #[cfg(feature = "gui-benchmark")]
-    drop(wall);
+
     drop(jobs);
-    // Commit in the original surface, reflection, refraction order. No worker
-    // owns resource admission, GPU calls, sun state, or a shared scene mutation.
     for (surface, input) in surfaces.iter_mut().zip(&planned) {
         if let Some(input) = &input.reflection {
             surface.finish_reflection(device, queue, resources, primitive, upload, input);
@@ -263,8 +210,6 @@ fn execute<T: Send>(jobs: &mut [T], executor: &CpuExecutor, work: impl Fn(&mut T
         if wave.len() == 1 {
             work(&mut wave[0], false);
         } else {
-            // ThreadPool::scope uses only this owned pool and joins before the
-            // next bounded wave or any owner-thread GPU/animation work proceeds.
             executor.rayon_pool().scope(|scope| {
                 for job in wave {
                     let work = &work;

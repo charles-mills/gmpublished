@@ -1,6 +1,3 @@
-//! Directional env_sun sprites use their own world-up basis and authored
-//! materials; their visibility is supplied by each rendered view's depth query.
-
 use gmpublished_domain::{math::Vec3, scene::map::MapSun};
 
 pub mod gpu;
@@ -32,8 +29,7 @@ pub struct SunQuad {
     pub hdr_color_scale: f32,
 }
 
-/// Build C_SunGlowOverlay's core and outer glow in Source world coordinates.
-/// The visibility fraction includes both sky and sprite pixel-query results.
+/// C_SunGlowOverlay geometry in Source world coordinates.
 pub fn sun_quads(sun: &MapSun, view: SunView, visibility_fraction: f32) -> [Option<SunQuad>; 2] {
     if !sun.enabled || !visibility_fraction.is_finite() || visibility_fraction <= 0.0 {
         return [None; 2];

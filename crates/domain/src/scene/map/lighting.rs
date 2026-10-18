@@ -76,7 +76,6 @@ impl MapAmbientLighting {
         self.source
     }
 
-    /// Compiled, unevaluated samples.
     pub fn samples(&self) -> &[MapAmbientSample] {
         &self.samples
     }

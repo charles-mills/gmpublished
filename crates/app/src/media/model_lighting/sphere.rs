@@ -111,7 +111,6 @@ impl<'a> Sampler<'a> {
     }
 }
 
-// Float bits and accumulation order affect the six-axis result.
 const DIRECTION_BITS: [[u32; 3]; 162] = [
     [0xbf06964f, 0x00000000, 0x3f59c444],
     [0xbee2bef0, 0x3e7496ab, 0x3f5d3b6d],

@@ -80,23 +80,6 @@ impl State {
         self.initialized = false;
     }
 
-    #[cfg(feature = "map-capture")]
-    pub fn replay(
-        &mut self,
-        index: usize,
-        context: &ModelLightingContext,
-        styles: &[f32; 128],
-        time: f64,
-    ) {
-        assert!(
-            context.entity && context.source.runtime_seed().is_some(),
-            "native timeline requires a production entity seed"
-        );
-        context
-            .evaluate_with_history(styles, time, &mut self.histories[index])
-            .expect("native history needs a valid production lighting seed");
-    }
-
     pub fn advance(
         &mut self,
         contexts: &[ModelLightingContext],

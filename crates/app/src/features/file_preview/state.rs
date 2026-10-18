@@ -138,8 +138,6 @@ struct ModelUiState {
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct MapUiState {
-    #[cfg(feature = "gui-benchmark")]
-    benchmark_view: Option<crate::app::gui_benchmark::ViewControl>,
     render_feedback: std::sync::Arc<super::viewer3d::feedback::RenderFeedback>,
     fog_enabled: bool,
     skybox_enabled: bool,
@@ -174,8 +172,6 @@ impl Default for AudioUiState {
 impl Default for MapUiState {
     fn default() -> Self {
         Self {
-            #[cfg(feature = "gui-benchmark")]
-            benchmark_view: None,
             render_feedback: Default::default(),
             fog_enabled: true,
             skybox_enabled: true,
@@ -487,35 +483,6 @@ impl State {
             ContentUiState::Map(map) => Some(&map.render_feedback),
             ContentUiState::Model(model) => Some(&model.render_feedback),
             _ => None,
-        }
-    }
-
-    #[cfg(feature = "gui-benchmark")]
-    pub(crate) fn set_benchmark_view(
-        &mut self,
-        control: Option<crate::app::gui_benchmark::ViewControl>,
-    ) {
-        if let ContentUiState::Map(map) = &mut self.content_ui {
-            map.benchmark_view = control;
-        }
-    }
-
-    #[cfg(feature = "gui-benchmark")]
-    pub(crate) fn benchmark_view(&self) -> Option<crate::app::gui_benchmark::ViewControl> {
-        match &self.content_ui {
-            ContentUiState::Map(map) => map.benchmark_view.clone(),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "gui-benchmark")]
-    pub(crate) fn benchmark_ready(&self) -> Result<bool, String> {
-        use super::viewer3d::feedback::RenderStatus;
-        match self.render_status() {
-            Some(RenderStatus::Ready { .. }) => Ok(true),
-            Some(RenderStatus::Rejected { reason }) => Err(reason),
-            Some(RenderStatus::RetirementTimedOut) => Err("renderer retirement timed out".into()),
-            _ => Ok(false),
         }
     }
 

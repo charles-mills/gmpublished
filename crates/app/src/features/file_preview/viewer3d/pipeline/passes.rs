@@ -293,25 +293,6 @@ fn render_world_batches(
     );
 }
 
-/// Feature-only counterfactual; ordinary builds always coalesce compatible batches.
-#[inline]
-pub(super) fn opaque_pass_coalescing_enabled() -> bool {
-    #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            !matches!(
-                std::env::var("GMPUBLISHED_OPAQUE_PASS_COALESCING").as_deref(),
-                Ok("0")
-            )
-        })
-    }
-    #[cfg(not(any(feature = "gui-benchmark", feature = "map-capture")))]
-    {
-        true
-    }
-}
-
 fn render_surface_batches<'a>(
     encoder: &mut wgpu::CommandEncoder,
     targets: &RenderTargets,
@@ -320,12 +301,6 @@ fn render_surface_batches<'a>(
     batches: impl IntoIterator<Item = &'a super::super::draw_plan::SurfaceBatch>,
     view: DrawView<'_>,
 ) {
-    if !opaque_pass_coalescing_enabled() {
-        for batch in batches {
-            render_opaque_surfaces(encoder, targets, resources, upload, batch, view);
-        }
-        return;
-    }
     let linear_marks = |batch: &super::super::draw_plan::SurfaceBatch| {
         batch
             .surface_marks
@@ -341,8 +316,7 @@ fn render_surface_batches<'a>(
             render_opaque_surfaces(encoder, targets, resources, upload, batch, view);
             continue;
         }
-        // These draws only sample immutable material/lightmap resources. Keep their
-        // order and MSAA samples, resolving once after the consecutive linear run.
+        // Material and lightmap inputs are immutable across this ordered MSAA run.
         let mut pass = pass(
             encoder,
             targets,
@@ -493,15 +467,6 @@ fn render_scene(
     clear: wgpu::Color,
     sky: bool,
 ) {
-    #[cfg(feature = "gui-benchmark")]
-    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(
-        encoder,
-        match kind {
-            ViewKind::Reflection => "reflection",
-            ViewKind::Refraction => "refraction",
-            ViewKind::Main => "main",
-        },
-    );
     render_opaque(view, resources, upload, encoder, kind, clear, sky);
     let sun = &resources.reflection_sun;
     let resources = resources.for_view(kind);
@@ -524,8 +489,6 @@ fn render_scene(
         view.sun.query(encoder, sun, false);
         view.sun.draw(encoder, sun, upload, targets);
     }
-    #[cfg(feature = "gui-benchmark")]
-    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
 }
 
 #[derive(Clone, Copy)]
@@ -588,8 +551,7 @@ pub fn render_frame<'a>(
     } else {
         wgpu::Color::TRANSPARENT
     };
-    #[cfg(feature = "gui-benchmark")]
-    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(encoder, "main_opaque");
+
     render_opaque(
         &frame.main,
         resources,
@@ -599,10 +561,6 @@ pub fn render_frame<'a>(
         clear,
         !primitive.submerged,
     );
-    #[cfg(feature = "gui-benchmark")]
-    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
-    #[cfg(feature = "gui-benchmark")]
-    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(encoder, "water_and_transparency");
     let view = &frame.main;
     let targets = view.targets.as_ref().unwrap();
     let plans = view.plans.as_ref().unwrap();
@@ -711,10 +669,6 @@ pub fn render_frame<'a>(
             indirect: view.transparent_indirect.world.program(),
         },
     );
-    #[cfg(feature = "gui-benchmark")]
-    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
-    #[cfg(feature = "gui-benchmark")]
-    let gpu_scope = iced_wgpu::profiling::begin_gpu_scope(encoder, "intersection_sun_debug");
     if let Some(intersection) = frame
         .water_intersection
         .as_ref()
@@ -755,33 +709,8 @@ pub fn render_frame<'a>(
         pass.set_bind_group(0, &view.world.bind_group, &[]);
         draw::draw_phy_debug_meshes(&mut pass, resources, upload);
     }
-    #[cfg(feature = "gui-benchmark")]
-    iced_wgpu::profiling::end_gpu_scope(encoder, gpu_scope);
-    #[cfg(feature = "map-capture")]
-    let targets = if primitive.refraction_target {
-        frame
-            .planar_views
-            .iter()
-            .find_map(|surface| surface.refraction.as_ref())
-            .and_then(|view| view.targets.as_ref())
-            .expect("refraction diagnostic requires a visible refractive surface")
-    } else if primitive.reflection_target {
-        frame
-            .planar_views
-            .iter()
-            .find_map(|surface| surface.reflection.as_ref())
-            .and_then(|view| view.targets.as_ref())
-            .expect("reflection diagnostic requires a visible reflector")
-    } else {
-        targets
-    };
+
     let overlay = frame.screen_overlay.as_ref();
-    #[cfg(feature = "map-capture")]
-    let overlay = if primitive.reflection_target || primitive.refraction_target {
-        None
-    } else {
-        overlay
-    };
     let composition = Composition {
         blit: &targets.blit_bind_group,
         size: targets.size,

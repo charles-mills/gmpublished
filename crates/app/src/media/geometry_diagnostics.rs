@@ -170,7 +170,7 @@ impl Default for PropGeometrySummary {
 }
 
 impl PropGeometrySummary {
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub fn admitted_totals(&self) -> Result<GeometryCounts, GeometryError> {
         self.world
             .admitted

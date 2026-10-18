@@ -69,7 +69,6 @@ pub struct VpkEntry {
     preload: std::sync::Arc<[u8]>,
 }
 
-/// Frozen entry locator with shared directory preload bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VpkEntryStorage {
     pub archive_path: PathBuf,

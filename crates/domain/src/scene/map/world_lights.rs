@@ -1,4 +1,3 @@
-//! Preserved compiled emitters, before engine light selection and shadowing.
 use super::{AmbientLightSource, LightmapSource, MapBsp};
 use vformats::bsp::{WorldLightError, WorldLightKind};
 
@@ -254,8 +253,6 @@ mod tests {
             ambient.leaf_bounds(0),
             Some(([-3072, -1408, -96], [-2932, -1056, -16]))
         );
-        // Native model-lighting-order-forward-game-reference01 x_28. The audited
-        // cache resolves its requested point to this candidate cell center.
         let actual = ambient
             .interpolate_leaf_at(0, Vec3::new(-3004.0, -1228.0, -56.0))
             .unwrap();

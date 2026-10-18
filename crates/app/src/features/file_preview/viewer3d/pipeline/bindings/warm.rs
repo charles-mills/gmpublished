@@ -150,7 +150,7 @@ impl<K: Eq + Hash + Clone, A: Eq + Hash + Clone, S, I> WarmImages<K, A, S, I> {
         self.logical_entries -= removed.len();
         removed
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub fn stats(&self) -> serde_json::Value {
         serde_json::json!({ "allocations": self.entries.len(),
             "estimated_bytes": self.entries.values().map(|entry| entry.bytes).sum::<u64>(),

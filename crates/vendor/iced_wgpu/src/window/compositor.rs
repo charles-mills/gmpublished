@@ -170,14 +170,8 @@ impl Compositor {
                         | wgpu::Features::CLIP_DISTANCES
                         | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
                         | wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER
-                        | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING
-                        | if cfg!(feature = "renderer-profiling") {
-                            wgpu::Features::TIMESTAMP_QUERY
-                                | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-                        } else {
-                            wgpu::Features::empty()
-                        })
-                    .intersection(adapter.features()),
+                        | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING)
+                        .intersection(adapter.features()),
                     required_limits: required_limits.clone(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                     trace: wgpu::Trace::Off,
@@ -233,12 +227,8 @@ pub fn present(
     background_color: Color,
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
-    #[cfg(feature = "renderer-profiling")]
-    let acquire_started = std::time::Instant::now();
     match surface.get_current_texture() {
         Ok(frame) => {
-            #[cfg(feature = "renderer-profiling")]
-            let acquire_ms = crate::profiling::elapsed(acquire_started);
             let view = &frame
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
@@ -250,25 +240,22 @@ pub fn present(
                 viewport,
             );
 
-            #[cfg(feature = "renderer-profiling")]
-            let present_started = std::time::Instant::now();
             on_pre_present();
             frame.present();
-            #[cfg(feature = "renderer-profiling")]
-            if let Some(token) = renderer.profile_token {
-                crate::profiling::update(token, |sample| {
-                    sample.surface_acquire_ms = acquire_ms;
-                    sample.surface_present_ms = crate::profiling::elapsed(present_started);
-                });
-            }
 
             Ok(())
         }
         Err(error) => match error {
-            wgpu::SurfaceError::Timeout => Err(compositor::SurfaceError::Timeout),
-            wgpu::SurfaceError::Outdated => Err(compositor::SurfaceError::Outdated),
+            wgpu::SurfaceError::Timeout => {
+                Err(compositor::SurfaceError::Timeout)
+            }
+            wgpu::SurfaceError::Outdated => {
+                Err(compositor::SurfaceError::Outdated)
+            }
             wgpu::SurfaceError::Lost => Err(compositor::SurfaceError::Lost),
-            wgpu::SurfaceError::OutOfMemory => Err(compositor::SurfaceError::OutOfMemory),
+            wgpu::SurfaceError::OutOfMemory => {
+                Err(compositor::SurfaceError::OutOfMemory)
+            }
             wgpu::SurfaceError::Other => Err(compositor::SurfaceError::Other),
         },
     }

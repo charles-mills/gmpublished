@@ -105,7 +105,7 @@ impl Signal {
     }
 }
 
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(super) struct CompletionStats {
     pending: u64,
@@ -206,7 +206,7 @@ impl CompletionDriver {
         });
         self.signal.changed.notify_all();
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub fn stats(&self) -> CompletionStats {
         let control = self.signal.control.lock().expect("GPU completion control");
         CompletionStats {

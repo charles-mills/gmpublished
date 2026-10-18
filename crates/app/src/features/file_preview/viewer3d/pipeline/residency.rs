@@ -83,16 +83,6 @@ impl SceneUploadError {
             log::error!("scene lightmap preparation: {issue:?}");
         }
     }
-
-    #[cfg(feature = "map-capture")]
-    pub fn capture_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "textures": self.issues.iter().map(|issue| serde_json::json!({"material":issue.material,"role":issue.role,"outcome":format!("{:?}", issue.outcome)})).collect::<Vec<_>>(),
-            "buffers": self.buffer_issues,
-            "lightmaps": self.lightmap_issues,
-            "animations": self.animation_issues,
-        })
-    }
 }
 
 struct Validator {

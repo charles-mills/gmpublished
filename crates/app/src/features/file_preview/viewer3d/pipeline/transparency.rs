@@ -314,8 +314,6 @@ fn remaining_queue(
     let mut draws = Vec::new();
     for items in [&plan.translucent, &plan.additive] {
         for item in items {
-            // The schedule is immutable while its borrowed ranges are used;
-            // resolving membership once avoids hashing the same mesh per part.
             let coverage = schedule.map(|schedule| schedule.coverage(item.mesh_index));
             if coverage.is_some_and(|coverage| coverage.covers(None)) {
                 continue;

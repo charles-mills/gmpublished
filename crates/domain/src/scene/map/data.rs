@@ -46,7 +46,6 @@ pub struct MapData {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapMesh {
-    /// Geometry belonging to a brush entity, separate from world brushes.
     pub entity: bool,
     pub vertices: Vec<MapVertex>,
     pub indices: Vec<u32>,

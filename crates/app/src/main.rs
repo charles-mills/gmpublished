@@ -104,7 +104,6 @@ fn main() -> ExitCode {
     let shutdown = GpuShutdownGuard(true);
     let outcome = run();
     let gpu_shutdown: Result<(), features::file_preview::ShutdownError> = shutdown.finish();
-    // Flush after GUI/CLI resources drop and completion workers have joined.
     gmpublished_backend::shutdown_logging();
     if let Err(error) = gpu_shutdown {
         eprintln!("GPU completion shutdown failed: {error}");
@@ -150,36 +149,13 @@ enum RunError {
     Iced(#[from] iced::Error),
     #[error(transparent)]
     Cli(#[from] cli::CliError),
-    #[cfg(feature = "gui-benchmark")]
-    #[error(transparent)]
-    GuiBenchmark(#[from] app::gui_benchmark::Error),
 }
 
 fn run() -> Result<(), RunError> {
     // Install before initialization so startup panics are logged too.
     install_panic_log_hook();
 
-    #[cfg(feature = "map-capture")]
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "--capture-maps")
-    {
-        assert_eq!(
-            std::env::args_os().len(),
-            2,
-            "capture configuration uses environment variables"
-        );
-        features::file_preview::capture_map_reference_frames();
-        return Ok(());
-    }
-
-    #[cfg(feature = "gui-benchmark")]
-    let benchmark_config = app::gui_benchmark::Config::from_args()?;
-    #[cfg(feature = "gui-benchmark")]
-    let run_cli = benchmark_config.is_none();
-    #[cfg(not(feature = "gui-benchmark"))]
-    let run_cli = true;
-    if run_cli && let Some(outcome) = cli::run() {
+    if let Some(outcome) = cli::run() {
         return Ok(outcome?);
     }
 
@@ -200,25 +176,7 @@ fn run() -> Result<(), RunError> {
         features::shell::ChromeStrategy::resolve(startup_settings.backend.titlebar);
 
     let window_settings = window_settings(chrome_strategy);
-    #[cfg(feature = "gui-benchmark")]
-    let window_settings = if let Some(config) = &benchmark_config {
-        iced::window::Settings {
-            size: iced::Size::new(config.width as f32, config.height as f32),
-            ..window_settings
-        }
-    } else {
-        window_settings
-    };
-    let application = iced::application(
-        move || {
-            let (app, task) = App::new(ctx.clone());
-            #[cfg(feature = "gui-benchmark")]
-            let (app, task) = app.with_gui_benchmark(benchmark_config.clone(), task);
-            (app, task)
-        },
-        App::update,
-        App::view,
-    );
+    let application = iced::application(move || App::new(ctx.clone()), App::update, App::view);
     let application = assets::fonts::bundled_fonts()
         .into_iter()
         .fold(application, iced::Application::font);

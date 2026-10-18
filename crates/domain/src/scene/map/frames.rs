@@ -1,4 +1,3 @@
-//! Source displacement grid normals and authored texture-coordinate frames.
 use super::{BspError, MapBsp};
 use crate::math::Vec3;
 use vformats::bsp::{DispInfo, DispSubNeighbor, TexInfo};
@@ -18,9 +17,7 @@ pub(super) fn texture_frame(normal: Vec3, plane: Vec3, texinfo: &TexInfo) -> (Ve
     (s, t)
 }
 
-/// The runtime edge rebuild uses a different tangent operation order from
-/// the displacement's core frame. Keep the normal-generation stage with each
-/// vertex rather than infer it from grid coordinates or normal length.
+/// Retain the normal-generation stage; shared edges use a different tangent operation order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum NormalStage {
     #[default]
@@ -55,17 +52,11 @@ pub(super) fn displacement_frame(
     } else {
         core_s
     };
-    // Native direction-cube controls identify this operation order at shared
-    // edges, shared corners and split-edge T-junctions. Lone corners and
-    // interpolated-edge stages retain the core order; do not infer the
-    // private runtime operation from a vertex merely lying on the boundary.
     let t = if matches!(
         stage,
         NormalStage::SharedEdge | NormalStage::SharedCorner | NormalStage::TJunction
     ) {
-        // The runtime cross product is deliberately not normalized. When
-        // neighboring texture frames oppose each other, shared S can have a
-        // large component along N; normalizing T would invent its magnitude.
+        // Keep the cross product unnormalized: opposing frames can make S non-orthogonal to N.
         s.cross(normal)
     } else {
         t
@@ -162,10 +153,8 @@ fn grid_normals(positions: &[Vec3], steps: usize) -> Vec<Vec3> {
     let side = steps + 1;
     let mut normals = vec![Vec3::ZERO; positions.len()];
     let mut counts = vec![0_u8; positions.len()];
-    // Core displacement normals use both unit triangle normals from every
-    // adjacent quad, including its opposite half. They use a fixed diagonal,
-    // independently of the checkerboard render tessellation, and retain the
-    // average's length rather than normalizing it afterward.
+    // Core normals average both triangle normals of every adjacent quad using a fixed diagonal.
+    // Preserve the average's length; render tessellation uses a separate checkerboard.
     for y in 0..steps {
         for x in 0..steps {
             let a = y * side + x;

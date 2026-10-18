@@ -5,24 +5,10 @@ use rayon::prelude::*;
 pub(super) const MAX_JOBS: usize = 4;
 pub(super) const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
-pub(super) fn enabled() -> bool {
-    #[cfg(feature = "map-capture")]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_PARALLEL_LIGHTMAP_COOKING").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(feature = "map-capture"))]
-    true
-}
-
 pub(super) fn page_bytes(page: &LightmapPage) -> usize {
     let width = page.width as usize;
     let height = page.height as usize;
-    // render_page rejects these before allocating any output. Keep invalid
-    // metadata at its request ordinal rather than returning during planning.
+    // Preserve invalid requests at their ordinals so render_page reports errors in order.
     if width == 0 || height == 0 || width > LIGHTMAP_PAGE_SIZE || height > LIGHTMAP_PAGE_SIZE {
         0
     } else {
@@ -62,8 +48,6 @@ impl Wave {
                 }
                 wave.indices.push(index);
                 wave.output_bytes = wave.output_bytes.saturating_add(bytes);
-                // A future larger valid page retains the ordinary serial path.
-                // Current render_page bounds each valid page to 4 MiB.
                 if bytes > MAX_OUTPUT_BYTES {
                     wave.end = index + 1;
                     break;
@@ -85,47 +69,7 @@ pub(super) fn cook<T: Send, E: Send>(
         return indices.iter().map(render).collect();
     }
     let render = &render;
-    // Indexed collection preserves every result, including errors. GPU upload
-    // and cache mutation observe them later in the original request order.
     executor.install(|| indices.par_iter().map(render).collect())
-}
-
-#[cfg(feature = "map-capture")]
-#[derive(Debug, Default, serde::Serialize)]
-pub(super) struct Diagnostics {
-    executor_present: bool,
-    executor_workers: usize,
-    parallel_enabled: bool,
-    configured_jobs: usize,
-    output_byte_budget: usize,
-    peak_wave_jobs: usize,
-    peak_wave_output_bytes: usize,
-    waves: usize,
-    attempted_pages: usize,
-}
-
-#[cfg(feature = "map-capture")]
-impl Diagnostics {
-    pub fn new(executor: Option<&CpuExecutor>, parallel: bool) -> Self {
-        Self {
-            executor_present: executor.is_some(),
-            executor_workers: executor.map_or(0, CpuExecutor::thread_count),
-            parallel_enabled: parallel,
-            configured_jobs: if parallel {
-                executor.map_or(1, |pool| pool.thread_count().min(MAX_JOBS))
-            } else {
-                1
-            },
-            output_byte_budget: MAX_OUTPUT_BYTES,
-            ..Self::default()
-        }
-    }
-    pub fn record(&mut self, jobs: usize, bytes: usize) {
-        self.peak_wave_jobs = self.peak_wave_jobs.max(jobs);
-        self.peak_wave_output_bytes = self.peak_wave_output_bytes.max(bytes);
-        self.waves += 1;
-        self.attempted_pages += jobs;
-    }
 }
 
 #[cfg(test)]
@@ -238,7 +182,6 @@ mod tests {
             let wave = Wave::plan(start, 9, MAX_JOBS, |_| Some(page_bytes));
             let results = cook(&executor, &wave.indices, |_| -> Result<Charged, ()> {
                 let thread = std::thread::current();
-                // One-page tails intentionally use the caller-thread serial path.
                 if wave.indices.len() > 1 {
                     assert!(thread.name().unwrap().starts_with("gmpublished-cpu-"));
                 }

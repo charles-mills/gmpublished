@@ -90,14 +90,30 @@ mod tests {
     use super::*;
     #[test]
     fn late_range_uses_bounded_discard_and_checks_cancellation() {
-        let input=(0..200_000).map(|n|(n%251) as u8).collect::<Vec<_>>();
-        let compressed=miniz_oxide::deflate::compress_to_vec(&input,6);
-        let mut checks=0;
-        assert_eq!(range(&compressed,170_123..170_151,||{checks+=1;false}).unwrap(),input[170_123..170_151]);
-        assert!(checks>20);
-        let mut checks=0;
-        assert_eq!(range(&compressed,170_123..170_151,||{checks+=1;checks==3}),Err(InflateError));
-        assert!(range(&compressed,199_999..200_001,||false).is_err());
-        assert_eq!(range(&compressed,0..0,||false).unwrap(),Vec::<u8>::new());
+        let input = (0..200_000).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+        let compressed = miniz_oxide::deflate::compress_to_vec(&input, 6);
+        let mut checks = 0;
+        assert_eq!(
+            range(&compressed, 170_123..170_151, || {
+                checks += 1;
+                false
+            })
+            .unwrap(),
+            input[170_123..170_151]
+        );
+        assert!(checks > 20);
+        let mut checks = 0;
+        assert_eq!(
+            range(&compressed, 170_123..170_151, || {
+                checks += 1;
+                checks == 3
+            }),
+            Err(InflateError)
+        );
+        assert!(range(&compressed, 199_999..200_001, || false).is_err());
+        assert_eq!(
+            range(&compressed, 0..0, || false).unwrap(),
+            Vec::<u8>::new()
+        );
     }
 }

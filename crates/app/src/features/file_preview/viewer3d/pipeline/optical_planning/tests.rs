@@ -11,8 +11,6 @@ struct ViewState {
 }
 
 fn prepare(state: &mut ViewState, revision: usize) {
-    // Each view must observe its own updated plan and scratch, world before sky,
-    // then its own ordered queue. No scheduler ordering may become draw order.
     state.cache.clear();
     state.cache.extend([state.ordinal, revision]);
     state.plans = state.cache.iter().map(|value| value * 3).collect();
@@ -42,7 +40,6 @@ fn scoped_view_updates_match_serial_in_original_slot_order_and_join_before_retur
         });
         assert_eq!(parallel, serial);
     }
-    // All borrowed jobs have joined; caller can immediately replace view slots.
     parallel.clear();
     parallel.push(serial[8].clone());
     execute(&mut parallel, &executor, |state, _| prepare(state, 19));

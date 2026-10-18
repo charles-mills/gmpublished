@@ -5,12 +5,6 @@ const SKY_NEAR: f32 = 2.0;
 const SKY_FAR: f32 = f32::from_bits(0x475d_b3d7);
 
 #[derive(Clone, Copy, Debug)]
-enum FieldOfView {
-    VerticalRadians(f32),
-    HorizontalDegrees(f32),
-}
-
-#[derive(Clone, Copy, Debug)]
 enum ViewTransform {
     Camera(SourceCamera),
     Matrix(Matrix4),
@@ -19,7 +13,7 @@ enum ViewTransform {
 #[derive(Clone, Copy, Debug)]
 pub(in super::super) struct ViewCamera {
     view: ViewTransform,
-    field_of_view: FieldOfView,
+    field_of_view: f32,
     aspect: f32,
     pub near: f32,
     pub far: f32,
@@ -27,20 +21,13 @@ pub(in super::super) struct ViewCamera {
 
 impl ViewCamera {
     pub fn fly(camera: &FlyCamera, bounds: Rectangle, eye: Vec3, near: f32, far: f32) -> Self {
-        #[cfg(any(test, feature = "map-capture"))]
-        let horizontal = camera.capture_horizontal_fov_degrees;
-        #[cfg(not(any(test, feature = "map-capture")))]
-        let horizontal = None;
         Self {
             view: ViewTransform::Camera(SourceCamera {
                 eye,
                 pitch_degrees: (-camera.pitch).to_degrees(),
                 yaw_degrees: camera.yaw.to_degrees(),
             }),
-            field_of_view: horizontal.map_or(
-                FieldOfView::VerticalRadians(super::super::FOV_Y),
-                FieldOfView::HorizontalDegrees,
-            ),
+            field_of_view: super::super::FOV_Y,
             aspect: (bounds.width / bounds.height.max(1.0)).max(0.1),
             near,
             far,
@@ -82,40 +69,33 @@ impl ViewCamera {
         }
     }
 
-    pub fn projection(self) -> Result<Matrix4, MathError> {
-        match self.field_of_view {
-            FieldOfView::HorizontalDegrees(degrees) => {
-                source_camera::perspective(degrees, self.aspect, self.near, self.far)
-            }
-            FieldOfView::VerticalRadians(radians) => {
-                let scale = 1.0 / (radians * 0.5).tan();
-                let range = f64::from(self.near) - f64::from(self.far);
-                Ok([
-                    [scale / self.aspect, 0.0, 0.0, 0.0],
-                    [0.0, scale, 0.0, 0.0],
-                    [0.0, 0.0, (f64::from(self.far) / range) as f32, -1.0],
-                    [
-                        0.0,
-                        0.0,
-                        (f64::from(self.near) * f64::from(self.far) / range) as f32,
-                        0.0,
-                    ],
-                ])
-            }
-        }
+    pub fn projection(self) -> Matrix4 {
+        let scale = 1.0 / (self.field_of_view * 0.5).tan();
+        let range = f64::from(self.near) - f64::from(self.far);
+        [
+            [scale / self.aspect, 0.0, 0.0, 0.0],
+            [0.0, scale, 0.0, 0.0],
+            [0.0, 0.0, (f64::from(self.far) / range) as f32, -1.0],
+            [
+                0.0,
+                0.0,
+                (f64::from(self.near) * f64::from(self.far) / range) as f32,
+                0.0,
+            ],
+        ]
     }
 
-    pub fn raster_projection(self) -> Result<Matrix4, MathError> {
-        let mut projection = self.projection()?;
+    pub fn raster_projection(self) -> Matrix4 {
+        let mut projection = self.projection();
         let range = self.far - self.near;
         projection[2][2] = self.near / range;
         projection[3][2] = self.far * self.near / range;
-        Ok(projection)
+        projection
     }
 
     pub fn view_projection(self) -> Result<Matrix4, MathError> {
         Ok(source_camera::source_multiply(
-            self.projection()?,
+            self.projection(),
             self.view()?,
         ))
     }
@@ -198,46 +178,6 @@ impl RasterClip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::file_preview::viewer3d::camera::CaptureClipDistances;
-
-    #[test]
-    fn reflected_sky_clip_uses_source_pose_and_its_own_depth_range() {
-        let camera = FlyCamera {
-            yaw: 90.0_f32.to_radians(),
-            pitch: -10.0_f32.to_radians(),
-            capture_horizontal_fov_degrees: Some(72.734_36),
-            capture_clip_distances: CaptureClipDistances::new(4.0, 42_370.14),
-            ..FlyCamera::default()
-        };
-        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(1280.0, 720.0));
-        let view = ViewCamera::fly(
-            &camera,
-            bounds,
-            Vec3::new(0.0, 3584.0, 64.0),
-            4.0,
-            42_370.14,
-        );
-        let sky = view.skybox(Vec3::new(-1428.0, 1645.0, 10_991.2), 16.0);
-        assert_eq!([sky.near, sky.far], [2.0, 56_755.84]);
-        let plane = super::super::reflections::Plane {
-            normal: Vec3::new(0.0, 0.0, 1.0),
-            distance: 10_981.2,
-        };
-        let reflected = sky.reflected(plane, true).unwrap();
-        let clip = RasterClip::new(reflected, [0.0, 0.0, 1.0, -plane.distance]).unwrap();
-        assert_eq!(
-            clip.plane.map(f32::to_bits),
-            [0x35c30a00, 0x3ed0dafd, 0x40e00c00, 0xc0da8000]
-        );
-        assert_eq!(clip.view_projection, reflected.view_projection().unwrap());
-        assert_ne!(
-            clip.view_projection,
-            source_camera::source_multiply(
-                reflected.raster_projection().unwrap(),
-                reflected.view().unwrap()
-            )
-        );
-    }
 
     #[test]
     fn bounds_culling_uses_the_raster_halfspace_conservatively() {
@@ -264,7 +204,7 @@ mod tests {
         assert_eq!(clip.plane, [0.0, 0.0, 1.0, -20.0]);
         let invalid = ViewCamera {
             view: ViewTransform::Matrix([[0.0; 4]; 4]),
-            field_of_view: FieldOfView::HorizontalDegrees(70.0),
+            field_of_view: super::super::super::FOV_Y,
             aspect: 1.0,
             near: 2.0,
             far: 1000.0,

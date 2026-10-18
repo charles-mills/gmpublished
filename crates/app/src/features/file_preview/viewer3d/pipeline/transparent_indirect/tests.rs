@@ -41,7 +41,7 @@ fn build(slot: &mut Slot, operations: &[Draw], resolutions: &[Resolved]) {
     assert!(responses.next().is_none());
 }
 
-// Independent original ordered draw model: no run keys, builder, or grouping.
+// Direct-draw oracle, independent of indirect-run grouping.
 fn original(operations: &[Draw], resolutions: &[Resolved]) -> Vec<Event> {
     let mut events = Vec::new();
     for (operation, resolved) in operations.iter().zip(resolutions) {
@@ -126,7 +126,6 @@ fn ordered_draws_match_independent_oracle_across_whole_operation_barriers() {
             operations.push(mesh(item, blend, if visible { None } else { range }));
             resolutions.push(Some((visible, parts)));
         };
-        // Equal page does not imply equal index source, blend, mesh, or material.
         append(a, RenderMode::Translucent, false, vec![part(9, None)]);
         append(a, RenderMode::Translucent, false, vec![part(3, None)]);
         append(a, RenderMode::Translucent, false, vec![part(3, None)]);
@@ -135,7 +134,6 @@ fn ordered_draws_match_independent_oracle_across_whole_operation_barriers() {
         append(a, RenderMode::Additive, true, vec![part(12, None)]);
         append(b, RenderMode::Additive, true, vec![part(15, None)]);
         append(b, RenderMode::Additive, true, vec![part(18, None)]);
-        // A multipage operation cannot be swallowed into either neighboring run.
         append(
             b,
             RenderMode::Additive,
@@ -258,7 +256,6 @@ fn rebuild_replaces_old_descriptors_and_zero_count_and_unsupported_stay_direct()
     assert!(slot.runs.is_empty());
     assert_eq!(slot.one_part_operations, 0);
     assert!(slot.program().is_none());
-    assert!(!enabled(false));
     let unsupported = Slot::default();
     assert!(unsupported.program().is_none());
     assert_eq!(

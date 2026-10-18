@@ -615,7 +615,6 @@ fn transform_brush(
     brush.bounds_min = bounds.min;
     brush.bounds_max = bounds.max;
     if let Some(vertices) = local_vertices {
-        // Swept world AABBs need axial and edge-cross-axis bevels after rotation.
         let mut triangles = Vec::new();
         for first in 0..vertices.len() {
             for second in first + 1..vertices.len() {
@@ -1204,7 +1203,6 @@ pub(super) fn trace_brush_aabb(
         let end_dist = end.dot(plane.normal) - expanded_dist;
         ends_outside |= end_dist > 0.0;
 
-        // Resting contact uses the plane epsilon and must remain outside.
         if start_dist > 0.0 {
             starts_outside = true;
         }

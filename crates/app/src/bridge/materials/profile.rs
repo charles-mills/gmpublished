@@ -139,9 +139,8 @@ pub(super) fn resolve(
     (parameters, parameters::proxies(proxy_source, profile))
 }
 
-/// Merge raw KeyValues before profile selection. Preserve blocks and duplicate
-/// source entries, replacing only the first matching key just as FindKey does.
-/// Source insert overwrites existing keys too; replace only forbids new keys.
+/// Merge before profile selection, preserving duplicate keys and replacing only the first match.
+/// Insert may add keys; replace only updates existing keys.
 pub(super) fn merge(base: &mut KvDocument<'static>, patch: &KvDocument<'_>, insert: bool) {
     for pair in &patch.pairs {
         if let Some(existing) = base

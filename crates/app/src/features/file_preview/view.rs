@@ -1158,8 +1158,6 @@ fn map_preview<'a>(
         let viewer = container(
             iced::widget::shader(super::viewer3d::FlyViewer {
                 cpu_executor: ctx.cpu_executor.cloned(),
-                #[cfg(feature = "gui-benchmark")]
-                benchmark: state.benchmark_view(),
                 render_feedback: state.render_feedback().cloned().unwrap_or_default(),
                 scene: std::sync::Arc::clone(map.scene),
                 content_id: data.content_id(),

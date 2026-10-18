@@ -39,7 +39,7 @@ pub enum ModelLightingSource {
         seed: Arc<ModelLightingSeed>,
         fallback: ModelLightingSnapshot,
     },
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     Explicit(ModelLightingSnapshot),
     DiagnosedFallback {
         reason: ModelLightingFallbackReason,
@@ -50,7 +50,7 @@ pub enum ModelLightingSource {
 impl ModelLightingSource {
     fn is_explicit(&self) -> bool {
         match self {
-            #[cfg(any(test, feature = "map-capture"))]
+            #[cfg(test)]
             Self::Explicit(_) => true,
             Self::Runtime { .. } | Self::DiagnosedFallback { .. } => false,
         }
@@ -59,7 +59,7 @@ impl ModelLightingSource {
     pub fn runtime_seed(&self) -> Option<&Arc<ModelLightingSeed>> {
         match self {
             Self::Runtime { seed, .. } => Some(seed),
-            #[cfg(any(test, feature = "map-capture"))]
+            #[cfg(test)]
             Self::Explicit(_) => None,
             Self::DiagnosedFallback { .. } => None,
         }
@@ -68,7 +68,7 @@ impl ModelLightingSource {
     pub fn fallback_snapshot(&self) -> &ModelLightingSnapshot {
         match self {
             Self::Runtime { fallback, .. } => fallback,
-            #[cfg(any(test, feature = "map-capture"))]
+            #[cfg(test)]
             Self::Explicit(snapshot) => snapshot,
             Self::DiagnosedFallback { snapshot, .. } => snapshot,
         }

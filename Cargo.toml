@@ -135,11 +135,6 @@ opt-level = 3
 [profile.release.package.wgpu-hal]
 opt-level = 3
 
-[profile.profiling]
-inherits = "release"
-debug = true
-strip = "none"
-
 [profile.dev-bundle]
 inherits = "dev"
 debug = 1

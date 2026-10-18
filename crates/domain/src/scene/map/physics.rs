@@ -1,7 +1,5 @@
-//! PHYSCOLLIDE contains dphysmodel_t records, each followed by its VCollide
-//! sections and keyvalues. The sections use the same format as a .phy file.
-//! Reuse the bounded IVP decoder instead of deriving approximate physics from
-//! visible faces or applying a guessed shrink margin to BSP planes.
+//! PHYSCOLLIDE contains dphysmodel_t records, each followed by VCollide sections
+//! and keyvalues. The sections use the same format as a .phy file.
 use super::{ConvexHull, ModelIndex};
 use crate::math::Vec3;
 

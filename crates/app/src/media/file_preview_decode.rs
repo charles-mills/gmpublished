@@ -141,31 +141,6 @@ fn load_preview_data(
     )
 }
 
-#[cfg(feature = "map-capture")]
-pub fn load_map_for_capture_with_model_options(
-    request: &PreviewRequest,
-    gmod_dir: std::path::PathBuf,
-    pool: &rayon::ThreadPool,
-    options: vformats::mdl::ModelAssemblyOptions,
-    texture_residency: &MapTextureResidency,
-) -> Result<PreviewData, PreviewLoadError> {
-    pool.install(|| {
-        let bytes = request.archive.entry_bytes(&request.entry_path)?;
-        let mut stage = |stage| println!("map capture: {stage:?}");
-        stage(PreviewLoadStage::ReadingBsp);
-        request.cancellation.check()?;
-        map_preview::try_map_preview_data_with_prop_model_loader_and_textures(
-            request,
-            &bytes,
-            Some(gmod_dir),
-            Some(pool),
-            &mut stage,
-            &|path, resolver| map_preview::load_prop_model_with_options(path, resolver, options),
-            texture_residency,
-        )
-    })
-}
-
 fn emit_checked_stage(
     request: &PreviewRequest,
     stage: PreviewLoadStage,

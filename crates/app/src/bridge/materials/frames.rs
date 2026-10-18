@@ -1,4 +1,4 @@
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 use super::ResidentTextureMip;
 #[cfg(test)]
 use super::ResolvedTextureMip;
@@ -62,7 +62,7 @@ impl DecodedTextureFrames {
             (self.resident.id().frames.end - self.resident.id().frames.start) as usize
         }
     }
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(crate) fn frame(&self, index: usize) -> Option<&[ResidentTextureMip]> {
         let frame = self
             .resident

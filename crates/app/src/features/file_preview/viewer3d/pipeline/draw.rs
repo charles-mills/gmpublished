@@ -62,25 +62,6 @@ pub fn draw_sky_background<'a>(
     }
 }
 
-/// Feature-only counterfactual; ordinary builds always suppress redundant bindings.
-#[inline]
-pub(super) fn opaque_binding_suppression_enabled() -> bool {
-    #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            !matches!(
-                std::env::var("GMPUBLISHED_OPAQUE_BINDING_SUPPRESSION").as_deref(),
-                Ok("0")
-            )
-        })
-    }
-    #[cfg(not(any(feature = "gui-benchmark", feature = "map-capture")))]
-    {
-        true
-    }
-}
-
 pub fn draw_scene_plan_opaque<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     resources: &'a ViewPipelines,
@@ -92,21 +73,14 @@ pub fn draw_scene_plan_opaque<'a>(
         return;
     }
     pass.set_bind_group(0, view.uniforms, &[]);
-    let suppress_bindings = opaque_binding_suppression_enabled();
     for item in &plan.opaque {
         bind_opaque_mesh_pipeline(pass, resources, upload, *item);
         if let Some(ranges) = plan.opaque_ranges.get(&item.mesh_index) {
-            if suppress_bindings {
-                if !ranges.indices.is_empty() {
-                    bind_model_mesh(pass, upload, *item);
-                }
-                for range in &ranges.indices {
-                    draw_bound_model_range(pass, upload, *item, range.clone());
-                }
-            } else {
-                for range in &ranges.indices {
-                    draw_model_range(pass, upload, *item, range.clone());
-                }
+            if !ranges.indices.is_empty() {
+                bind_model_mesh(pass, upload, *item);
+            }
+            for range in &ranges.indices {
+                draw_bound_model_range(pass, upload, *item, range.clone());
             }
         } else {
             draw_model_item(pass, upload, *item, view.visibility);
@@ -122,14 +96,6 @@ pub fn draw_opaque_surfaces<'a>(
     view: DrawView<'a>,
 ) {
     pass.set_bind_group(0, view.uniforms, &[]);
-    if !opaque_binding_suppression_enabled() {
-        for mesh in &batch.meshes {
-            let item = mesh.item;
-            bind_opaque_mesh_pipeline(pass, resources, upload, item);
-            draw_model_range(pass, upload, item, mesh.indices.clone());
-        }
-        return;
-    }
     let mut bound_mesh = None;
     for mesh in &batch.meshes {
         let item = mesh.item;
@@ -177,23 +143,6 @@ pub fn draw_planar_items<'a>(
     }
 }
 
-/// Feature-only counterfactual; ordinary builds suppress redundant transparent bindings.
-#[inline]
-pub(super) fn transparent_binding_suppression_enabled() -> bool {
-    #[cfg(any(feature = "gui-benchmark", feature = "map-capture"))]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_TRANSPARENT_BINDING_SUPPRESSION").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(any(feature = "gui-benchmark", feature = "map-capture")))]
-    {
-        true
-    }
-}
-
 pub fn draw_operations<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     resources: &'a ViewPipelines,
@@ -201,7 +150,6 @@ pub fn draw_operations<'a>(
     view: DrawView<'a>,
     framebuffer: Option<&'a wgpu::BindGroup>,
 ) {
-    let suppress_bindings = transparent_binding_suppression_enabled();
     use transparent_bindings::{IndexSource, Key, State};
     pass.set_bind_group(0, view.uniforms, &[]);
     // One invocation is one pass/target/transfer segment. Never retain this state.
@@ -223,13 +171,11 @@ pub fn draw_operations<'a>(
                     visible.map(|visible| visible.buffer.is_some()),
                 )
                 .unwrap_or(IndexSource::Visible);
-                if !suppress_bindings
-                    || bindings.mesh(Key {
-                        item: *item,
-                        blend: operation.blend,
-                        source,
-                    })
-                {
+                if bindings.mesh(Key {
+                    item: *item,
+                    blend: operation.blend,
+                    source,
+                }) {
                     let ordinary = if operation.blend == super::RenderMode::Modulate {
                         &resources.modulate_pipeline
                     } else {
@@ -269,8 +215,7 @@ pub fn draw_operations<'a>(
                         IndexSource::Visible => visible.and_then(|visible| visible.buffer.as_ref()),
                     };
                     let Some(indices) = indices else {
-                        // Preserve the original pipeline/material/vertex binds above, but
-                        // never fall back to original indices for an empty visible entry.
+                        // An empty visible index buffer must not fall back to unculled geometry.
                         bindings.reset();
                         continue;
                     };
@@ -280,7 +225,7 @@ pub fn draw_operations<'a>(
                     && let Some(run) = program.runs.get(run_index)
                     && run.operations.start == operation_index + program.operation_offset
                 {
-                    if !suppress_bindings || bindings.page(run.page) {
+                    if bindings.page(run.page) {
                         pass.set_bind_group(
                             2,
                             framebuffer.unwrap_or_else(|| upload.lightmaps.binding(run.page)),
@@ -288,14 +233,12 @@ pub fn draw_operations<'a>(
                         );
                     }
                     pass.multi_draw_indexed_indirect(program.buffer, run.offset, run.count());
-                    // The first operation used the ordinary binding path above.
-                    // Every remaining operation is a whole, same-key one-part draw.
                     operations.nth(run.operations.len() - 2);
                     run_index += 1;
                     continue;
                 }
                 let mut draw_part = |part: super::lightmap_ranges::PageRange| {
-                    if !suppress_bindings || bindings.page(part.page) {
+                    if bindings.page(part.page) {
                         pass.set_bind_group(
                             2,
                             framebuffer.unwrap_or_else(|| upload.lightmaps.binding(part.page)),
@@ -410,16 +353,6 @@ pub fn draw_model_item<'a>(
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         draw_lightmap_ranges(pass, &upload.lightmaps, &mesh.lightmaps.indexed);
     }
-}
-
-fn draw_model_range<'a>(
-    pass: &mut wgpu::RenderPass<'a>,
-    upload: &'a ViewerScene,
-    item: DrawItem,
-    range: std::ops::Range<u32>,
-) {
-    bind_model_mesh(pass, upload, item);
-    draw_bound_model_range(pass, upload, item, range);
 }
 
 fn bind_model_mesh<'a>(pass: &mut wgpu::RenderPass<'a>, upload: &'a ViewerScene, item: DrawItem) {

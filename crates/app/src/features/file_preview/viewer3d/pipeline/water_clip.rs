@@ -81,7 +81,6 @@ mod tests {
         let camera = FlyCamera {
             yaw: 90_f32.to_radians(),
             pitch: -15_f32.to_radians(),
-            capture_horizontal_fov_degrees: Some(72.734_36),
             ..FlyCamera::default()
         };
         let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(1280.0, 720.0));

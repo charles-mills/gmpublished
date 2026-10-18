@@ -3,7 +3,7 @@ use std::time::Duration;
 use wgpu::util::DeviceExt;
 
 #[test]
-#[ignore = "requires an exclusively reserved Vulkan GPU; GMPUBLISHED_NATIVE_TRANSPARENT_MDI must be unset"]
+#[ignore = "requires an exclusively reserved Vulkan GPU"]
 fn distinct_world_sky_and_two_optical_slots_survive_one_submission() {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -39,14 +39,8 @@ fn distinct_world_sky_and_two_optical_slots_survive_one_submission() {
             }))
             .expect("native MDI device");
         assert!(device.features().contains(native));
-        assert!(
-            enabled(true),
-            "run native slot coverage with the MDI control enabled"
-        );
         let independent = render_slots(&device, &queue, false);
         assert_eq!(independent, direct);
-        // Prove this fixture detects the exact alias/overwrite defect: encoding
-        // all four programs against the final slot's buffer loses three colors.
         let shared_region = render_slots(&device, &queue, true);
         assert_ne!(shared_region, independent);
         println!(
@@ -106,8 +100,6 @@ fn render_slots(device: &wgpu::Device, queue: &wgpu::Queue, alias_last_slot: boo
                 .collect::<Vec<_>>()
         })
         .collect();
-    // Use the real production Slot uploader, all before encoding/submitting any
-    // draw. A shared scratch argument region cannot pass this pixel comparison.
     for (slot, parts) in [
         &mut main.world,
         &mut main.skybox,
@@ -117,7 +109,7 @@ fn render_slots(device: &wgpu::Device, queue: &wgpu::Queue, alias_last_slot: boo
     .into_iter()
     .zip(&parts)
     {
-        if enabled(native) {
+        if native {
             let operations: Vec<_> = parts
                 .iter()
                 .map(|(item, part)| Draw {

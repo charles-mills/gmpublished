@@ -77,7 +77,6 @@ pub(super) fn select<K: Eq + Hash + Clone>(
     capacity: MissingCost,
 ) -> Vec<Decision> {
     if let [candidate] = candidates {
-        // An empty accepted union adds no information to an already deduplicated cost.
         let decision = match &candidate.cost {
             Err(reason) => Decision::Rejected(reason.clone()),
             Ok(cost) => match cost.upper_bound() {
@@ -305,13 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn exact_union_budget_is_independent_of_hash_algorithm_seed_and_iteration_order() {
-        use super::super::residency_hash::Builder;
-        for builder in [
-            Builder::Fast(ahash::RandomState::new()),
-            Builder::Fast(ahash::RandomState::new()),
-            Builder::Standard(std::collections::hash_map::RandomState::new()),
-        ] {
+    fn exact_union_budget_is_independent_of_hash_seed_and_iteration_order() {
+        for builder in [ahash::RandomState::new(), ahash::RandomState::new()] {
             for reverse in [false, true] {
                 let make = |mut entries: Vec<(u64, u64)>| {
                     if reverse {

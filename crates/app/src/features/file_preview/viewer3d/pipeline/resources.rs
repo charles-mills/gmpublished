@@ -2,7 +2,7 @@ use super::uniforms::{MaterialUniform, Uniforms};
 use super::{
     BLIT_SHADER_SOURCE, DETAIL_SHADER_SOURCE, DETAIL_VERTEX_ATTRIBUTES, DETAIL_VERTEX_FLOAT_COUNT,
     MODEL_VERTEX_ATTRIBUTES, ModelVertex, SHADER_SOURCE, SKY_SHADER_SOURCE, SKYBOX_FACE_COUNT,
-    SkyboxFace, WATER_SHADER_SOURCE, scene_sample_count, wgpu,
+    SkyboxFace, WATER_SHADER_SOURCE, wgpu,
 };
 use gmpublished_domain::math::Vec3;
 use std::{ops::Deref, sync::Arc};
@@ -23,7 +23,7 @@ pub struct RenderResources {
 #[derive(Debug)]
 pub struct SharedResources {
     pub(super) device: wgpu::Device,
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(super) clip_mode: super::clipping::ClipMode,
     pub(super) texture_uploader: super::texture_upload::SharedUploader,
     pub(super) skinning: std::sync::OnceLock<super::skinning::Resources>,
@@ -51,7 +51,6 @@ pub struct SharedResources {
     pub sky_layout: wgpu::BindGroupLayout,
     pub blit_layout: wgpu::BindGroupLayout,
     pub(super) samplers: super::samplers::SamplerCache,
-    pub(super) sampler_quality: super::samplers::QualityProfile,
     pub blit_sampler: wgpu::Sampler,
     pub water_refraction_sampler: wgpu::Sampler,
     pub sky_vertices: wgpu::Buffer,
@@ -105,7 +104,7 @@ impl SharedResources {
         let texture_uploader = super::texture_upload::TextureUploader::shared(
             device,
             queue,
-            super::texture_upload::configured_policy(),
+            super::texture_upload::UploadPolicy::default(),
         )
         .expect("validated device texture upload policy");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -281,7 +280,6 @@ impl SharedResources {
                     .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING)
             }),
         );
-        let sampler_quality = super::samplers::quality_profile();
         let lightmap_sampler = sampler(
             device,
             "file_preview.model_viewer.lightmap_sampler",
@@ -390,7 +388,7 @@ impl SharedResources {
             .flush();
         Self {
             device: device.clone(),
-            #[cfg(any(test, feature = "map-capture"))]
+            #[cfg(test)]
             clip_mode,
             texture_uploader,
             skinning: std::sync::OnceLock::new(),
@@ -425,7 +423,6 @@ impl SharedResources {
             sky_layout,
             blit_layout,
             samplers,
-            sampler_quality,
             blit_sampler,
             water_refraction_sampler,
             sky_vertices,
@@ -444,7 +441,7 @@ impl RenderResources {
     ) -> Self {
         use super::draw::ViewKind;
         let shared = Arc::new(SharedResources::new(device, queue, format, capabilities));
-        let sample_count = scene_sample_count();
+        let sample_count = super::super::MSAA_SAMPLE_COUNT;
         let main = ViewPipelines::new(
             device,
             Arc::clone(&shared),
@@ -823,26 +820,28 @@ impl RenderResources {
         device: &wgpu::Device,
         key: super::surface_pipelines::SurfacePipelineKey,
     ) -> wgpu::RenderPipeline {
-        use super::{draw::ViewKind, surface_pipelines::SurfaceBlend};
+        use super::{
+            draw::ViewKind,
+            surface_pipelines::{RefractionBlend, SurfaceBlend},
+        };
         let refracted_opaque =
             key.view == ViewKind::Refraction && !key.overlay && key.blend == SurfaceBlend::Opaque;
-        let blend = if key.raster.refraction & 8 != 0 {
-            Some(wgpu::BlendState {
+        let blend = match key.raster.refraction.map(|glass| glass.blend) {
+            Some(RefractionBlend::Masked) => Some(wgpu::BlendState {
                 color: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                     dst_factor: wgpu::BlendFactor::SrcAlpha,
                     operation: wgpu::BlendOperation::Add,
                 },
                 alpha: wgpu::BlendComponent::OVER,
-            })
-        } else if key.raster.refraction != 0 && key.raster.refraction & 4 == 0 || refracted_opaque {
-            None
-        } else {
-            Some(match key.blend {
+            }),
+            Some(RefractionBlend::Opaque) => None,
+            _ if refracted_opaque => None,
+            Some(RefractionBlend::Alpha) | None => Some(match key.blend {
                 SurfaceBlend::Additive => additive_blend_state(),
                 SurfaceBlend::Modulate => modulate_blend_state(),
                 SurfaceBlend::Opaque | SurfaceBlend::Alpha => wgpu::BlendState::ALPHA_BLENDING,
-            })
+            }),
         };
         create_model_pipeline_with_fragment_entry(
             device,
@@ -855,7 +854,7 @@ impl RenderResources {
             blend,
             PipelineRasterMode {
                 ignore_z: key.raster.ignore_z,
-                write_enabled: key.raster.refraction & 2 != 0
+                write_enabled: key.raster.refraction.is_some_and(|glass| glass.depth_write)
                     || (key.blend == SurfaceBlend::Opaque && !key.overlay),
                 bias: if key.overlay || key.raster.decal_bias || key.blend == SurfaceBlend::Modulate
                 {
@@ -876,7 +875,7 @@ impl RenderResources {
             },
             PipelineShaderEntry {
                 vertex: "vs_main",
-                fragment: if key.raster.refraction != 0 {
+                fragment: if key.raster.refraction.is_some() {
                     "fs_glass"
                 } else if refracted_opaque {
                     "fs_refraction"
@@ -885,7 +884,10 @@ impl RenderResources {
                 } else {
                     "fs_main"
                 },
-                write_mask: if (key.raster.refraction != 0 && key.raster.refraction & 16 == 0)
+                write_mask: if key
+                    .raster
+                    .refraction
+                    .is_some_and(|glass| !glass.alpha_write)
                     || key.blend == SurfaceBlend::Modulate
                     || (key.view == ViewKind::Refraction && !refracted_opaque)
                 {
@@ -1535,7 +1537,6 @@ mod sampler_layout_tests {
         );
         let mut images = ImageCache::new(Some(&capabilities));
         let mut lease = images.lease(&resources.texture_uploader);
-        let mut diagnostics = Vec::new();
         let primary = SampledTexture {
             view: &resources.error_texture,
             flags: Some(flags::POINTSAMPLE | flags::CLAMPS),
@@ -1567,25 +1568,7 @@ mod sampler_layout_tests {
                 alpha_policy: crate::bridge::materials::TextureAlphaPolicy::Opaque,
             },
             &mut lease,
-            &mut diagnostics,
         );
-        let policies = diagnostics
-            .iter()
-            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap())
-            .collect::<Vec<_>>();
-        let base = policies
-            .iter()
-            .find(|policy| policy["role"] == "base")
-            .unwrap();
-        let second = policies
-            .iter()
-            .find(|policy| policy["role"] == "base2")
-            .unwrap();
-        assert_eq!(base["policy"]["descriptor"]["mag_filter"], "Nearest");
-        assert_eq!(base["policy"]["descriptor"]["address"][0], "ClampToEdge");
-        assert_eq!(second["policy"]["descriptor"]["mag_filter"], "Linear");
-        assert_eq!(second["policy"]["descriptor"]["address"][1], "ClampToEdge");
-        assert_eq!(diagnostics.len(), 12);
         let requested =
             TextureSamplerPolicy::from_flags(flags::POINTSAMPLE, TextureKind::Texture2d)
                 .request(SamplerQuality {

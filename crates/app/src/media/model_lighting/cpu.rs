@@ -17,7 +17,6 @@ pub(super) struct LightCacheCell {
     pub key: LightCacheKey,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
-    /// Candidate awaiting BSP contents and trace validation.
     pub center: Vec3,
 }
 

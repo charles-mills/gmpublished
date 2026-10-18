@@ -7,26 +7,10 @@ use super::{
 };
 
 use super::images::{ImageLease, ImageView};
-use super::samplers::{SamplerDiagnostic, TextureKind};
+use super::samplers::TextureKind;
 use crate::bridge::materials::{TextureReadTransfer, TextureRole};
 
-#[cfg(feature = "map-capture")]
-pub(in crate::features::file_preview::viewer3d) fn capture_bc_upload() -> &'static str {
-    static MODE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    MODE.get_or_init(
-        || match std::env::var("GMPUBLISHED_MAP_CAPTURE_BC_UPLOAD").as_deref() {
-            Err(std::env::VarError::NotPresent) | Ok("native") => "native",
-            Ok("decode") => "decode",
-            _ => panic!("GMPUBLISHED_MAP_CAPTURE_BC_UPLOAD must be native or decode"),
-        },
-    )
-}
-
 pub(super) fn bc_upload_enabled(device: &wgpu::Device) -> bool {
-    #[cfg(feature = "map-capture")]
-    if capture_bc_upload() == "decode" {
-        return false;
-    }
     device
         .features()
         .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
@@ -564,7 +548,6 @@ impl RenderResources {
         views: MaterialTextureViews<'_>,
         mode: MaterialUploadMode<'_>,
         images: &mut ImageLease<'_>,
-        diagnostics: &mut Vec<SamplerDiagnostic>,
     ) -> (wgpu::BindGroup, wgpu::BindGroup, MaterialBuffers) {
         let frames = mode.frames;
         let material_name = mode.name;
@@ -772,54 +755,26 @@ impl RenderResources {
                     })
                 })
             };
-        let mut sampler = |role, flags, kind, quality| {
-            self.samplers
-                .texture(material_name, role, flags, kind, quality, diagnostics)
-        };
-        let base_sampler = sampler(
-            "base",
-            views.base.flags,
-            TextureKind::Texture2d,
-            self.sampler_quality,
-        );
-        let base2_sampler = sampler(
-            "base2",
-            views.base2.flags,
-            TextureKind::Texture2d,
-            self.sampler_quality,
-        );
-        let normal_sampler = sampler(
-            "normal",
-            views.normal.flags,
-            TextureKind::Texture2d,
-            self.sampler_quality,
-        );
-        let normal2_sampler = sampler(
-            "normal2",
-            views.normal2.flags,
-            TextureKind::Texture2d,
-            self.sampler_quality,
-        );
+        let sampler = |flags, kind| self.samplers.texture(flags, kind);
+        let base_sampler = sampler(views.base.flags, TextureKind::Texture2d);
+        let base2_sampler = sampler(views.base2.flags, TextureKind::Texture2d);
+        let normal_sampler = sampler(views.normal.flags, TextureKind::Texture2d);
+        let normal2_sampler = sampler(views.normal2.flags, TextureKind::Texture2d);
         let detail_sampler = sampler(
-            "detail",
             role_flags(
                 &detail_view,
                 detail.and_then(|detail| detail.texture.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let blend_sampler = sampler(
-            "blend_modulation",
             role_flags(
                 &blend_view,
                 surface.and_then(|surface| surface.blend_modulation.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let emission_sampler = sampler(
-            "emission_mask",
             role_flags(
                 &emission_view,
                 surface
@@ -827,28 +782,22 @@ impl RenderResources {
                     .and_then(|emission| emission.mask.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let cube_sampler = sampler(
-            "environment",
             cube_view.as_ref().and_then(|_| {
                 cube_source
                     .and_then(|cube| cube.source_metadata().and_then(|metadata| metadata.flags))
             }),
             TextureKind::Cubemap,
-            self.sampler_quality,
         );
         let envmask_sampler = sampler(
-            "environment_mask",
             role_flags(
                 &envmap_mask_view,
                 envmap.and_then(|envmap| envmap.mask_texture.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let exponent_sampler = sampler(
-            "phong_exponent",
             role_flags(
                 &exponent_view,
                 phong
@@ -856,10 +805,8 @@ impl RenderResources {
                     .and_then(|texture| texture.texture.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let diffuse_warp_sampler = sampler(
-            "diffuse_warp",
             role_flags(
                 &diffuse_warp_view,
                 phong
@@ -867,10 +814,8 @@ impl RenderResources {
                     .and_then(|texture| texture.texture.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let specular_warp_sampler = sampler(
-            "specular_warp",
             role_flags(
                 &specular_warp_view,
                 phong
@@ -878,13 +823,10 @@ impl RenderResources {
                     .and_then(|texture| texture.texture.as_deref()),
             ),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let refract_tint_sampler = sampler(
-            "refraction_tint",
             role_flags(&refract_tint_view, refract_tint),
             TextureKind::Texture2d,
-            self.sampler_quality,
         );
         let mut entries = vec![
             wgpu::BindGroupEntry {
@@ -1034,7 +976,6 @@ impl RenderResources {
         view: &super::texture_upload::UploadedView,
         state: super::sky::SkyUniform,
         texture_flags: u32,
-        diagnostics: &mut Vec<SamplerDiagnostic>,
     ) -> wgpu::BindGroup {
         use wgpu::util::DeviceExt;
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1042,14 +983,9 @@ impl RenderResources {
             contents: bytemuck::bytes_of(&state),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let sampler = self.samplers.texture(
-            "<sky>",
-            "sky",
-            Some(texture_flags),
-            TextureKind::Texture2d,
-            self.sampler_quality,
-            diagnostics,
-        );
+        let sampler = self
+            .samplers
+            .texture(Some(texture_flags), TextureKind::Texture2d);
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.sky_bind_group"),
             layout: &self.sky_layout,

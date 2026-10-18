@@ -76,50 +76,6 @@ pub enum LightmapMode {
     HdrFallback = 1,
 }
 
-#[cfg(any(test, feature = "map-capture"))]
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum DiagnosticMode {
-    #[default]
-    Disabled = 0,
-    VertexNormalColor = 1,
-    VertexTangentSColor = 2,
-    VertexTangentTColor = 3,
-    VertexNormalLinear = 4,
-    VertexTangentSLinear = 5,
-    VertexTangentTLinear = 6,
-    RawNormal = 7,
-    RawTangentS = 8,
-    RawTangentT = 9,
-    Position = 10,
-    UnitNormal = 11,
-    UnitTangentS = 12,
-    UnitEye = 13,
-    SurfacePosition = 14,
-    SurfaceUv = 15,
-    SurfaceAlpha = 16,
-    SurfaceBaseColor = 17,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Diagnostic {
-    pub mode: u32,
-    padding: [u32; 3],
-    pub transform: [f32; 4],
-}
-
-#[cfg(any(test, feature = "map-capture"))]
-impl Diagnostic {
-    pub const fn new(mode: DiagnosticMode, transform: [f32; 4]) -> Self {
-        Self {
-            mode: mode as u32,
-            padding: [0; 3],
-            transform,
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
@@ -139,7 +95,6 @@ pub struct Uniforms {
     pub shading_mode: u32,
     /// Physical clip-space bias, retained separately from projected texture UVs.
     pub raster_params: [f32; 4],
-    pub diagnostic: Diagnostic,
     pub raster_clip: RasterClip,
 }
 
@@ -435,7 +390,6 @@ impl Uniforms {
                 LightmapMode::Ldr as u32
             },
             shading_mode: scene.shading_mode as u32,
-            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
             raster_clip: RasterClip::default(),
         }
@@ -462,7 +416,6 @@ impl Uniforms {
             viewport_size: [0.0; 2],
             lightmap_mode: LightmapMode::Ldr as u32,
             shading_mode: scene.shading_mode as u32,
-            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
             raster_clip: RasterClip::default(),
         }
@@ -488,12 +441,7 @@ impl Uniforms {
             1.0
         };
         Self {
-            view_proj: mat_mul(
-                view_camera
-                    .raster_projection()
-                    .expect("valid sky camera projection"),
-                view,
-            ),
+            view_proj: mat_mul(view_camera.raster_projection(), view),
             light: [0.4, 0.6, 0.8, AMBIENT],
             camera_position: [eye[0], eye[1], eye[2], 0.0],
             fog_color: fog.map_or([0.0; 4], |fog| {
@@ -518,7 +466,6 @@ impl Uniforms {
                 LightmapMode::Ldr as u32
             },
             shading_mode: scene.shading_mode as u32,
-            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
             raster_clip: RasterClip::default(),
         }
@@ -551,7 +498,6 @@ impl Uniforms {
             viewport_size: [0.0; 2],
             lightmap_mode: LightmapMode::Ldr as u32,
             shading_mode: ShadingMode::Scene as u32,
-            diagnostic: Diagnostic::default(),
             raster_params: [0.0; 4],
             raster_clip: RasterClip::default(),
         }
@@ -583,17 +529,11 @@ impl FlyCameraFrame {
         );
         let near = 4.0;
         let far = (radius * 6.0).max(30_000.0);
-        #[cfg(any(test, feature = "map-capture"))]
-        let (near, far) = camera
-            .capture_clip_distances
-            .map_or((near, far), |clip| (clip.near, clip.far));
         let view_camera = ViewCamera::fly(camera, bounds, eye, near, far);
         Self {
             eye,
             view_camera,
-            proj: view_camera
-                .raster_projection()
-                .expect("valid fly camera projection"),
+            proj: view_camera.raster_projection(),
             near,
             far,
         }
@@ -692,7 +632,7 @@ mod uniform_layout_tests {
     use iced::wgpu::naga::{self, TypeInner};
     use std::mem::{offset_of, size_of};
 
-    use super::{BumpMode, FogMode, FogUniform, MaterialUniform, PlanarKind, Uniforms};
+    use super::{BumpMode, FogUniform, MaterialUniform, PlanarKind, Uniforms};
 
     fn pixel_position(matrix: [[f32; 4]; 4], point: [f32; 4], size: (u32, u32)) -> [f32; 3] {
         let clip = std::array::from_fn::<_, 4, _>(|row| {
@@ -708,128 +648,14 @@ mod uniform_layout_tests {
     }
 
     #[test]
-    fn diagnostic_payload_and_named_view_modes_match_shader_contracts() {
-        use super::{Diagnostic, DiagnosticMode, LightmapMode, ShadingMode};
-        let module =
-            naga::front::wgsl::parse_str(super::super::super::MODEL_SHADER_SOURCE).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, ty)| ty.name.as_deref() == Some("Diagnostic"))
-            .unwrap();
-        let TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("diagnostic struct");
-        };
-        assert_eq!(*span as usize, size_of::<Diagnostic>());
-        assert_eq!(
-            members
-                .iter()
-                .map(|member| member.offset as usize)
-                .collect::<Vec<_>>(),
-            [
-                offset_of!(Diagnostic, mode),
-                offset_of!(Diagnostic, padding),
-                offset_of!(Diagnostic, padding) + 4,
-                offset_of!(Diagnostic, padding) + 8,
-                offset_of!(Diagnostic, transform),
-            ]
-        );
-        assert_eq!(offset_of!(Uniforms, fog), 112);
-        assert_eq!(offset_of!(Uniforms, viewport_size), 192);
-        assert_eq!(offset_of!(Uniforms, raster_params), 208);
-        assert_eq!(offset_of!(Uniforms, diagnostic), 224);
-        assert_eq!(size_of::<Uniforms>(), 336);
-        for (name, expected) in [
-            ("FOG_DISABLED", FogMode::Disabled as u32),
-            ("FOG_AXIAL", FogMode::Axial as u32),
-            ("FOG_HEIGHT", FogMode::Height as u32),
-            ("FOG_IMMERSION", FogMode::Immersion as u32),
-            ("FOG_RADIAL", FogMode::Radial as u32),
-            ("LIGHTMAP_LDR", LightmapMode::Ldr as u32),
-            ("LIGHTMAP_HDR_FALLBACK", LightmapMode::HdrFallback as u32),
-            ("SHADING_SCENE", ShadingMode::Scene as u32),
-            ("SHADING_FULLBRIGHT", ShadingMode::Fullbright as u32),
-            ("DIAGNOSTIC_DISABLED", DiagnosticMode::Disabled as u32),
-            (
-                "DIAGNOSTIC_VERTEX_NORMAL_COLOR",
-                DiagnosticMode::VertexNormalColor as u32,
-            ),
-            (
-                "DIAGNOSTIC_VERTEX_TANGENT_S_COLOR",
-                DiagnosticMode::VertexTangentSColor as u32,
-            ),
-            (
-                "DIAGNOSTIC_VERTEX_TANGENT_T_COLOR",
-                DiagnosticMode::VertexTangentTColor as u32,
-            ),
-            (
-                "DIAGNOSTIC_VERTEX_NORMAL_LINEAR",
-                DiagnosticMode::VertexNormalLinear as u32,
-            ),
-            (
-                "DIAGNOSTIC_VERTEX_TANGENT_S_LINEAR",
-                DiagnosticMode::VertexTangentSLinear as u32,
-            ),
-            (
-                "DIAGNOSTIC_VERTEX_TANGENT_T_LINEAR",
-                DiagnosticMode::VertexTangentTLinear as u32,
-            ),
-            ("DIAGNOSTIC_RAW_NORMAL", DiagnosticMode::RawNormal as u32),
-            (
-                "DIAGNOSTIC_RAW_TANGENT_S",
-                DiagnosticMode::RawTangentS as u32,
-            ),
-            (
-                "DIAGNOSTIC_RAW_TANGENT_T",
-                DiagnosticMode::RawTangentT as u32,
-            ),
-            ("DIAGNOSTIC_POSITION", DiagnosticMode::Position as u32),
-            ("DIAGNOSTIC_UNIT_NORMAL", DiagnosticMode::UnitNormal as u32),
-            (
-                "DIAGNOSTIC_UNIT_TANGENT_S",
-                DiagnosticMode::UnitTangentS as u32,
-            ),
-            ("DIAGNOSTIC_UNIT_EYE", DiagnosticMode::UnitEye as u32),
-            (
-                "DIAGNOSTIC_SURFACE_POSITION",
-                DiagnosticMode::SurfacePosition as u32,
-            ),
-            ("DIAGNOSTIC_SURFACE_UV", DiagnosticMode::SurfaceUv as u32),
-            (
-                "DIAGNOSTIC_SURFACE_ALPHA",
-                DiagnosticMode::SurfaceAlpha as u32,
-            ),
-            (
-                "DIAGNOSTIC_SURFACE_BASE_COLOR",
-                DiagnosticMode::SurfaceBaseColor as u32,
-            ),
-        ] {
-            let (_, constant) = module
-                .constants
-                .iter()
-                .find(|(_, constant)| constant.name.as_deref() == Some(name))
-                .unwrap();
-            assert!(
-                matches!(module.global_expressions[constant.init], naga::Expression::Literal(naga::Literal::U32(value)) if value == expected),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
     fn source_pixel_center_shift_is_half_a_physical_pixel_at_each_target_size() {
         let mut original = <Uniforms as bytemuck::Zeroable>::zeroed();
         original.view_proj = super::perspective(1.3, 16.0 / 9.0, 4.0, 30_000.0);
         original.lightmap_mode = super::LightmapMode::HdrFallback as u32;
-        original.diagnostic = super::Diagnostic::new(
-            super::DiagnosticMode::VertexTangentSColor,
-            [0.0, 0.0, 0.0, 1.0],
-        );
         for size in [(320, 180), (640, 360), (1280, 720), (2560, 1440)] {
             let shifted = original.with_raster_offset(size, [0.5; 2]);
             assert_eq!(shifted.viewport_size, [size.0 as f32, size.1 as f32]);
             assert_eq!(shifted.lightmap_mode, original.lightmap_mode);
-            assert_eq!(shifted.diagnostic, original.diagnostic);
             for point in [
                 [0.0, 0.0, -16.0, 1.0],
                 [1.0, 2.0, -8.0, 1.0],
@@ -1077,7 +903,6 @@ mod uniform_layout_tests {
             ("lightmap_mode", offset_of!(Uniforms, lightmap_mode)),
             ("shading_mode", offset_of!(Uniforms, shading_mode)),
             ("raster_params", offset_of!(Uniforms, raster_params)),
-            ("diagnostic", offset_of!(Uniforms, diagnostic)),
             ("raster_clip", offset_of!(Uniforms, raster_clip)),
         ];
         for (name, source) in [
@@ -1256,45 +1081,6 @@ mod tests {
         FlyCamera, FogMode, FogUniform, MapFog, MapSkyCamera, Rectangle, Uniforms, Vec3,
         average_srgb_rgba,
     };
-
-    #[test]
-    fn capture_clip_distances_are_view_local_and_defaults_are_preserved() {
-        use super::super::super::camera::CaptureClipDistances;
-        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
-        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(1280.0, 720.0));
-        let first = FlyCamera {
-            capture_clip_distances: CaptureClipDistances::new(4.0, 32768.0),
-            ..FlyCamera::default()
-        };
-        let second = FlyCamera {
-            capture_clip_distances: CaptureClipDistances::new(2.0, 65536.0),
-            ..FlyCamera::default()
-        };
-        for (camera, expected) in [
-            (&first, [4.0, 32768.0]),
-            (&second, [2.0, 65536.0]),
-            (&FlyCamera::default(), [4.0, 30000.0]),
-        ] {
-            let frame = super::FlyCameraFrame::new(&scene.scene, camera, bounds);
-            assert_eq!([frame.near, frame.far], expected);
-            assert_eq!(
-                frame.proj,
-                super::perspective(super::FOV_Y, 1280.0 / 720.0, expected[0], expected[1])
-            );
-            assert_eq!(
-                Uniforms::for_fly(&scene, camera, bounds, None, 0.0).water_depth_params[..2],
-                expected
-            );
-        }
-        for (near, far) in [
-            (0.0, 32768.0),
-            (4.0, 4.0),
-            (f32::NAN, 32768.0),
-            (4.0, f32::INFINITY),
-        ] {
-            assert_eq!(CaptureClipDistances::new(near, far), None);
-        }
-    }
 
     #[test]
     fn map_shading_mode_is_shared_by_main_and_sky_views() {

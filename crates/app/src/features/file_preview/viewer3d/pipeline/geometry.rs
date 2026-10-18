@@ -315,9 +315,8 @@ impl ViewerScene {
         resources: &super::resources::RenderResources,
         demanded: &std::collections::BTreeSet<usize>,
         time: f32,
-        overrides: Option<&super::skinning::PhaseOverrides>,
     ) -> Result<(), super::skinning::Error> {
-        if self.assets.animations.instances.is_empty() && overrides.is_none() {
+        if self.assets.animations.instances.is_empty() {
             return Ok(());
         }
         let resources = resources
@@ -329,11 +328,7 @@ impl ViewerScene {
             resources,
             &self.assets,
             &mut self.meshes,
-            &super::skinning::Request {
-                demanded,
-                time,
-                overrides,
-            },
+            &super::skinning::Request { demanded, time },
         )
     }
 

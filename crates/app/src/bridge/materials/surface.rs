@@ -473,7 +473,6 @@ impl SurfaceMaterial {
             }
             return Some(if detail.mode == 1 { 1 } else { 0 });
         }
-        // Model/Unlit detail permutations define only modes0..9.
         (detail.mode <= 9).then_some(detail.mode)
     }
 

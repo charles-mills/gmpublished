@@ -305,8 +305,7 @@ fn displacement_triangles_match_source_checkerboard_for_all_supported_powers() {
             })
             .collect::<Vec<_>>();
         let mut expected = Vec::new();
-        // Source indexes its grid across rows. Compare unordered triangles so
-        // traversal order and cyclic rotations cannot disguise a diagonal error.
+        // Compare unordered triangles to expose diagonal changes independently of index order.
         for y in 0..steps {
             for x in 0..steps {
                 let a = y * (steps + 1) + x;
@@ -794,7 +793,6 @@ fn displacement_static_hull_overlap_is_solid_but_initial_swept_overlap_is_ignore
     assert!(!stationary_ray.start_solid);
     assert_eq!(stationary_ray.fraction, 1.0);
 
-    // Inside the triangle's bounds, but outside the triangle itself.
     let outside = Vec3::new(100.0, 100.0, 4.0);
     let stationary_outside = collision.trace_aabb(outside, outside, extents);
     assert!(!stationary_outside.start_solid, "{stationary_outside:?}");
@@ -2044,7 +2042,6 @@ fn brush_collision_follows_entity_ownership_translation_and_rotation() {
     assert!((hit.end_position[0] - 257.96875).abs() < 1.0e-4, "{hit:?}");
     assert!((hit.normal - Vec3::new(-1.0, 0.0, 0.0)).length_squared() < 1.0e-8);
     assert!(!collision.aabb_trace_solid(Vec3::new(40.0, 20.0, 40.0), Vec3::ZERO));
-    // A hidden collision-only model has no render faces to infer its position from.
     let mut bsp = bsp;
     bsp.models[1].face_count = 0;
     let invisible = MapWalkCollision::from_bsp_instances(

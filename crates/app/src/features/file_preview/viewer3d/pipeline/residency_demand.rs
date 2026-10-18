@@ -214,21 +214,6 @@ fn complete_material_slots(
     additional: impl IntoIterator<Item = usize>,
     material_count: usize,
 ) -> Result<Arc<[usize]>, DemandError> {
-    #[cfg(feature = "map-capture")]
-    let slots = {
-        static SORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *SORTED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_SORTED_MATERIAL_DEMAND").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        }) {
-            sorted_material_slots(slots, additional)
-        } else {
-            let mut original: BTreeSet<_> = slots.iter().copied().collect();
-            original.extend(additional);
-            original.into_iter().collect()
-        }
-    };
-    #[cfg(not(feature = "map-capture"))]
     let slots = sorted_material_slots(slots, additional);
     if let Some(&slot) = slots.iter().find(|&&slot| slot >= material_count) {
         return Err(DemandError::InvalidMaterial {

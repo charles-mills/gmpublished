@@ -35,8 +35,6 @@ fn material_need_visitor_preserves_absent_roles_and_stops_at_first_error() {
         environment_mask: 17,
         refract_tint: 0,
     };
-    // Base, base2, normal, normal2, detail, blend modulation, emission mask.
-    // Even absent roles are visited. DecalModulate's base and detail are raw.
     let expected = vec![
         (11, Unmodified),
         (12, Unmodified),
@@ -46,57 +44,44 @@ fn material_need_visitor_preserves_absent_roles_and_stops_at_first_error() {
         (0, Unmodified),
         (0, Unmodified),
     ];
-    for visitor in [false, true] {
+    let mut seen = Vec::new();
+    infallible(visit_material_needs(&slot, &frames, |need| {
+        assert!(need.resident.is_none() && need.source.is_none());
+        seen.push((need.frame, need.transfer));
+        Ok(())
+    }));
+    assert_eq!(seen, expected);
+    for error_at in 0..expected.len() {
         let mut seen = Vec::new();
-        infallible(visit_material_needs_with_mode(
-            &slot,
-            &frames,
-            visitor,
-            |need| {
-                assert!(need.resident.is_none() && need.source.is_none());
-                seen.push((need.frame, need.transfer));
+        let result = visit_material_needs(&slot, &frames, |need| {
+            seen.push((need.frame, need.transfer));
+            if seen.len() == error_at + 1 {
+                Err("first invalid allocation")
+            } else {
                 Ok(())
-            },
-        ));
-        assert_eq!(seen, expected);
-        for error_at in 0..expected.len() {
-            let mut seen = Vec::new();
-            let result = visit_material_needs_with_mode(&slot, &frames, visitor, |need| {
-                seen.push((need.frame, need.transfer));
-                if seen.len() == error_at + 1 {
-                    Err("first invalid allocation")
-                } else {
-                    Ok(())
-                }
-            });
-            assert_eq!(result, Err("first invalid allocation"));
-            assert_eq!(seen, expected[..=error_at]);
-        }
+            }
+        });
+        assert_eq!(result, Err("first invalid allocation"));
+        assert_eq!(seen, expected[..=error_at]);
     }
+
     slot.shader = MaterialShader::Unknown;
-    for visitor in [false, true] {
-        let mut seen = Vec::new();
-        infallible(visit_material_needs_with_mode(
-            &slot,
-            &frames,
-            visitor,
-            |need| {
-                seen.push((need.frame, need.transfer));
-                Ok(())
-            },
-        ));
-        assert_eq!(
-            seen,
-            [
-                (11, SrgbToLinear),
-                (12, SrgbToLinear),
-                (13, Unmodified),
-                (14, Unmodified)
-            ]
-        );
-    }
+    let mut seen = Vec::new();
+    infallible(visit_material_needs(&slot, &frames, |need| {
+        seen.push((need.frame, need.transfer));
+        Ok(())
+    }));
+    assert_eq!(
+        seen,
+        [
+            (11, SrgbToLinear),
+            (12, SrgbToLinear),
+            (13, Unmodified),
+            (14, Unmodified)
+        ]
+    );
     slot.render_mode = super::super::RenderMode::NoDraw;
-    infallible(visit_material_needs_with_mode(&slot, &frames, true, |_| {
+    infallible(visit_material_needs(&slot, &frames, |_| {
         panic!("NoDraw must not emit texture roles");
     }));
 }
@@ -137,7 +122,6 @@ fn material_need_visitor_emits_exact_surface_sources_frames_and_transfers() {
         )
         .unwrap(),
     );
-    // Obtain private detail/emission field types through real material parsing.
     let resolver = MaterialResolver::prop_lighting_fixture(
         vec![
             (
@@ -216,7 +200,6 @@ fn material_need_visitor_emits_exact_surface_sources_frames_and_transfers() {
         refract_tint: 0,
     };
     let id = |index: usize| Some(data[index].resident().unwrap().id().clone());
-    // Explicit role ordering, including the deliberately absent base slots.
     let expected = vec![
         (None, 11, SrgbToLinear),
         (None, 12, SrgbToLinear),
@@ -235,24 +218,17 @@ fn material_need_visitor_emits_exact_surface_sources_frames_and_transfers() {
             SrgbToLinear,
         ),
     ];
-    for visitor in [false, true] {
-        let mut seen = Vec::new();
-        infallible(visit_material_needs_with_mode(
-            &slot,
-            &frames,
-            visitor,
-            |need| {
-                assert!(need.source.is_none());
-                seen.push((
-                    need.resident.map(|source| source.id().clone()),
-                    need.frame,
-                    need.transfer,
-                ));
-                Ok(())
-            },
+    let mut seen = Vec::new();
+    infallible(visit_material_needs(&slot, &frames, |need| {
+        assert!(need.source.is_none());
+        seen.push((
+            need.resident.map(|source| source.id().clone()),
+            need.frame,
+            need.transfer,
         ));
-        assert_eq!(seen, expected);
-    }
+        Ok(())
+    }));
+    assert_eq!(seen, expected);
 }
 
 #[test]
@@ -336,17 +312,15 @@ fn append_material_pages_preserves_full_recipes_duplicates_and_existing_prefix()
             SrgbToLinear,
         ),
     ];
-    for visitor in [false, true] {
-        let mut seen = vec![expected[0].clone()];
-        append_material_pages_with_mode(&mut seen, &slot, &frames, visitor);
-        assert_eq!(seen.len(), expected.len() + 1);
-        for (actual, expected) in seen
-            .iter()
-            .zip(std::iter::once(&expected[0]).chain(&expected))
-        {
-            assert_eq!(actual.0, expected.0);
-            assert!(Arc::ptr_eq(&actual.1, &expected.1));
-        }
+    let mut seen = vec![expected[0].clone()];
+    append_material_pages(&mut seen, &slot, &frames);
+    assert_eq!(seen.len(), expected.len() + 1);
+    for (actual, expected) in seen
+        .iter()
+        .zip(std::iter::once(&expected[0]).chain(&expected))
+    {
+        assert_eq!(actual.0, expected.0);
+        assert!(Arc::ptr_eq(&actual.1, &expected.1));
     }
 }
 
@@ -793,54 +767,27 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
             clock,
             frame_water_time: 0.0,
             evaluated_materials: Default::default(),
-            #[cfg(feature = "map-capture")]
-            exact_frame: false,
         }
     };
     let first = request(&[0], 0.25);
     assert!(first.page_needs.get().is_none());
-    let uncached = first.page_needs_with_cache(false);
-    assert!(matches!(&uncached, Cow::Owned(_)));
-    assert!(first.page_needs.get().is_none());
-    let cached = first.page_needs_with_cache(true);
-    assert!(matches!(&cached, Cow::Borrowed(_)));
+    let cached = first.page_needs();
     assert_eq!(cached.len(), 1);
-    for ((key, source), (expected_key, expected_source)) in cached.iter().zip(uncached.iter()) {
-        assert_eq!(key, expected_key);
-        assert!(Arc::ptr_eq(source, expected_source));
-    }
-    for _ in 0..4 {
-        assert!(std::ptr::eq(
-            first.page_needs_with_cache(true).as_ref(),
-            cached.as_ref()
-        ));
-    }
-    let fresh = first.page_needs_with_cache(false);
-    assert!(matches!(&fresh, Cow::Owned(_)));
-    assert_eq!(fresh.as_ref(), cached.as_ref());
+    assert!(std::ptr::eq(first.page_needs(), cached));
     assert_eq!(cached[0].0.request.frame, 0);
     let later = request(&[0], 2.25);
-    assert_eq!(later.page_needs_with_cache(true)[0].0.request.frame, 2);
-    assert_eq!(first.page_needs_with_cache(true)[0].0.request.frame, 0);
+    assert_eq!(later.page_needs()[0].0.request.frame, 2);
+    assert_eq!(first.page_needs()[0].0.request.frame, 0);
     let second_view = request(&[1], 2.25);
     assert_ne!(
-        second_view.page_needs_with_cache(true)[0]
-            .0
-            .request
-            .source_id,
+        second_view.page_needs()[0].0.request.source_id,
         cached[0].0.request.source_id
     );
-    assert!(request(&[], 2.25).page_needs_with_cache(true).is_empty());
+    assert!(request(&[], 2.25).page_needs().is_empty());
     let union = request(&[0, 1], 2.25);
-    assert_eq!(union.page_needs_with_cache(true).len(), 2);
-    assert_eq!(
-        union.page_needs_with_cache(true)[0].0,
-        later.page_needs_with_cache(true)[0].0
-    );
-    assert_eq!(
-        union.page_needs_with_cache(true)[1].0,
-        second_view.page_needs_with_cache(true)[0].0
-    );
+    assert_eq!(union.page_needs().len(), 2);
+    assert_eq!(union.page_needs()[0].0, later.page_needs()[0].0);
+    assert_eq!(union.page_needs()[1].0, second_view.page_needs()[0].0);
 }
 
 fn source_page_validation(need: &PageNeed) -> Result<ValidatedPage, String> {
@@ -938,41 +885,6 @@ fn page_validation_cache_keeps_exact_request_limits_before_compatible_image_reus
         .unwrap()
         .get_or_init(policy, || {
             panic!("strict failure must not invalidate permissive request")
-        })
-        .unwrap();
-}
-
-#[test]
-fn page_validation_counterfactual_revalidates_without_populating_or_replacing_cache() {
-    let (_files, need) = rgba_page([1, 2, 3]);
-    let mut cache = PageValidation::default();
-    let policy = PageDevicePolicy {
-        supports_bc: true,
-        max_dimension: 4096,
-        max_array_layers: 256,
-    };
-    let first = cache
-        .get_with(policy, false, || source_page_validation(&need))
-        .unwrap();
-    assert!(matches!(first, Cow::Owned(_)));
-    assert!(cache.cached.is_none());
-    let cached = cache
-        .get_with(policy, true, || source_page_validation(&need))
-        .unwrap();
-    assert!(matches!(cached, Cow::Borrowed(_)));
-    let mut reevaluations = 0;
-    for _ in 0..3 {
-        cache
-            .get_with(policy, false, || {
-                reevaluations += 1;
-                source_page_validation(&need)
-            })
-            .unwrap();
-    }
-    assert_eq!(reevaluations, 3);
-    cache
-        .get_with(policy, true, || {
-            panic!("counterfactual must not replace cached validation")
         })
         .unwrap();
 }

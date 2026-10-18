@@ -7,10 +7,6 @@ Request supported BC texture compression and primitive clip distances (`src/lib.
 +    | wgpu::Features::CLIP_DISTANCES).intersection(adapter.features()),
 ```
 
-Headless initialization also logs the selected adapter, render target format,
-and enabled device features so fixed-camera map captures identify the graphics
-hardware and rendering path used.
-
 Custom primitive pipelines receive the rendering adapter's downlevel capabilities
 through `Pipeline::new_with_capabilities`. Existing pipelines retain their `new`
 implementation by default. The renderer uses this contract to share compatible

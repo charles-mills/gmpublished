@@ -68,8 +68,7 @@ pub(super) use materials::{
     material_dimensions, normalize_map_uv, render_mode_log_suffix, texture_payload_log_suffix,
     water_fallback_log_suffix,
 };
-#[cfg(feature = "map-capture")]
-pub(super) use props::load_prop_model_with_options;
+
 pub(super) use props::{
     DoorBakeResult, LoadedPhy, LoadedPropModel, LoadedPropPhysics, PropBakeResult,
     PropBakeSkipStats, PropCollisionStats, SelectedPropPlacement,

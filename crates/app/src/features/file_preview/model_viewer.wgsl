@@ -108,18 +108,6 @@ fn transform_model_vertex(input: VertexInput) -> VertexOutput {
     if (input.lighting_mode&LIGHTING_LINEAR_ILLUMINATION)!=0u {
         out.color=surface_modulation(true,input.color,(input.lighting_mode&(LIGHTING_STATIC_PROP|LIGHTING_MODEL_DRAW))!=0u).rgb;
     }
-    switch uniforms.diagnostic.mode {
-        case DIAGNOSTIC_VERTEX_NORMAL_COLOR, DIAGNOSTIC_VERTEX_NORMAL_LINEAR: {
-            out.color=clamp(input.normal,vec3<f32>(0.0),vec3<f32>(1.0));
-        }
-        case DIAGNOSTIC_VERTEX_TANGENT_S_COLOR, DIAGNOSTIC_VERTEX_TANGENT_S_LINEAR: {
-            out.color=clamp(input.tangent_s,vec3<f32>(0.0),vec3<f32>(1.0));
-        }
-        case DIAGNOSTIC_VERTEX_TANGENT_T_COLOR, DIAGNOSTIC_VERTEX_TANGENT_T_LINEAR: {
-            out.color=clamp(input.tangent_t,vec3<f32>(0.0),vec3<f32>(1.0));
-        }
-        default: {}
-    }
     out.blend_alpha = input.blend_alpha;
     out.opacity = input.opacity;
     var surface_mark_fade = 1.0;
@@ -154,34 +142,12 @@ fn quantized_vertex_alpha(alpha:f32)->f32 {
 
 fn shade(input: VertexOutput) -> vec4<f32> {
     if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
-    var diagnostic_value=vec3<f32>(0.0);
-    switch uniforms.diagnostic.mode {
-        case DIAGNOSTIC_RAW_NORMAL: {diagnostic_value=input.normal;}
-        case DIAGNOSTIC_RAW_TANGENT_S: {diagnostic_value=input.tangent_s;}
-        case DIAGNOSTIC_RAW_TANGENT_T: {diagnostic_value=input.tangent_t;}
-        case DIAGNOSTIC_POSITION: {diagnostic_value=input.world_position_clip.xyz;}
-        case DIAGNOSTIC_UNIT_NORMAL: {diagnostic_value=input.normal_vertex_unit;}
-        case DIAGNOSTIC_UNIT_TANGENT_S: {diagnostic_value=input.tangent_vertex_unit.xyz;}
-        case DIAGNOSTIC_UNIT_EYE: {diagnostic_value=input.eye_vertex_unit;}
-        case DIAGNOSTIC_VERTEX_NORMAL_COLOR, DIAGNOSTIC_VERTEX_TANGENT_S_COLOR, DIAGNOSTIC_VERTEX_TANGENT_T_COLOR: {
-            let color=clamp(input.color,vec3<f32>(0.0),vec3<f32>(1.0));
-            return vec4<f32>(select(pow((color+vec3<f32>(0.055))/1.055,vec3<f32>(2.4)),color/12.92,color<=vec3<f32>(0.04045)),1.0);
-        }
-        case DIAGNOSTIC_VERTEX_NORMAL_LINEAR, DIAGNOSTIC_VERTEX_TANGENT_S_LINEAR, DIAGNOSTIC_VERTEX_TANGENT_T_LINEAR: {
-            return vec4<f32>(clamp(input.color,vec3<f32>(0.0),vec3<f32>(1.0)),1.0);
-        }
-        default: {}
-    }
-    if uniforms.diagnostic.mode!=DIAGNOSTIC_DISABLED && uniforms.diagnostic.mode<DIAGNOSTIC_SURFACE_POSITION {
-        return vec4<f32>(clamp(diagnostic_value*uniforms.diagnostic.transform.w+uniforms.diagnostic.transform.xyz,vec3<f32>(0.0),vec3<f32>(1.0)),1.0);
-    }
     let height_fog=uniforms.fog.mode==FOG_HEIGHT;
     let mark_fade=vertex_surface_mark_fade(input);
     if mark_fade<=0.0 {discard;}
     let weight=surface_weight(input.uv,input.blend_alpha,height_fog);
     let uv=surface_scroll_uv(input.uv,surface.base_s,surface.base_t,surface.base_scroll);
     var albedo=textureSample(base_texture,base_sampler,uv);
-    let sampled_base=albedo;
     if surface.flags.x==SURFACE_DECAL_MODULATE {
         if albedo.a<=0.0 {discard;}
         let factor=pow(view_fog_factor(input.world_position_clip.xyz,1.0/input.clip_position.w),0.4);
@@ -221,16 +187,6 @@ fn shade(input: VertexOutput) -> vec4<f32> {
     if material.vertex_alpha!=0u {opacity*=quantized_vertex_alpha(mark_fade);}
     let alpha_test=select(material.alpha_test!=0u,surface.state.x!=0u,surface.flags.x!=SURFACE_NONE);
     if alpha_test && opacity<surface.misc.x {discard;}
-    switch uniforms.diagnostic.mode {
-        case DIAGNOSTIC_SURFACE_POSITION: {diagnostic_value=input.world_position_clip.xyz;}
-        case DIAGNOSTIC_SURFACE_UV: {diagnostic_value=vec3<f32>(uv,0.0);}
-        case DIAGNOSTIC_SURFACE_ALPHA: {diagnostic_value=vec3<f32>(sampled_base.a);}
-        case DIAGNOSTIC_SURFACE_BASE_COLOR: {diagnostic_value=sampled_base.rgb;}
-        default: {}
-    }
-    if uniforms.diagnostic.mode>=DIAGNOSTIC_SURFACE_POSITION {
-        return vec4<f32>(clamp(diagnostic_value*uniforms.diagnostic.transform.w+uniforms.diagnostic.transform.xyz,vec3<f32>(0.0),vec3<f32>(1.0)),1.0);
-    }
     if material.alpha_test!=0u {opacity=1.0;}
     if surface.state.w!=0u && modulation.a==1.0 && (!model_draw || draw_opacity==1.0) {
         opacity=select(1.0,draw_opacity,model_draw);

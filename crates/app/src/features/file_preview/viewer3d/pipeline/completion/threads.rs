@@ -1,4 +1,3 @@
-//! Retain completion threads until they can be joined before process teardown.
 use super::{CompletionDriver, Signal};
 use std::sync::{Mutex, Weak};
 use std::thread::JoinHandle;
@@ -360,7 +359,6 @@ mod tests {
             panic!("injected registry-lock poison");
         });
         assert!(poisoned.is_err());
-        // Synchronize on control poison without consuming the retained handle.
         let deadline = Instant::now() + Duration::from_secs(2);
         while !registry
             .lock()

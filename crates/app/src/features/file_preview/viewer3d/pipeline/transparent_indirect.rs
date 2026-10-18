@@ -1,5 +1,3 @@
-//! Native, fixed-count indirect draws for adjacent whole transparent operations.
-//! The existing ordered queue owns every operation; this stores only multi-runs.
 use super::geometry::ViewerScene;
 use super::lightmap_ranges::PageRange;
 use super::reflections::SceneView;
@@ -17,10 +15,6 @@ const MAX_ARGUMENTS: usize = MAX_ARGUMENT_BYTES / ARGUMENT_STRIDE;
 pub(super) struct Slots {
     pub(super) world: Slot,
     pub(super) skybox: Slot,
-    #[cfg(feature = "map-capture")]
-    native_supported: bool,
-    #[cfg(feature = "map-capture")]
-    active: bool,
 }
 
 #[derive(Debug, Default)]
@@ -78,46 +72,22 @@ struct Key {
     page: Option<LightmapPageId>,
 }
 
-/// COUNT publicly guarantees native fixed-count MDI in wgpu 27. No count buffer
-/// or COUNT entry point is used, and the emulated fixed-count path is excluded.
-fn enabled(native_supported: bool) -> bool {
-    if !native_supported {
-        return false;
-    }
-    #[cfg(any(feature = "map-capture", feature = "gui-benchmark"))]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var_os("GMPUBLISHED_NATIVE_TRANSPARENT_MDI").as_deref()
-                != Some(std::ffi::OsStr::new("0"))
-        })
-    }
-    #[cfg(not(any(feature = "map-capture", feature = "gui-benchmark")))]
-    true
-}
-
 pub(super) fn prepare(
     view: &mut SceneView,
     upload: &ViewerScene,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) {
+    // COUNT publicly guarantees native fixed-count MDI in wgpu 27. No count buffer
+    // or COUNT entry point is used, and the emulated fixed-count path is excluded.
     let native_supported = device
         .features()
         .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
-    if !enabled(native_supported) {
-        view.transparent_indirect = Slots {
-            #[cfg(feature = "map-capture")]
-            native_supported,
-            ..Slots::default()
-        };
+    if !native_supported {
+        view.transparent_indirect = Slots { ..Slots::default() };
         return;
     }
-    #[cfg(feature = "map-capture")]
-    {
-        view.transparent_indirect.native_supported = native_supported;
-        view.transparent_indirect.active = true;
-    }
+
     view.transparent_indirect.world.prepare(
         &view.transparency,
         upload,
@@ -285,9 +255,7 @@ impl Slot {
             }));
             self.capacity = capacity;
         }
-        // Each SceneView/world/sky slot is prepared once before rendering it.
-        // Other optical/intersection/pane views own separate buffers, so queue
-        // writes cannot overwrite arguments for another draw in this submission.
+        // Each view owns its argument buffer; writes must not alias another view in this submission.
         queue.write_buffer(self.buffer.as_ref().expect("argument buffer"), 0, bytes);
     }
 
@@ -299,19 +267,6 @@ impl Slot {
             buffer: self.buffer.as_ref()?,
             runs: &self.runs,
             operation_offset: 0,
-        })
-    }
-
-    #[cfg(feature = "map-capture")]
-    fn diagnostics(&self) -> serde_json::Value {
-        serde_json::json!({
-            "one_part_operations":self.one_part_operations,
-            "multi_draw_runs":self.runs.len(),
-            "indirect_parts":self.arguments.len(),
-            "draw_calls_saved":self.arguments.len().saturating_sub(self.runs.len()),
-            "argument_bytes":self.arguments.len()*ARGUMENT_STRIDE,
-            "buffer_capacity_bytes":self.capacity,
-            "overflowed":self.overflowed,
         })
     }
 }
@@ -327,18 +282,6 @@ fn push_bounded<T>(values: &mut Vec<T>, value: T, maximum: usize) -> bool {
     }
     values.push(value);
     true
-}
-
-#[cfg(feature = "map-capture")]
-impl Slots {
-    pub(super) fn diagnostics(&self) -> serde_json::Value {
-        serde_json::json!({
-            "native_supported":self.native_supported,
-            "active":self.active,
-            "world":self.world.diagnostics(),
-            "skybox":self.skybox.diagnostics(),
-        })
-    }
 }
 
 #[cfg(test)]

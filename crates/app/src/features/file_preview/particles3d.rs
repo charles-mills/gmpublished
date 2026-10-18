@@ -581,7 +581,6 @@ fn sheet_uv_rect(
 
 #[derive(Clone, Debug)]
 struct DrawBatch {
-    /// None selects the white fallback.
     texture_slot: Option<usize>,
     additive: bool,
     range: std::ops::Range<u32>,

@@ -232,7 +232,7 @@ impl Drop for Interest {
     }
 }
 
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct PageCacheStats {
     pub resident_reserved_bytes: usize,
@@ -297,8 +297,8 @@ impl TexturePageCache {
     pub fn subscribe(&self) -> PageSubscription {
         self.inner.signal.subscribe()
     }
-    #[cfg(any(test, feature = "map-capture"))]
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
+    #[cfg(test)]
     pub fn stats(&self) -> PageCacheStats {
         let state = self.inner.state.lock();
         PageCacheStats {

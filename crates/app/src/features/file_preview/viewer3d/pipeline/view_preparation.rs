@@ -80,10 +80,6 @@ pub(super) struct PlanCache {
 }
 
 impl PlanCache {
-    #[cfg(feature = "map-capture")]
-    pub(super) fn world_cache_diagnostics(&self) -> serde_json::Value {
-        self.world_cache.diagnostics()
-    }
     pub(super) fn is_cached(
         &self,
         upload: &ViewerScene,

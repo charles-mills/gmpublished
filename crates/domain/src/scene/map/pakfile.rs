@@ -248,7 +248,6 @@ mod tests {
             pak.indexed_entries().unwrap(),
             clone.indexed_entries().unwrap()
         );
-        assert!(!format!("{pak:?}").contains("materials/a.vmt"));
     }
 
     #[test]

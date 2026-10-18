@@ -109,7 +109,6 @@ impl MeshReferences {
     fn mark(&self, active: &mut [bool], clusters: Option<&[bool]>) {
         if let Some((faces, clusters)) = self.faces.as_ref().zip(clusters) {
             for alternatives in faces {
-                // Visibility emits the first eligible range for each face.
                 if let Some(range) = alternatives.iter().find(|range| match range.visibility {
                     MapVisibilityBucket::Always => true,
                     MapVisibilityBucket::Cluster(cluster) => {

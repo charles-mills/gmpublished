@@ -37,12 +37,28 @@ enum Input {
     Constant(f32),
     Variable(Variable),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Arithmetic {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Unary {
+    Abs,
+    Frac,
+    Int,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Op {
     Sine([Input; 4]),
     Equals(Variable),
-    Arithmetic(&'static str, Variable, Variable),
-    Unary(&'static str, Variable),
+    Arithmetic(Arithmetic, Variable, Variable),
+    Unary(Unary, Variable),
     Clamp(Variable, [Input; 2]),
     Ramp([Input; 2]),
     Noise {
@@ -69,7 +85,6 @@ pub struct Program {
     code: Vec<Instruction>,
     written: Vec<bool>,
     pub requires_evaluation: bool,
-    animated: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct State {
@@ -172,14 +187,6 @@ impl Program {
             match p.instruction(proxy) {
                 Some(instruction) => {
                     p.written[instruction.result.index] = true;
-                    p.animated |= !matches!(
-                        instruction.op,
-                        Op::Equals(_)
-                            | Op::Arithmetic(..)
-                            | Op::Unary(..)
-                            | Op::Clamp(..)
-                            | Op::Transform(..)
-                    );
                     p.requires_evaluation |= match &instruction.op {
                         Op::Scroll(inputs) => {
                             inputs.iter().any(|v| matches!(v, Input::Variable(_)))
@@ -264,19 +271,19 @@ impl Program {
             "equals" => Op::Equals(var("srcvar1")?),
             "add" | "subtract" | "multiply" | "divide" => Op::Arithmetic(
                 match proxy.name.as_str() {
-                    "add" => "add",
-                    "subtract" => "subtract",
-                    "multiply" => "multiply",
-                    _ => "divide",
+                    "add" => Arithmetic::Add,
+                    "subtract" => Arithmetic::Subtract,
+                    "multiply" => Arithmetic::Multiply,
+                    _ => Arithmetic::Divide,
                 },
                 var("srcvar1")?,
                 var("srcvar2")?,
             ),
             "abs" | "frac" | "int" => Op::Unary(
                 match proxy.name.as_str() {
-                    "abs" => "abs",
-                    "frac" => "frac",
-                    _ => "int",
+                    "abs" => Unary::Abs,
+                    "frac" => Unary::Frac,
+                    _ => Unary::Int,
                 },
                 var("srcvar1")?,
             ),
@@ -342,7 +349,7 @@ impl Program {
     pub fn is_animated(&self) -> bool {
         // An ordered program may read the value retained from its previous
         // bind. Keep it ticking even when it contains no explicit time input.
-        self.animated || (self.requires_evaluation && !self.code.is_empty())
+        self.requires_evaluation && !self.code.is_empty()
     }
     pub fn evaluate<'a>(
         &self,
@@ -405,10 +412,10 @@ impl Program {
                 ),
                 Op::Arithmetic(kind, a, b) => {
                     let apply = |a, b| match *kind {
-                        "add" => a + b,
-                        "subtract" => a - b,
-                        "multiply" => a * b,
-                        _ => {
+                        Arithmetic::Add => a + b,
+                        Arithmetic::Subtract => a - b,
+                        Arithmetic::Multiply => a * b,
+                        Arithmetic::Divide => {
                             if b == 0.0 {
                                 a
                             } else {
@@ -427,11 +434,11 @@ impl Program {
                 }
                 Op::Unary(kind, a) => {
                     let apply = |v: f32| match *kind {
-                        "abs" => v.abs(),
-                        "int" => v.trunc(),
-                        _ => v.fract(),
+                        Unary::Abs => v.abs(),
+                        Unary::Int => v.trunc(),
+                        Unary::Frac => v.fract(),
                     };
-                    if *kind != "abs"
+                    if *kind != Unary::Abs
                         && let Some(size) = vector_size
                     {
                         Value::Vector(vector(a).map(apply), size)

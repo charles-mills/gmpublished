@@ -102,7 +102,7 @@ impl Image {
     }
 }
 
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub(super) struct ImageStats {
     pub allocations: usize,
@@ -112,14 +112,14 @@ pub(super) struct ImageStats {
     pub compatible_transfer_views: bool,
 }
 
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub(super) struct ImageResidency {
     pub allocations: usize,
     pub estimated_bytes: u64,
 }
 
-#[cfg(any(test, feature = "map-capture"))]
+#[cfg(test)]
 pub(super) fn lease_stats(images: &[Arc<Image>]) -> ImageResidency {
     let mut seen = std::collections::HashSet::new();
     let mut stats = ImageResidency::default();
@@ -255,7 +255,7 @@ impl ImageCache {
         )
     }
 
-    #[cfg(any(test, feature = "map-capture"))]
+    #[cfg(test)]
     pub(super) fn stats(&self) -> ImageStats {
         let mut stats = ImageStats {
             uploads: self.uploads,

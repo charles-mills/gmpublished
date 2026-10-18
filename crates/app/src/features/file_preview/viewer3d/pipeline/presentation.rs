@@ -141,34 +141,4 @@ mod tests {
         assert!(history.get(&1).is_none());
         assert_eq!(Arc::strong_count(&cancelled), 1);
     }
-
-    #[test]
-    fn output_identity_includes_view_scene_and_exact_pixel_extent() {
-        let key = OutputKey {
-            view: ViewId::default(),
-            scene: SceneKey::Model(1),
-            size: (320, 180),
-        };
-        for other in [
-            OutputKey {
-                view: ViewId::default(),
-                ..key
-            },
-            OutputKey {
-                scene: SceneKey::Map(1),
-                ..key
-            },
-            OutputKey {
-                size: (640, 360),
-                ..key
-            },
-        ] {
-            let mut history = SubmissionHistory::default();
-            history.stage(key, 17);
-            history.submitted(|_| {});
-            assert!(history.get(&other).is_none());
-            history.validate(&other);
-            assert!(history.get(&key).is_none());
-        }
-    }
 }

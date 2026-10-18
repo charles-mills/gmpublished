@@ -1,7 +1,6 @@
 use super::bindings::{PageNeed, push_page};
 use super::images::{ImageLease, ImageView};
 use super::resources::RenderResources;
-use super::samplers::SamplerDiagnostic;
 use super::upload::UploadedSkybox;
 use super::{PreviewScene, wgpu};
 use crate::bridge::materials::{
@@ -111,7 +110,6 @@ pub(super) fn sky(
     resources: &RenderResources,
     source: &PreviewScene,
     images: &mut ImageLease<'_>,
-    samplers: &mut Vec<SamplerDiagnostic>,
 ) -> Option<UploadedSkybox> {
     let skybox = source.map()?.skybox.as_ref()?;
     let face_bind_groups = std::array::from_fn(|index| {
@@ -172,7 +170,6 @@ pub(super) fn sky(
             &view,
             super::sky::SkyUniform::new(material),
             flags,
-            samplers,
         ))
     });
     Some(UploadedSkybox { face_bind_groups })
@@ -197,7 +194,6 @@ pub(super) fn immersion(
     resources: &RenderResources,
     effect: &ScreenRefraction,
     images: &mut ImageLease<'_>,
-    samplers: &mut Vec<SamplerDiagnostic>,
 ) -> Arc<super::screen_refraction::Texture> {
     let view = match super::frame_selection::immersion_frame(effect) {
         Ok(frame) => RenderResources::create_data_frame_view(
@@ -220,14 +216,9 @@ pub(super) fn immersion(
             .source_metadata()
             .and_then(|metadata| metadata.flags)
     });
-    let sampler = resources.samplers.texture(
-        &effect.name,
-        "underwater_normal",
-        flags,
-        super::samplers::TextureKind::Texture2d,
-        resources.sampler_quality,
-        samplers,
-    );
+    let sampler = resources
+        .samplers
+        .texture(flags, super::samplers::TextureKind::Texture2d);
     Arc::new(super::screen_refraction::Texture {
         view: view.unwrap_or_else(|| resources.flat_normal.clone()),
         sampler,

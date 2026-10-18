@@ -86,53 +86,6 @@ impl DrawPlan {
     }
 }
 
-#[cfg(feature = "map-capture")]
-impl DrawPlan {
-    pub(super) fn opaque_mesh_indices(&self) -> HashSet<usize> {
-        self.opaque
-            .iter()
-            .map(|item| item.mesh_index)
-            .chain(self.world_opaque.batches.iter().flat_map(|batch| {
-                batch
-                    .surfaces
-                    .meshes
-                    .iter()
-                    .map(|mesh| mesh.item.mesh_index)
-            }))
-            .chain(
-                self.brushes
-                    .iter()
-                    .flat_map(|batch| batch.opaque.meshes.iter().map(|mesh| mesh.item.mesh_index)),
-            )
-            .collect()
-    }
-
-    pub(super) fn surface_mark_count(&self) -> usize {
-        self.surface_marks.len()
-            + self
-                .world_opaque
-                .batches
-                .iter()
-                .map(|batch| batch.surfaces.surface_marks.len())
-                .sum::<usize>()
-            + self
-                .brushes
-                .iter()
-                .map(|batch| batch.opaque.surface_marks.len())
-                .sum::<usize>()
-    }
-
-    pub(super) fn receiver_mark_count(&self) -> usize {
-        self.receiver_marks.len()
-            + self
-                .brushes
-                .iter()
-                .flat_map(|batch| &batch.transparent)
-                .map(|group| group.surface_marks.len())
-                .sum::<usize>()
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DrawItem {
     pub(super) mesh_index: usize,

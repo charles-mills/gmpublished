@@ -114,8 +114,7 @@ impl MapWaterVolumes {
         let &(index, contents) = self.leaves.get(leaf as usize)?;
         let body_index = usize::try_from(index).ok()?;
         let body = self.bodies.get(body_index)?.as_ref()?;
-        // Compiler leaf association is authoritative, including boundary
-        // ownership. Do not select the first material or nearest surface.
+        // Compiled leaf associations determine pool and boundary ownership.
         Some(MapWaterSample {
             body_index,
             body,

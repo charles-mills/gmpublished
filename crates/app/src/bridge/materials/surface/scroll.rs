@@ -18,7 +18,6 @@ impl TextureScroll {
             .get("texturescrollvar")?
             .trim()
             .to_ascii_lowercase();
-        // Only matrix destinations consumed by the generic surface shaders.
         if !matches!(
             parameter.as_str(),
             "$basetexturetransform"
@@ -45,9 +44,7 @@ impl TextureScroll {
     }
 
     pub(super) fn transform(&self) -> (TextureTransform, [f32; 4]) {
-        // Source replaces the matrix, including authored translation/rotation.
-        // Keep the phase in the view shader so immutable material bindings can
-        // be shared between independently timed previews and optical passes.
+        // Source replaces the matrix. The per-view shader clock keeps cached materials immutable.
         let angle = f64::from(self.angle).to_radians();
         let velocity = [
             angle.cos() as f32 * self.rate,

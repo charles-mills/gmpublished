@@ -21,8 +21,7 @@ use crate::media::preview_model::{
 };
 
 mod camera;
-#[cfg(feature = "map-capture")]
-pub(super) mod capture;
+
 mod doors;
 mod draw_plan;
 pub(super) mod feedback;
@@ -115,9 +114,6 @@ const CHECKERBOARD_MIP_1X1_BYTES: usize = 4;
 const PHY_DEBUG_RGBA: [u8; 4] = [48, 210, 255, 96];
 const MSAA_SAMPLE_COUNT: u32 = 4;
 
-pub(super) fn scene_sample_count() -> u32 {
-    pipeline::sampling::scene_sample_count()
-}
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
 const DETAIL_VERTEX_FLOAT_COUNT: u64 = 14;

@@ -1,6 +1,4 @@
 // Source SDK common_vertexlitgeneric_dx9.h and skin_ps20b.fxc.
-// Inputs N/L/V are normalized in the caller. Light selection, attenuation,
-// texture sampling and shader initialization remain separate scene contracts.
 fn source_model_ambient(normal: vec3<f32>, cube: array<vec3<f32>, 6>) -> vec3<f32> {
     let squared = normal * normal;
     return squared.x * select(cube[1], cube[0], normal.x >= 0.0)
@@ -16,7 +14,6 @@ fn source_model_diffuse_coordinate(normal: vec3<f32>, light_direction: vec3<f32>
 }
 
 fn source_model_diffuse_term(coordinate: f32, ambient_occlusion: f32, has_warp: bool, warp_texel: vec3<f32>) -> vec3<f32> {
-    // AO changes the coordinate before the raw UNORM ramp is sampled.
     return select(vec3<f32>(coordinate * ambient_occlusion), 2.0 * warp_texel, has_warp);
 }
 

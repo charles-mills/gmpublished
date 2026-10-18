@@ -104,8 +104,6 @@ mod tests {
                     let source = if suppress {
                         IndexSource::select(*explicit_range, *visible_buffer)
                     } else {
-                        // Independent model of old draw_model_range/draw_model_item:
-                        // ranges ignore visibility; missing visible buffers do not draw.
                         match (*explicit_range, *visible_buffer) {
                             (true, _) | (false, None) => Some(IndexSource::Original),
                             (false, Some(true)) => Some(IndexSource::Visible),
@@ -114,7 +112,7 @@ mod tests {
                     };
                     let Some(source) = source else {
                         state.reset();
-                        // No draw, but the old path can change pipeline/material/vertex.
+                        // A skipped mesh may still change the underlying bindings.
                         bound_mesh = None;
                         continue;
                     };
@@ -140,8 +138,6 @@ mod tests {
                 }
                 Operation::Overlay | Operation::Sprite | Operation::PassBoundary => {
                     state.reset();
-                    // Overlay/Sprite replace pipeline, material, vertex and lightmap.
-                    // A new pass starts with no bindings. None models both barriers.
                     bound_mesh = None;
                     bound_page = None;
                     match operation {
@@ -224,7 +220,6 @@ mod tests {
                 RenderMode::Translucent,
                 false,
                 Some(false),
-                // Metadata cannot cause a fallback draw without a visible buffer.
                 vec![(0..3, None)],
             ),
             ordinary(),

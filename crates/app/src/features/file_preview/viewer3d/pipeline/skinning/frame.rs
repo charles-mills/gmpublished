@@ -3,28 +3,17 @@ use super::gpu::{Dispatch, Placement, Resources};
 use crate::media::preview_model::ModelAnimationPlaybackError;
 use gmpublished_domain::math::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(feature = "map-capture")]
-use std::sync::atomic::AtomicU64;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use vformats::mdl::{ModelAnimationError, ModelPose};
-
-#[derive(Clone, Copy, Debug)]
-pub(in crate::features::file_preview::viewer3d) struct Phase {
-    pub sequence: Option<usize>,
-    pub cycle: f32,
-}
-pub(in crate::features::file_preview::viewer3d) type PhaseOverrides = BTreeMap<usize, Phase>;
 
 pub(in super::super) struct Request<'a> {
     pub demanded: &'a BTreeSet<usize>,
     pub time: f32,
-    pub overrides: Option<&'a PhaseOverrides>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(in super::super) enum Error {
-    #[error("animation phase override has no instance {0}")]
-    InvalidOverride(usize),
     #[error(
         "animation instance {instance}, mesh {mesh}, effective material {material}: animated planar surfaces are unsupported"
     )]
@@ -89,16 +78,6 @@ pub(in super::super) struct Frame {
     pub lighting_origin_updates: BTreeMap<usize, Vec3>,
     revision: u64,
     active: Vec<usize>,
-    #[cfg(feature = "map-capture")]
-    evaluations: u64,
-    #[cfg(feature = "map-capture")]
-    palette_upload_bytes: u64,
-    #[cfg(feature = "map-capture")]
-    encoded_dispatches: AtomicU64,
-    #[cfg(feature = "map-capture")]
-    encoded_vertices: AtomicU64,
-    #[cfg(feature = "map-capture")]
-    output_initializations: AtomicU64,
 }
 
 impl Frame {
@@ -122,54 +101,22 @@ impl Frame {
         meshes: &mut [ViewerMesh],
         request: &Request<'_>,
     ) -> Result<(), Error> {
-        let Request {
-            demanded,
-            time,
-            overrides,
-        } = *request;
+        let Request { demanded, time } = *request;
         let sources = assets.source.model_animations();
         self.lighting_origin_updates.clear();
-        if let Some(overrides) = overrides {
-            for (&index, phase) in overrides {
-                let source = sources.get(index).ok_or(Error::InvalidOverride(index))?;
-                if !phase.cycle.is_finite() || !(0.0..=1.0).contains(&phase.cycle) {
-                    return Err(Error::Pose {
-                        instance: index,
-                        error: ModelAnimationError::InvalidCycle,
-                    });
-                }
-                if let Some(sequence) = phase.sequence {
-                    source
-                        .animation
-                        .duration(sequence)
-                        .map_err(|error| Error::Pose {
-                            instance: index,
-                            error,
-                        })?;
-                }
-            }
-        }
         self.active.clear();
         self.active.extend(demanded);
         for &index in demanded {
             let instance = &sources[index];
             let state = &mut self.instances[index];
-            let phase = overrides.and_then(|overrides| overrides.get(&index));
-            let sequence = phase
-                .and_then(|phase| phase.sequence)
-                .unwrap_or(instance.sequence);
-            let cycle = phase.map_or_else(
-                || {
-                    instance
-                        .playback
-                        .cycle(&instance.animation, sequence, time)
-                        .map_err(|error| Error::Playback {
-                            instance: index,
-                            error,
-                        })
-                },
-                |phase| Ok(phase.cycle),
-            )?;
+            let sequence = instance.sequence;
+            let cycle = instance
+                .playback
+                .cycle(&instance.animation, sequence, time)
+                .map_err(|error| Error::Playback {
+                    instance: index,
+                    error,
+                })?;
             if state.phase == Some((sequence, cycle.to_bits())) {
                 continue;
             }
@@ -189,11 +136,6 @@ impl Frame {
                 })
             });
             queue.write_buffer(palette, 0, bytemuck::cast_slice(&state.pose.skin_matrices));
-            #[cfg(feature = "map-capture")]
-            {
-                self.evaluations += 1;
-                self.palette_upload_bytes += state.pose.skin_matrices.len() as u64 * 64;
-            }
 
             let placement = Placement {
                 origin: instance.origin,
@@ -295,62 +237,6 @@ impl Frame {
         Ok(())
     }
 
-    #[cfg(feature = "map-capture")]
-    pub fn diagnostics(&self, assets: &UploadedModel, meshes: &[ViewerMesh]) -> serde_json::Value {
-        let sources = assets.source.model_animations();
-        let active = self.active.iter().map(|&index| {
-            let state = &self.instances[index];
-            let source = &sources[index];
-            let (sequence, cycle) = state.phase.expect("prepared active animation phase");
-            serde_json::json!({
-                "instance": index,
-                "model": source.model_path,
-                "entity_index": source.entity_index,
-                "hammer_id": source.hammer_id,
-                "origin": source.origin.to_array(),
-                "sequence_index": sequence,
-                "sequence": source.animation.sequences()[sequence].label,
-                "cycle": f32::from_bits(cycle),
-                "model_bounds": {"min":state.pose.bounds_min,"max":state.pose.bounds_max},
-                "bone_to_model":state.pose.bone_to_model,
-                "attachments":state.pose.attachments.iter().map(|attachment|attachment.model).collect::<Vec<_>>(),
-            })
-        }).collect::<Vec<_>>();
-        let outputs = assets
-            .animations
-            .mesh_instances
-            .keys()
-            .filter_map(|&index| meshes[index].animation.as_ref())
-            .collect::<Vec<_>>();
-        let shared_sources = assets
-            .animations
-            .instances
-            .iter()
-            .flat_map(|instance| &instance.bindings)
-            .map(|binding| std::sync::Arc::as_ptr(&binding.source) as usize)
-            .collect::<BTreeSet<_>>();
-        let palette_bytes = self
-            .instances
-            .iter()
-            .filter_map(|instance| instance.palette.as_ref())
-            .map(wgpu::Buffer::size)
-            .sum::<u64>();
-        serde_json::json!({
-            "active_instances":active,
-            "instance_count":sources.len(),
-            "shared_bind_sources":shared_sources.len(),
-            "output_meshes":outputs.len(),
-            "output_bytes":outputs.iter().map(|output|output.buffer.size()).sum::<u64>(),
-            "palette_bytes":palette_bytes,
-            "evaluations":self.evaluations,
-            "palette_upload_bytes":self.palette_upload_bytes,
-            "encoded_dispatches":self.encoded_dispatches.load(Ordering::Relaxed),
-            "encoded_vertices":self.encoded_vertices.load(Ordering::Relaxed),
-            "output_initializations":self.output_initializations.load(Ordering::Relaxed),
-            "pose_revision":self.revision,
-        })
-    }
-
     pub fn encode(
         &self,
         resources: &Resources,
@@ -367,8 +253,6 @@ impl Frame {
                 let mesh = &meshes[binding.mesh];
                 let output = mesh.animation.as_ref().expect("prepared animated mesh");
                 if output.initialize.swap(false, Ordering::Relaxed) {
-                    #[cfg(feature = "map-capture")]
-                    self.output_initializations.fetch_add(1, Ordering::Relaxed);
                     encoder.copy_buffer_to_buffer(
                         assets.meshes[binding.mesh].vertices(),
                         0,
@@ -379,19 +263,6 @@ impl Frame {
                 }
             }
             resources.encode(encoder, &state.dispatches);
-            #[cfg(feature = "map-capture")]
-            {
-                self.encoded_dispatches
-                    .fetch_add(state.dispatches.len() as u64, Ordering::Relaxed);
-                self.encoded_vertices.fetch_add(
-                    assets.animations.instances[index]
-                        .bindings
-                        .iter()
-                        .map(|binding| binding.source.vertices.len() as u64)
-                        .sum::<u64>(),
-                    Ordering::Relaxed,
-                );
-            }
         }
     }
 }

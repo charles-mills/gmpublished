@@ -5,7 +5,6 @@ pub(super) type Matrix4 = [[f32; 4]; 4];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MathError {
     NonFiniteInput,
-    InvalidProjection,
     SingularMatrix,
     NonFiniteResult,
 }
@@ -34,47 +33,6 @@ impl SourceCamera {
         ];
         finite_result(source_multiply(basis, translation))
     }
-}
-
-pub(super) fn perspective(
-    fov_x_degrees: f32,
-    aspect: f32,
-    near: f32,
-    far: f32,
-) -> Result<Matrix4, MathError> {
-    if ![fov_x_degrees, aspect, near, far]
-        .into_iter()
-        .all(f32::is_finite)
-    {
-        return Err(MathError::NonFiniteInput);
-    }
-    if !(0.0..180.0).contains(&fov_x_degrees)
-        || fov_x_degrees == 0.0
-        || aspect <= 0.0
-        || near <= 0.0
-        || far <= near
-    {
-        return Err(MathError::InvalidProjection);
-    }
-    let radians = (f64::from(fov_x_degrees) * (std::f64::consts::PI / 360.0)) as f32;
-    let twice_near = 2.0 * f64::from(near);
-    let width = (twice_near * f64::from(radians.tan())) as f32;
-    let height = (f64::from(width) / f64::from(aspect)) as f32;
-    if !width.is_finite() || !height.is_finite() || width == 0.0 || height == 0.0 {
-        return Err(MathError::NonFiniteResult);
-    }
-    let range = f64::from(near) - f64::from(far);
-    finite_result([
-        [(twice_near / f64::from(width)) as f32, 0.0, 0.0, 0.0],
-        [0.0, (twice_near / f64::from(height)) as f32, 0.0, 0.0],
-        [0.0, 0.0, (f64::from(far) / range) as f32, -1.0],
-        [
-            0.0,
-            0.0,
-            (f64::from(near) * f64::from(far) / range) as f32,
-            0.0,
-        ],
-    ])
 }
 
 pub(super) fn source_multiply(a: Matrix4, b: Matrix4) -> Matrix4 {
@@ -268,19 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn native_sky_projection() {
-        assert_eq!(
-            bits(perspective(72.734_36, 1280.0 / 720.0, 2.0, 56_755.84).unwrap()),
-            [
-                [0x3fadd2c8, 0x0, 0x0, 0x0],
-                [0x0, 0x401a8279, 0x0, 0x0],
-                [0x0, 0x0, 0xbf800128, 0xbf800000],
-                [0x0, 0x0, 0xc0000128, 0x0]
-            ]
-        );
-    }
-
-    #[test]
     fn native_clip_plane_before_raster_conversion() {
         let view = SourceCamera {
             eye: Vec3::new(-1428.0, 1869.0, 10_967.2),
@@ -289,7 +234,12 @@ mod tests {
         }
         .view()
         .unwrap();
-        let projection = perspective(72.734_36, 1280.0 / 720.0, 2.0, 56_755.84).unwrap();
+        let projection = [
+            [f32::from_bits(0x3fadd2c8), 0.0, 0.0, 0.0],
+            [0.0, f32::from_bits(0x401a8279), 0.0, 0.0],
+            [0.0, 0.0, f32::from_bits(0xbf800128), -1.0],
+            [0.0, 0.0, f32::from_bits(0xc0000128), 0.0],
+        ];
         let view_projection = source_multiply(projection, view);
         assert_eq!(
             bits(view_projection),
@@ -309,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_camera_and_projection() {
+    fn invalid_camera() {
         assert_eq!(
             SourceCamera {
                 eye: Vec3::new(f32::NAN, 0.0, 0.0),
@@ -318,26 +268,6 @@ mod tests {
             }
             .view(),
             Err(MathError::NonFiniteInput)
-        );
-        for (fov, aspect, near, far) in [
-            (0.0, 1.0, 1.0, 100.0),
-            (180.0, 1.0, 1.0, 100.0),
-            (90.0, 0.0, 1.0, 100.0),
-            (90.0, 1.0, 0.0, 100.0),
-            (90.0, 1.0, 1.0, 1.0),
-        ] {
-            assert_eq!(
-                perspective(fov, aspect, near, far),
-                Err(MathError::InvalidProjection)
-            );
-        }
-        assert_eq!(
-            perspective(f32::NAN, 1.0, 1.0, 100.0),
-            Err(MathError::NonFiniteInput)
-        );
-        assert_eq!(
-            perspective(90.0, f32::from_bits(1), 1.0, 100.0),
-            Err(MathError::NonFiniteResult)
         );
     }
 

@@ -2,13 +2,6 @@ use super::{Arc, MaterialResolver, Mutex, TextureAssetError};
 use parking_lot::Condvar;
 use std::collections::VecDeque;
 
-#[cfg(feature = "map-capture")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub struct TextureHostLimits {
-    pub encoded_input_bytes: u64,
-    pub image_count: usize,
-}
-
 #[derive(Debug)]
 pub struct TextureWorkingBudget {
     capacity: usize,
@@ -144,15 +137,6 @@ impl Drop for TextureWorkingLease {
 }
 
 impl MaterialResolver {
-    #[cfg(feature = "map-capture")]
-    pub(crate) fn texture_host_limits() -> super::TextureHostLimits {
-        let limits = vformats::Limits::default();
-        TextureHostLimits {
-            encoded_input_bytes: limits.max_input_bytes,
-            image_count: limits.max_entries,
-        }
-    }
-
     pub(crate) fn with_texture_working_budget(
         &self,
         budget: Arc<super::TextureWorkingBudget>,

@@ -733,9 +733,8 @@ fn selected_response(
         });
     }
     if light.kind == WorldLightKind::Surface {
-        // The hardware descriptor is a hemisphere spotlight with inverse-square
-        // attenuation. Its selected-light response differs from emitter-cosine
-        // weighting used when Source folds this light into the ambient cube.
+        // Surface lights use hemisphere spotlights on the GPU and emitter-cosine
+        // weighting in the ambient cube.
         light.kind = WorldLightKind::Spotlight;
         light.constant_attenuation = 0.0;
         light.linear_attenuation = 0.0;

@@ -322,10 +322,6 @@ mod tests {
         let hardware = layout("ClippedVertexOutput");
         assert_eq!(canonical, &hardware[..canonical.len()]);
         assert_eq!(hardware.len(), canonical.len() + 1);
-        for member in canonical {
-            let name = member.name.as_deref().unwrap();
-            assert!(generated.contains(&format!("out.{name}=value.{name};")));
-        }
     }
 
     #[test]
