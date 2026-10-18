@@ -199,6 +199,7 @@ pub fn draw_operations<'a>(
     resources: &'a ViewPipelines,
     upload: &'a ViewerScene,
     view: DrawView<'a>,
+    framebuffer: Option<&'a wgpu::BindGroup>,
 ) {
     let suppress_bindings = transparent_binding_suppression_enabled();
     use transparent_bindings::{IndexSource, Key, State};
@@ -280,7 +281,11 @@ pub fn draw_operations<'a>(
                     && run.operations.start == operation_index + program.operation_offset
                 {
                     if !suppress_bindings || bindings.page(run.page) {
-                        pass.set_bind_group(2, upload.lightmaps.binding(run.page), &[]);
+                        pass.set_bind_group(
+                            2,
+                            framebuffer.unwrap_or_else(|| upload.lightmaps.binding(run.page)),
+                            &[],
+                        );
                     }
                     pass.multi_draw_indexed_indirect(program.buffer, run.offset, run.count());
                     // The first operation used the ordinary binding path above.
@@ -291,7 +296,11 @@ pub fn draw_operations<'a>(
                 }
                 let mut draw_part = |part: super::lightmap_ranges::PageRange| {
                     if !suppress_bindings || bindings.page(part.page) {
-                        pass.set_bind_group(2, upload.lightmaps.binding(part.page), &[]);
+                        pass.set_bind_group(
+                            2,
+                            framebuffer.unwrap_or_else(|| upload.lightmaps.binding(part.page)),
+                            &[],
+                        );
                     }
                     pass.draw_indexed(part.indices, 0, 0..1);
                 };

@@ -431,12 +431,31 @@ fn render_transparent(
     }
     let mut start = 0;
     while start < view.transparency.len() {
+        let glass_material = |draw: &super::transparency::Draw| match &draw.primitive {
+            super::transparency::Primitive::Mesh(item, _) => {
+                upload.assets.source.render_scene().materials[item.material_slot]
+                    .shader
+                    .surface()
+                    .filter(|s| s.is_refractive())
+                    .map(|_| item.material_slot)
+            }
+            _ => None,
+        };
+        let glass = glass_material(&view.transparency[start]);
         let transfer = SurfaceBlend::from(view.transparency[start].blend).color_transfer();
         let end = (start + 1..view.transparency.len())
             .find(|&index| {
                 SurfaceBlend::from(view.transparency[index].blend).color_transfer() != transfer
+                    || glass_material(&view.transparency[index]) != glass
             })
             .unwrap_or(view.transparency.len());
+        let snapshot = glass.map(|_| {
+            let snapshot = targets
+                .glass
+                .get_or_init(|| super::glass::Snapshot::new(resources, targets));
+            snapshot.copy(encoder, targets);
+            snapshot
+        });
         let mut pass = pass_transfer(
             encoder,
             targets,
@@ -458,6 +477,7 @@ fn render_transparent(
                     .and_then(|program| program.segment(start..end)),
                 ..view
             },
+            snapshot.map(|s| &s.bind_group),
         );
         drop(pass);
         start = end;

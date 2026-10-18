@@ -27,11 +27,17 @@ pub(super) struct MaterialKey {
     pub frames: MaterialFrames,
 }
 
+#[derive(Clone, Copy)]
+enum MaterialOwnership<'a> {
+    Shared(Option<&'a super::texture_upload::UploadLeaseBatch>),
+    View,
+}
+
 #[derive(Debug)]
 pub(super) struct MaterialBinding {
     pub main: wgpu::BindGroup,
     pub water: wgpu::BindGroup,
-    _uniform: wgpu::Buffer,
+    buffers: super::materials::MaterialBuffers,
     _images: Vec<Arc<Image>>,
     pub issues: Vec<ImageUploadIssue>,
     #[cfg(feature = "map-capture")]
@@ -85,6 +91,46 @@ impl FrameRequest {
     }
 }
 impl BindingSnapshot {
+    pub fn apply_proxies(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &RenderResources,
+        cache: &mut BindingCache,
+        request: &FrameRequest,
+        owned: &mut ProxyBindings,
+    ) -> Result<(), String> {
+        owned
+            .0
+            .retain(|slot, _| request.evaluated_materials.contains_key(slot));
+        for key in &request.materials {
+            let Some(shader) = request.evaluated_materials.get(&key.slot) else {
+                continue;
+            };
+            if owned.0.get(&key.slot).is_none_or(|(old, _)| old != key) {
+                let slot = &request.source.render_scene().materials[key.slot];
+                let binding = cache
+                    .material_with_batch(
+                        device,
+                        queue,
+                        resources,
+                        key.clone(),
+                        slot,
+                        MaterialOwnership::View,
+                    )?
+                    .ok_or_else(|| {
+                        "proxy material images lost residency during frame preparation".to_owned()
+                    })?;
+                owned.0.insert(key.slot, (key.clone(), binding));
+            }
+            let binding = &owned.0[&key.slot].1;
+            let mut slot = request.source.render_scene().materials[key.slot].clone();
+            slot.shader = shader.clone();
+            binding.buffers.write(queue, &slot, &key.frames);
+            self.materials.0.insert(key.slot, Arc::clone(binding));
+        }
+        Ok(())
+    }
     pub fn covers(&self, request: &FrameRequest) -> bool {
         request
             .materials
@@ -578,7 +624,14 @@ impl BindingCache {
         key: MaterialKey,
         slot: &MaterialSlot,
     ) -> Result<Option<Arc<MaterialBinding>>, String> {
-        self.material_with_batch(device, queue, resources, key, slot, None)
+        self.material_with_batch(
+            device,
+            queue,
+            resources,
+            key,
+            slot,
+            MaterialOwnership::Shared(None),
+        )
     }
 
     fn material_with_batch(
@@ -588,9 +641,13 @@ impl BindingCache {
         resources: &RenderResources,
         key: MaterialKey,
         slot: &MaterialSlot,
-        batch: Option<&super::texture_upload::UploadLeaseBatch>,
+        ownership: MaterialOwnership<'_>,
     ) -> Result<Option<Arc<MaterialBinding>>, String> {
-        if let Some(binding) = self.materials.get(&key) {
+        let (batch, shared) = match ownership {
+            MaterialOwnership::Shared(batch) => (batch, true),
+            MaterialOwnership::View => (None, false),
+        };
+        if shared && let Some(binding) = self.materials.get(&key) {
             return Ok(Some(Arc::clone(binding)));
         }
         super::texture_barriers::validate_material(slot).map_err(|error| error.to_string())?;
@@ -719,13 +776,15 @@ impl BindingCache {
         let binding = Arc::new(MaterialBinding {
             main,
             water,
-            _uniform: uniform,
+            buffers: uniform,
             _images: images,
             issues,
             #[cfg(feature = "map-capture")]
             samplers: sampler_diagnostics,
         });
-        self.materials.insert(key, Arc::clone(&binding));
+        if shared {
+            self.materials.insert(key, Arc::clone(&binding));
+        }
         Ok(Some(binding))
     }
 
@@ -979,6 +1038,15 @@ fn visit_material_textures<'a, E>(
     data(prepared.normal(), frames.normal, TextureRole::Normal)?;
     data(prepared.normal2(), frames.normal2, TextureRole::Normal)?;
     if let Some(surface) = surface {
+        if let Some(glass) = &surface.refraction {
+            data(
+                glass.tint_texture.as_deref(),
+                frames.refract_tint,
+                TextureRole::Base {
+                    family: crate::bridge::materials::SurfaceFamily::Unlit,
+                },
+            )?;
+        }
         let detail = surface.detail.as_ref();
         data(
             detail.and_then(|detail| detail.texture.as_deref()),
@@ -1156,6 +1224,7 @@ pub(super) struct FrameRequest {
     pub water_time: f32,
     pub clock: crate::bridge::materials::AnimationClock,
     pub frame_water_time: f32,
+    pub evaluated_materials: HashMap<usize, crate::bridge::materials::MaterialShader>,
     #[cfg(feature = "map-capture")]
     pub exact_frame: bool,
 }
@@ -1202,7 +1271,56 @@ impl FrameRequest {
             water_time: primitive.uniforms.water_time_sky_tint[0],
             clock,
             frame_water_time: water_time,
+            evaluated_materials: HashMap::new(),
         })
+    }
+    pub fn evaluate_proxies(
+        mut self,
+        states: &mut ProxyStates,
+    ) -> Result<Self, crate::bridge::materials::AnimationError> {
+        use crate::bridge::materials::MaterialShader;
+        for key in &mut self.materials {
+            let slot = &self.source.render_scene().materials[key.slot];
+            let program = match &slot.shader {
+                MaterialShader::Surface(s) => &s.proxy_program,
+                MaterialShader::Water(s) => &s.proxy_program,
+                _ => continue,
+            };
+            if !program.requires_evaluation {
+                continue;
+            }
+            let state = states
+                .0
+                .entry(key.slot)
+                .or_insert_with(|| (Arc::clone(program), Default::default()));
+            if !Arc::ptr_eq(&state.0, program) {
+                *state = (Arc::clone(program), Default::default());
+            }
+            let count = |name: &str| match &slot.shader {
+                MaterialShader::Surface(s) => super::frame_selection::input_count(slot, s, name),
+                MaterialShader::Water(s) if name == "$normalmap" => s
+                    .normal_map
+                    .as_ref()?
+                    .source_metadata()
+                    .map(|m| m.frame_count),
+                _ => None,
+            };
+            let values = program.evaluate(&mut state.1, self.clock, key.slot as u64 + 1, count)?;
+            let shader = match &slot.shader {
+                MaterialShader::Surface(s) => {
+                    MaterialShader::Surface(Arc::new(program.apply_surface(s, values)))
+                }
+                MaterialShader::Water(s) => {
+                    MaterialShader::Water(Arc::new(program.apply_water(s, values)))
+                }
+                _ => unreachable!(),
+            };
+            let mut evaluated = slot.clone();
+            evaluated.shader = shader.clone();
+            key.frames = MaterialFrames::select(&evaluated, self.clock, self.frame_water_time)?;
+            self.evaluated_materials.insert(key.slot, shader);
+        }
+        Ok(self)
     }
     fn page_needs(&self) -> Cow<'_, [PageNeed]> {
         #[cfg(feature = "map-capture")]
@@ -1252,6 +1370,20 @@ impl FrameRequest {
             .as_deref()
     }
 }
+
+#[derive(Debug, Default)]
+pub(super) struct ProxyStates(
+    HashMap<
+        usize,
+        (
+            Arc<crate::bridge::materials::proxies::Program>,
+            crate::bridge::materials::proxies::State,
+        ),
+    >,
+);
+
+#[derive(Debug, Default)]
+pub(super) struct ProxyBindings(HashMap<usize, (MaterialKey, Arc<MaterialBinding>)>);
 
 impl BindingCache {
     fn update_sources(&mut self, requests: &[&FrameRequest]) {
@@ -1626,7 +1758,7 @@ impl BindingCache {
                     resources,
                     key.clone(),
                     slot,
-                    Some(batch),
+                    MaterialOwnership::Shared(Some(batch)),
                 ),
                 None => self.material(device, queue, resources, key.clone(), slot),
             }?;

@@ -22,6 +22,7 @@ pub struct RenderResources {
 
 #[derive(Debug)]
 pub struct SharedResources {
+    pub(super) device: wgpu::Device,
     #[cfg(any(test, feature = "map-capture"))]
     pub(super) clip_mode: super::clipping::ClipMode,
     pub(super) texture_uploader: super::texture_upload::SharedUploader,
@@ -388,6 +389,7 @@ impl SharedResources {
             .expect("texture uploader lock")
             .flush();
         Self {
+            device: device.clone(),
             #[cfg(any(test, feature = "map-capture"))]
             clip_mode,
             texture_uploader,
@@ -824,7 +826,16 @@ impl RenderResources {
         use super::{draw::ViewKind, surface_pipelines::SurfaceBlend};
         let refracted_opaque =
             key.view == ViewKind::Refraction && !key.overlay && key.blend == SurfaceBlend::Opaque;
-        let blend = if refracted_opaque {
+        let blend = if key.raster.refraction & 8 != 0 {
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    dst_factor: wgpu::BlendFactor::SrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            })
+        } else if key.raster.refraction != 0 && key.raster.refraction & 4 == 0 || refracted_opaque {
             None
         } else {
             Some(match key.blend {
@@ -844,7 +855,8 @@ impl RenderResources {
             blend,
             PipelineRasterMode {
                 ignore_z: key.raster.ignore_z,
-                write_enabled: key.blend == SurfaceBlend::Opaque && !key.overlay,
+                write_enabled: key.raster.refraction & 2 != 0
+                    || (key.blend == SurfaceBlend::Opaque && !key.overlay),
                 bias: if key.overlay || key.raster.decal_bias || key.blend == SurfaceBlend::Modulate
                 {
                     overlay_depth_bias_state()
@@ -864,14 +876,17 @@ impl RenderResources {
             },
             PipelineShaderEntry {
                 vertex: "vs_main",
-                fragment: if refracted_opaque {
+                fragment: if key.raster.refraction != 0 {
+                    "fs_glass"
+                } else if refracted_opaque {
                     "fs_refraction"
                 } else if key.blend == SurfaceBlend::Additive {
                     "fs_additive"
                 } else {
                     "fs_main"
                 },
-                write_mask: if key.blend == SurfaceBlend::Modulate
+                write_mask: if (key.raster.refraction != 0 && key.raster.refraction & 16 == 0)
+                    || key.blend == SurfaceBlend::Modulate
                     || (key.view == ViewKind::Refraction && !refracted_opaque)
                 {
                     wgpu::ColorWrites::COLOR
@@ -1371,6 +1386,8 @@ fn material_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         },
     ];
     material_entries.extend((21..=29).map(sampler_layout_entry));
+    material_entries.push(surface_texture_layout(30));
+    material_entries.push(sampler_layout_entry(31));
     material_entries
 }
 
@@ -1601,7 +1618,7 @@ mod sampler_layout_tests {
                 )
                 .chain(lightmap_layout_entries()),
         );
-        assert_eq!(main, (14, 13));
+        assert_eq!(main, (15, 14));
         assert_eq!(water, (7, 4));
         let limits = wgpu::Limits::default();
         for (textures, samplers) in [main, water] {
@@ -1626,6 +1643,7 @@ mod sampler_layout_tests {
             (17, 28),
             (18, 20),
             (19, 29),
+            (30, 31),
         ];
         let mut seen = std::collections::HashSet::new();
         for source in [super::SHADER_SOURCE, super::WATER_SHADER_SOURCE] {

@@ -62,6 +62,11 @@ pub struct SurfaceUniform {
     pub detail_scroll: [f32; 4],
     pub blend_scroll: [f32; 4],
     pub env_mask_scroll: [f32; 4],
+    pub refraction_tint: [f32; 4],
+    pub refraction_params: [f32; 4],
+    pub refraction_flags: [u32; 4],
+    pub normal2_s: [f32; 4],
+    pub normal2_t: [f32; 4],
 }
 
 fn model_gamma(value: f32) -> f32 {
@@ -127,6 +132,11 @@ impl SurfaceUniform {
             detail_scroll: [0.0; 4],
             blend_scroll: [0.0; 4],
             env_mask_scroll: [0.0; 4],
+            refraction_tint: [1.0, 1.0, 1.0, 0.0],
+            refraction_params: [0.0; 4],
+            refraction_flags: [0; 4],
+            normal2_s: identity[0],
+            normal2_t: identity[1],
         };
         let Some(surface) = surface else {
             return result;
@@ -139,6 +149,7 @@ impl SurfaceUniform {
         result.alpha_state[1] = u32::from(base2_flags.is_none_or(|flags| {
             flags & (texture_flags::ONEBITALPHA | texture_flags::EIGHTBITALPHA) != 0
         }));
+        result.alpha_state[3] = u32::from(surface.proxy_program.writes("$alpha"));
         result.flags[0] = SurfaceShaderKind::from(surface.family) as u32;
         if surface.blends_in_gamma_space() {
             return result;
@@ -316,6 +327,26 @@ impl SurfaceUniform {
             surface.normal_frame,
             if alpha_mask { 0.0 } else { 1.0 },
         ];
+        if let Some(glass) = &surface.refraction {
+            result.refraction_tint = [glass.tint[0], glass.tint[1], glass.tint[2], glass.amount];
+            result.refraction_params = [
+                f32::from(glass.blur),
+                f32::from(glass.silhouette),
+                glass.tint_frame,
+                surface.normal2_frame,
+            ];
+            result.refraction_flags = [
+                u32::from(surface.envmap.is_some()),
+                u32::from(surface.normal2.is_some()),
+                u32::from(glass.tint_texture.is_some()),
+                u32::from(glass.masked)
+                    | (u32::from(glass.vertex_modulate) << 1)
+                    | (u32::from(glass.base_texture) << 2),
+            ];
+            let normal2 = surface.transform2.unwrap_or(identity);
+            result.normal2_s = normal2[0];
+            result.normal2_t = normal2[1];
+        }
         result
     }
 }

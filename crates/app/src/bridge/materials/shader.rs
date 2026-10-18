@@ -142,6 +142,9 @@ impl MaterialResolver {
 
 pub(super) fn surface_family(shader: &str) -> Option<super::SurfaceFamily> {
     use super::SurfaceFamily;
+    if super::refract::is_refract(shader) {
+        return Some(SurfaceFamily::Unlit);
+    }
     let families: &[(SurfaceFamily, &[&str])] = &[
         (
             SurfaceFamily::DecalModulate,

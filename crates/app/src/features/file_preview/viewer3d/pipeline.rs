@@ -33,6 +33,7 @@ mod cubemap;
 mod draw;
 mod frame_selection;
 mod geometry;
+mod glass;
 mod images;
 mod intersection;
 mod lighting;
@@ -209,6 +210,8 @@ pub struct PreparedFrame {
     presentation: SubmissionHistory<OutputKey, Arc<ViewOutput>>,
     demand_cache: residency_demand::FrameDemandCache,
     binding_request: Option<bindings::FrameRequest>,
+    proxy_states: bindings::ProxyStates,
+    proxy_bindings: bindings::ProxyBindings,
     lightmap_request: Option<lightmaps::Request>,
     lightmap_demand_cache: lightmap_demand::Cache,
     animation_demand_cache: skinning::DemandCache,
@@ -395,6 +398,8 @@ impl shader::Primitive for ModelPrimitive {
                 presentation: SubmissionHistory::default(),
                 demand_cache: residency_demand::FrameDemandCache::default(),
                 binding_request: None,
+                proxy_states: Default::default(),
+                proxy_bindings: Default::default(),
                 lightmap_request: None,
                 lightmap_demand_cache: lightmap_demand::Cache::default(),
                 animation_demand_cache: skinning::DemandCache::default(),
@@ -941,6 +946,7 @@ impl shader::Primitive for ModelPrimitive {
                     .pending_clock
                     .unwrap_or((self.animation_clock, self.uniforms.water_time_sky_tint[0])),
             )
+            .and_then(|request| request.evaluate_proxies(&mut frame.proxy_states))
             .map_err(|error| residency_demand::DemandError::Animation(error.to_string()))
         }) {
             Ok(request) => {
@@ -1383,6 +1389,21 @@ impl shader::Pipeline for ModelPipeline {
                     Err(reason) => Err(reason.clone()),
                 }
             };
+            let prepared = prepared.and_then(|snapshot| {
+                snapshot
+                    .map(|mut snapshot| {
+                        snapshot.apply_proxies(
+                            device,
+                            queue,
+                            &self.resources,
+                            &mut self.bindings,
+                            request,
+                            &mut frame.proxy_bindings,
+                        )?;
+                        Ok(snapshot)
+                    })
+                    .transpose()
+            });
             match prepared {
                 Ok(Some(snapshot)) => {
                     frame.readiness = Readiness::Current;

@@ -56,6 +56,11 @@ struct Surface {
     detail_scroll:vec4<f32>,
     blend_scroll:vec4<f32>,
     env_mask_scroll:vec4<f32>,
+    refraction_tint:vec4<f32>,
+    refraction_params:vec4<f32>,
+    refraction_flags:vec4<u32>,
+    normal2_s:vec4<f32>,
+    normal2_t:vec4<f32>,
 }
 @group(1) @binding(8) var<uniform> surface:Surface;
 @group(1) @binding(9) var surface_detail_texture:texture_2d_array<f32>;
@@ -96,7 +101,7 @@ fn surface_gamma(color:vec3<f32>)->vec3<f32> {
 fn surface_modulation(model:bool,instance:vec3<f32>,model_draw:bool)->vec4<f32> {
     var value=select(surface.modulation,surface.model_modulation,model);
     value=vec4<f32>(value.rgb*instance,value.a);
-    if model_draw {value.a=1.0;}
+    if model_draw && surface.alpha_state.w==0u {value.a=1.0;}
     if model || surface.flags.x==SURFACE_UNLIT {
         value=vec4<f32>(surface_gamma(value.rgb),value.a);
     }

@@ -13,6 +13,7 @@ pub(super) struct MaterialFrames {
     pub detail: u32,
     pub environment: u32,
     pub environment_mask: u32,
+    pub refract_tint: u32,
 }
 
 impl MaterialFrames {
@@ -32,6 +33,9 @@ impl MaterialFrames {
                 if let Some(count) = data_count(surface.normal.as_deref()) {
                     selected.normal = data_frame(surface.normal_frame, Some(count))?;
                 }
+                if let Some(count) = data_count(surface.normal2.as_deref()) {
+                    selected.normal2 = data_frame(surface.normal2_frame, Some(count))?;
+                }
                 if let Some(detail) = &surface.detail
                     && let Some(count) = data_count(detail.texture.as_deref())
                 {
@@ -43,6 +47,10 @@ impl MaterialFrames {
                         % data_count(environment.mask_texture.as_deref())
                             .unwrap_or(1)
                             .max(1);
+                }
+                if let Some(glass) = &surface.refraction {
+                    selected.refract_tint =
+                        data_frame(glass.tint_frame, data_count(glass.tint_texture.as_deref()))?;
                 }
                 for animation in &surface.animated_textures {
                     if !destination_available(slot, surface, animation.frame_channel) {
@@ -153,14 +161,18 @@ fn destination_available(
     }
 }
 
-fn input_count(slot: &MaterialSlot, surface: &SurfaceMaterial, parameter: &str) -> Option<u32> {
+pub(super) fn input_count(
+    slot: &MaterialSlot,
+    surface: &SurfaceMaterial,
+    parameter: &str,
+) -> Option<u32> {
     match parameter {
         "$basetexture" => base_count(slot.texture.as_deref()),
         "$basetexture2" if surface.base_blend.uses_secondary() => {
             base_count(slot.texture2.as_deref())
         }
-        "$bumpmap" => data_count(surface.normal.as_deref()),
-        "$bumpmap2" => data_count(surface.normal2.as_deref()),
+        "$bumpmap" | "$normalmap" => data_count(surface.normal.as_deref()),
+        "$bumpmap2" | "$normalmap2" => data_count(surface.normal2.as_deref()),
         "$detail" => data_count(surface.detail.as_ref()?.texture.as_deref()),
         "$envmap" => match &surface.envmap.as_ref()?.source {
             EnvironmentMapSource::Named(cube) => {
@@ -169,6 +181,7 @@ fn input_count(slot: &MaterialSlot, surface: &SurfaceMaterial, parameter: &str) 
             EnvironmentMapSource::LocalProbe => None,
         },
         "$envmapmask" => data_count(surface.envmap.as_ref()?.mask_texture.as_deref()),
+        "$refracttinttexture" => data_count(surface.refraction.as_ref()?.tint_texture.as_deref()),
         "$selfillummask" => data_count(surface.emission.as_ref()?.mask.as_deref()),
         "$blendmodulatetexture" => data_count(surface.blend_modulation.as_deref()),
         "$phongexponenttexture" => data_count(

@@ -7,6 +7,7 @@ pub(super) struct SurfaceRaster {
     pub no_cull: bool,
     pub ignore_z: bool,
     pub decal_bias: bool,
+    pub refraction: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -67,6 +68,25 @@ impl SurfacePipelineVariants {
                         no_cull: surface.no_cull,
                         ignore_z: surface.ignore_z,
                         decal_bias: surface.decal,
+                        refraction: surface.refraction.as_ref().map_or(0, |glass| {
+                            let alpha = surface.normal.as_ref().is_some_and(|n| {
+                                n.flags()
+                                    & (vformats::vtf::texture_flags::ONEBITALPHA
+                                        | vformats::vtf::texture_flags::EIGHTBITALPHA)
+                                    != 0
+                            });
+                            1 | (u32::from(!glass.no_write_z) << 1)
+                                | (u32::from(surface.envmap.is_none() && alpha) << 2)
+                                | (u32::from(glass.masked) << 3)
+                                | (u32::from(
+                                    glass.force_alpha_write
+                                        || (!alpha
+                                            && !glass.masked
+                                            && !surface.alpha_test
+                                            && !surface.translucent
+                                            && !surface.additive),
+                                ) << 4)
+                        }),
                     })
             })
             .collect::<Vec<_>>();
@@ -84,7 +104,10 @@ impl SurfacePipelineVariants {
             ] {
                 for view in [ViewKind::Main, ViewKind::Reflection, ViewKind::Refraction] {
                     for overlay in [false, true] {
-                        if !state.ignore_z && (overlay || (!state.no_cull && !state.decal_bias)) {
+                        if state.refraction == 0
+                            && !state.ignore_z
+                            && (overlay || (!state.no_cull && !state.decal_bias))
+                        {
                             continue;
                         }
                         let key = SurfacePipelineKey {

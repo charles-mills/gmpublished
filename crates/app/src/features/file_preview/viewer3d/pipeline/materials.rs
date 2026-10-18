@@ -155,6 +155,122 @@ pub struct MaterialUploadMode<'a> {
     pub(super) frames: Option<&'a super::frame_selection::MaterialFrames>,
 }
 
+fn normalize_auxiliary_frames(
+    data: &mut super::surface::SurfaceUniform,
+    surface: Option<&crate::bridge::materials::SurfaceMaterial>,
+    frames: &super::frame_selection::MaterialFrames,
+) {
+    if let Some(surface) = surface {
+        data.alpha_state[2] = if surface
+            .normal2
+            .as_ref()
+            .is_some_and(|t| t.on_demand().is_some())
+        {
+            0
+        } else {
+            frames.normal2
+        };
+    }
+    if let Some(surface) = surface
+        && let Some(glass) = &surface.refraction
+    {
+        data.refraction_params[2] = if glass
+            .tint_texture
+            .as_ref()
+            .is_some_and(|t| t.on_demand().is_some())
+        {
+            0.0
+        } else {
+            frames.refract_tint as f32
+        };
+        data.refraction_params[3] = if surface
+            .normal2
+            .as_ref()
+            .is_some_and(|t| t.on_demand().is_some())
+        {
+            0.0
+        } else {
+            frames.normal2 as f32
+        };
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct MaterialBuffers {
+    pub material: wgpu::Buffer,
+    pub surface: wgpu::Buffer,
+    pub model: wgpu::Buffer,
+}
+impl MaterialBuffers {
+    pub fn write(
+        &self,
+        queue: &wgpu::Queue,
+        slot: &MaterialSlot,
+        frames: &super::frame_selection::MaterialFrames,
+    ) {
+        let prepared = PreparedMaterial::from(&slot.shader);
+        let surface = prepared.surface();
+        let mut material = match prepared {
+            PreparedMaterial::Surface(s) => {
+                MaterialUniform::new(slot.render_mode, slot.alpha_policy).with_surface(s)
+            }
+            PreparedMaterial::Water(s) => {
+                MaterialUniform::new(slot.render_mode, slot.alpha_policy).with_water(s)
+            }
+            PreparedMaterial::Mirror(s) => {
+                MaterialUniform::new(slot.render_mode, slot.alpha_policy).with_mirror(s)
+            }
+            PreparedMaterial::Fallback => MaterialUniform::new(slot.render_mode, slot.alpha_policy),
+        };
+        if prepared
+            .normal()
+            .is_some_and(|source| source.on_demand().is_some())
+        {
+            material.water_animation[2..].fill(0.0);
+            material.water_state[0] = 1.0;
+        }
+        let mut data = super::surface::SurfaceUniform::new(
+            surface,
+            slot.texture.as_ref().and_then(|t| t.flags()),
+            slot.texture2
+                .as_ref()
+                .or(slot.texture.as_ref())
+                .and_then(|t| t.flags()),
+        );
+        data.detail[1] = if surface
+            .and_then(|s| s.detail.as_ref())
+            .and_then(|d| d.texture.as_ref())
+            .is_some_and(|t| t.on_demand().is_some())
+        {
+            0.0
+        } else {
+            frames.detail as f32
+        };
+        data.env_flags[2] = if surface
+            .and_then(|s| s.envmap.as_ref())
+            .and_then(|e| e.mask_texture.as_ref())
+            .is_some_and(|t| t.on_demand().is_some())
+        {
+            0
+        } else {
+            frames.environment_mask
+        };
+        data.misc[2] = if prepared.normal().is_some_and(|t| t.on_demand().is_some()) {
+            0.0
+        } else {
+            frames.normal as f32
+        };
+        normalize_auxiliary_frames(&mut data, surface, frames);
+        queue.write_buffer(&self.material, 0, bytemuck::bytes_of(&material));
+        queue.write_buffer(&self.surface, 0, bytemuck::bytes_of(&data));
+        queue.write_buffer(
+            &self.model,
+            0,
+            bytemuck::bytes_of(&super::model_lighting::ModelMaterialUniform::new(surface)),
+        );
+    }
+}
+
 impl RenderResources {
     pub(super) fn create_texture_frames_view(
         device: &wgpu::Device,
@@ -449,7 +565,7 @@ impl RenderResources {
         mode: MaterialUploadMode<'_>,
         images: &mut ImageLease<'_>,
         diagnostics: &mut Vec<SamplerDiagnostic>,
-    ) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::Buffer) {
+    ) -> (wgpu::BindGroup, wgpu::BindGroup, MaterialBuffers) {
         let frames = mode.frames;
         let material_name = mode.name;
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -486,11 +602,12 @@ impl RenderResources {
             contents: bytemuck::bytes_of(&super::model_lighting::ModelMaterialUniform::new(
                 surface,
             )),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let mut surface_data =
             super::surface::SurfaceUniform::new(surface, mode.base_flags, mode.base2_flags);
         if let Some(frames) = frames {
+            normalize_auxiliary_frames(&mut surface_data, surface, frames);
             surface_data.detail[1] = if surface
                 .and_then(|surface| surface.detail.as_ref())
                 .and_then(|detail| detail.texture.as_ref())
@@ -522,7 +639,7 @@ impl RenderResources {
         let surface_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("file_preview.material.surface_uniform"),
             contents: bytemuck::bytes_of(&surface_data),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let mut role_view = |source: Option<&crate::bridge::materials::DecodedTextureFrames>,
                              role: TextureRole,
@@ -552,6 +669,16 @@ impl RenderResources {
             detail.and_then(|detail| detail.texture.as_deref()),
             detail_role,
             frames.map_or(0, |frames| frames.detail),
+        );
+        let refract_tint = surface
+            .and_then(|s| s.refraction.as_ref())
+            .and_then(|g| g.tint_texture.as_deref());
+        let refract_tint_view = role_view(
+            refract_tint,
+            TextureRole::Base {
+                family: crate::bridge::materials::SurfaceFamily::Unlit,
+            },
+            frames.map_or(0, |f| f.refract_tint),
         );
         let blend_view = role_view(
             surface.and_then(|surface| surface.blend_modulation.as_deref()),
@@ -753,6 +880,12 @@ impl RenderResources {
             TextureKind::Texture2d,
             self.sampler_quality,
         );
+        let refract_tint_sampler = sampler(
+            "refraction_tint",
+            role_flags(&refract_tint_view, refract_tint),
+            TextureKind::Texture2d,
+            self.sampler_quality,
+        );
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -860,6 +993,16 @@ impl RenderResources {
                 resource: wgpu::BindingResource::Sampler(sampler),
             }),
         );
+        entries.push(wgpu::BindGroupEntry {
+            binding: 30,
+            resource: wgpu::BindingResource::TextureView(
+                refract_tint_view.as_ref().unwrap_or(&self.surface_white),
+            ),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 31,
+            resource: wgpu::BindingResource::Sampler(&refract_tint_sampler),
+        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.material"),
             layout: &self.material_layout,
@@ -874,7 +1017,15 @@ impl RenderResources {
             layout: &self.water_material_layout,
             entries: &water_entries,
         });
-        (bind_group, water_bind_group, uniform)
+        (
+            bind_group,
+            water_bind_group,
+            MaterialBuffers {
+                material: uniform,
+                surface: surface_uniform,
+                model: model_material,
+            },
+        )
     }
 
     pub fn create_sky_material(
@@ -889,7 +1040,7 @@ impl RenderResources {
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("file_preview.sky.material_state"),
             contents: bytemuck::bytes_of(&state),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let sampler = self.samplers.texture(
             "<sky>",

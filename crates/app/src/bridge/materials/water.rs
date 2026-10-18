@@ -44,6 +44,7 @@ pub struct WaterMaterial {
     pub underwater_overlay: Option<Arc<ScreenRefraction>>,
     pub unsupported_proxies: Vec<String>,
     pub unsupported_features: Vec<String>,
+    pub proxy_program: Arc<super::proxies::Program>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,6 +61,9 @@ pub struct ScreenRefraction {
 
 impl WaterMaterial {
     pub(crate) fn is_animated(&self) -> bool {
+        if self.proxy_program.requires_evaluation {
+            return self.proxy_program.is_animated();
+        }
         self.underwater_overlay
             .as_ref()
             .is_some_and(|overlay| overlay.proxy_scroll != [0.0; 2])
@@ -176,9 +180,15 @@ impl MaterialResolver {
                 "waterlod" => {}
                 _ => {
                     unsupported_proxies.push(proxy.name.clone());
-                    log::warn!("unsupported water proxy {}", proxy.name);
                 }
             }
+        }
+        let (program, unsupported) = super::proxies::Program::compile(material);
+        if program.requires_evaluation {
+            unsupported_proxies = unsupported;
+        }
+        for proxy in &unsupported_proxies {
+            log::warn!("unsupported water proxy {proxy}");
         }
         let mut unsupported_features = Vec::new();
         for (active, feature) in [
@@ -241,6 +251,7 @@ impl MaterialResolver {
                 .and_then(|name| self.resolve_screen_refraction(&name)),
             unsupported_proxies,
             unsupported_features,
+            proxy_program: Arc::new(program),
         })
     }
 

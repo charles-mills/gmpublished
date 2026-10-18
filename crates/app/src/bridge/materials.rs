@@ -15,7 +15,10 @@ mod frames;
 mod lightmap_layout;
 mod mirror;
 mod parameters;
+pub mod proxies;
+mod refract;
 use parameters::parse_material_color;
+pub use refract::RefractionMaterial;
 mod phong;
 mod profile;
 mod prop_lighting;
@@ -1125,6 +1128,7 @@ impl MaterialResolver {
             .and_then(|base_texture| self.resolve_material_texture(material, base_texture))
             .or_else(|| self.mirror_fallback_texture(material))
             .or_else(|| self.water_fallback_texture(material))
+            .or_else(|| self.refract_fallback_texture(material))
             .or_else(|| self.envmap_fallback_texture(material));
         let has_base_texture = texture
             .as_ref()
@@ -1883,6 +1887,9 @@ impl EffectiveMaterial {
     }
 
     fn effective_bumpmap(&self) -> Option<&str> {
+        if refract::is_refract(&self.shader) {
+            return self.parameter("$normalmap");
+        }
         let family = shader::surface_family(&self.shader)?;
         family
             .accepts_primary_bumpmap(vmt_bool(self.parameter("$decal")))
@@ -1891,6 +1898,9 @@ impl EffectiveMaterial {
     }
 
     fn effective_bumpmap2(&self) -> Option<&str> {
+        if refract::is_refract(&self.shader) {
+            return self.parameter("$normalmap2");
+        }
         shader::surface_family(&self.shader)?
             .accepts_secondary_bumpmap(
                 vmt_bool(self.parameter("$decal")),
@@ -1913,6 +1923,8 @@ impl EffectiveMaterial {
     fn render_mode(&self) -> RenderMode {
         if self.no_draw() {
             RenderMode::NoDraw
+        } else if refract::is_refract(&self.shader) {
+            RenderMode::Translucent
         } else if is_water_shader(&self.shader) {
             if vmt_bool(self.parameter("$alphatest")) {
                 RenderMode::Cutout

@@ -18,6 +18,8 @@ impl ColorTransfer {
 
 #[derive(Debug)]
 pub struct RenderTargets {
+    pub(super) resolve_texture: wgpu::Texture,
+    pub(super) glass: std::sync::OnceLock<super::glass::Snapshot>,
     pub color: wgpu::TextureView,
     pub resolve_view: wgpu::TextureView,
     encoded_color: wgpu::TextureView,
@@ -52,7 +54,12 @@ impl RenderTargets {
     pub fn estimated_bytes(&self) -> u64 {
         u64::from(self.size.0)
             * u64::from(self.size.1)
-            * bytes_per_pixel_for_samples(self.format, self.sample_count)
+            * (bytes_per_pixel_for_samples(self.format, self.sample_count)
+                + if self.glass.get().is_some() {
+                    u64::from(self.format.block_copy_size(None).unwrap_or(4))
+                } else {
+                    0
+                })
     }
 
     pub fn ensure(
@@ -88,7 +95,9 @@ impl RenderTargets {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: resources.target_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats,
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
@@ -141,6 +150,8 @@ impl RenderTargets {
             ],
         });
         let targets = Self {
+            resolve_texture: resolve,
+            glass: Default::default(),
             color,
             resolve_view,
             encoded_color,

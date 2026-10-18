@@ -179,6 +179,7 @@ impl DecalParameters {
 pub struct SurfaceMaterial {
     pub shader: String,
     pub family: SurfaceFamily,
+    pub refraction: Option<super::RefractionMaterial>,
     pub base_blend: SourceSurfaceBaseBlend,
     pub parameters: BTreeMap<String, String>,
     pub color: [f32; 3],
@@ -191,6 +192,7 @@ pub struct SurfaceMaterial {
     pub normal: Option<Arc<DecodedTextureFrames>>,
     pub normal2: Option<Arc<DecodedTextureFrames>>,
     pub normal_frame: f32,
+    pub normal2_frame: f32,
     pub ssbump: bool,
     pub diffuse_bump: bool,
     pub transform: TextureTransform,
@@ -219,6 +221,7 @@ pub struct SurfaceMaterial {
     pub ignore_z: bool,
     pub animated_textures: Vec<AnimatedTexture>,
     pub texture_scrolls: Vec<TextureScroll>,
+    pub proxy_program: Arc<super::proxies::Program>,
     pub unsupported_proxies: Vec<String>,
 }
 
@@ -230,6 +233,9 @@ pub struct UnavailableTexture<'a> {
 
 impl SurfaceMaterial {
     pub(crate) fn is_animated(&self) -> bool {
+        if self.proxy_program.requires_evaluation {
+            return self.proxy_program.is_animated();
+        }
         self.animated_textures
             .iter()
             .any(|proxy| proxy.frame_rate != 0.0)
@@ -298,6 +304,16 @@ impl SurfaceMaterial {
         };
         [
             ("$bumpmap", self.normal.is_some()),
+            (
+                "$normalmap",
+                self.refraction.is_some() && self.normal.is_some(),
+            ),
+            (
+                "$refracttinttexture",
+                self.refraction
+                    .as_ref()
+                    .is_some_and(|g| g.tint_texture.is_some()),
+            ),
             ("$bumpmap2", self.normal2.is_some()),
             (
                 "$detail",
@@ -572,6 +588,9 @@ impl SurfaceMaterial {
         if self.no_draw {
             return RenderMode::NoDraw;
         }
+        if self.is_refractive() {
+            return RenderMode::Translucent;
+        }
         if self.family == SurfaceFamily::DecalModulate {
             return RenderMode::Modulate;
         }
@@ -597,7 +616,12 @@ impl SurfaceMaterial {
             });
         if self.additive {
             RenderMode::Additive
-        } else if alpha < 1.0 || self.vertex_alpha || texture_blend || detail_blend {
+        } else if alpha < 1.0
+            || self.proxy_program.writes("$alpha")
+            || self.vertex_alpha
+            || texture_blend
+            || detail_blend
+        {
             RenderMode::Translucent
         } else if alpha_test {
             RenderMode::Cutout
@@ -612,6 +636,7 @@ impl Default for SurfaceMaterial {
         Self {
             shader: String::new(),
             family: SurfaceFamily::default(),
+            refraction: None,
             base_blend: SourceSurfaceBaseBlend::Single,
             parameters: BTreeMap::new(),
             color: [1.0; 3],
@@ -624,6 +649,7 @@ impl Default for SurfaceMaterial {
             normal: None,
             normal2: None,
             normal_frame: 0.0,
+            normal2_frame: 0.0,
             ssbump: false,
             diffuse_bump: true,
             transform: texture_transform(None),
@@ -652,6 +678,7 @@ impl Default for SurfaceMaterial {
             ignore_z: false,
             animated_textures: Vec::new(),
             texture_scrolls: Vec::new(),
+            proxy_program: Default::default(),
             unsupported_proxies: Vec::new(),
         }
     }
@@ -723,6 +750,7 @@ impl MaterialResolver {
         let mut surface = SurfaceMaterial {
             shader: material.shader.clone(),
             family,
+            refraction: self.resolve_refraction(material),
             base_blend,
             parameters: material.parameters.clone(),
             phong: (family == SurfaceFamily::VertexLit)
@@ -743,6 +771,7 @@ impl MaterialResolver {
                 .flatten()
                 .and_then(|name| self.resolve_raw_texture_frames(name)),
             normal_frame: scalar(get("$bumpframe"), 0.0),
+            normal2_frame: scalar(get("$bumpframe2"), 0.0),
             ssbump: material.effective_bumpmap().is_some() && super::vmt_bool(get("$ssbump")),
             diffuse_bump: !super::vmt_bool(get("$nodiffusebumplighting")),
             transform: texture_transform(get("$bumptransform")),
@@ -783,6 +812,7 @@ impl MaterialResolver {
             ignore_z: super::vmt_bool(get("$ignorez")),
             animated_textures: Vec::new(),
             texture_scrolls: Vec::new(),
+            proxy_program: Default::default(),
             unsupported_proxies: Vec::new(),
         };
         for proxy in &material.proxies {
@@ -806,6 +836,11 @@ impl MaterialResolver {
                 surface.unsupported_proxies.push(proxy.name.clone());
             }
         }
+        let (program, unsupported) = super::proxies::Program::compile(material);
+        if program.requires_evaluation {
+            surface.unsupported_proxies = unsupported;
+        }
+        surface.proxy_program = Arc::new(program);
         for texture in surface.unavailable_textures() {
             log::debug!(
                 "material {}: unavailable {} texture {}",

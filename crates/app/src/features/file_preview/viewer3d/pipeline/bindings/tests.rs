@@ -33,6 +33,7 @@ fn material_need_visitor_preserves_absent_roles_and_stops_at_first_error() {
         detail: 15,
         environment: 16,
         environment_mask: 17,
+        refract_tint: 0,
     };
     // Base, base2, normal, normal2, detail, blend modulation, emission mask.
     // Even absent roles are visited. DecalModulate's base and detail are raw.
@@ -212,6 +213,7 @@ fn material_need_visitor_emits_exact_surface_sources_frames_and_transfers() {
         detail: 15,
         environment: 16,
         environment_mask: 17,
+        refract_tint: 0,
     };
     let id = |index: usize| Some(data[index].resident().unwrap().id().clone());
     // Explicit role ordering, including the deliberately absent base slots.
@@ -790,6 +792,7 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
             water_time: 0.0,
             clock,
             frame_water_time: 0.0,
+            evaluated_materials: Default::default(),
             #[cfg(feature = "map-capture")]
             exact_frame: false,
         }

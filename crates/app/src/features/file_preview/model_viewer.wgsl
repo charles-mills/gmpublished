@@ -316,7 +316,7 @@ fn surface_bump_normal(input:VertexOutput,weight:f32)->vec3<f32> {
     let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
     let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
     let first=textureSample(normal_texture,normal_sampler,uv,layer).xyz;
-    let second=textureSample(normal_texture2,normal2_sampler,uv,0).xyz;
+    let second=textureSample(normal_texture2,normal2_sampler,uv,i32(surface.alpha_state.z%max(textureNumLayers(normal_texture2),1u))).xyz;
     let encoded=mix(first,second,weight);
     return select(encoded*2.0-1.0,encoded,material.bump_mode==BUMP_SSBUMP);
 }
@@ -373,7 +373,7 @@ fn surface_environment_lighting(input:VertexOutput,weight:f32,alpha:f32,world:bo
         var encoded=first.xyz;
         normal_alpha=first.a;
         if (surface.env_flags.w&ENV_SECOND_NORMAL)!=0u {
-            let second=textureSample(normal_texture2,normal2_sampler,uv,0);
+            let second=textureSample(normal_texture2,normal2_sampler,uv,i32(surface.alpha_state.z%max(textureNumLayers(normal_texture2),1u)));
             encoded=mix(encoded,second.xyz,weight);
             if surface_uses_blend_modulation(uniforms.fog.mode==FOG_HEIGHT) {normal_alpha=mix(first.a,second.a,weight);}
         }
@@ -486,4 +486,65 @@ fn model_specular_lighting(input:VertexOutput,base_linear:vec3<f32>,base_alpha:f
         specular=source_model_rim_finish(specular,rim,source_model_ambient(eye,model_ambient_cube(context)),normal,eye,mask,model_material.rim.y);
     }
     return specular*source_model_phong_tint(model_material.tint.xyz,base_linear,exponent_texel.g);
+}
+
+// Refract draws bind their scene snapshot at group 2 in place of the
+// lighting page. The glass entry point does not read baked lighting.
+@group(1) @binding(30) var glass_tint_texture:texture_2d_array<f32>;
+@group(1) @binding(31) var glass_tint_sampler:sampler;
+
+fn glass_background(uv:vec2<f32>)->vec4<f32> {
+    if (surface.refraction_flags.w&4u)!=0u {return textureSample(base_texture,base_sampler,uv);}
+    return textureSample(lightmap_texture,lightmap_sampler,uv);
+}
+
+@fragment
+fn fs_glass(input:VertexOutput)->@location(0) vec4<f32> {
+    if view_fragment_is_clipped(input.world_position_clip.w) {discard;}
+    let uv=surface_scroll_uv(input.uv,material.normal_s,material.normal_t,surface.normal_scroll);
+    let layer=i32(u32(max(surface.misc.z,0.0))%max(textureNumLayers(normal_texture),1u));
+    let texel=textureSample(normal_texture,normal_sampler,uv,layer);
+    var tangent_normal=texel.xyz*2.0-1.0;
+    if surface.refraction_flags.y!=0u {
+        let second_uv=surface_uv(input.uv,surface.normal2_s,surface.normal2_t);
+        let second_layer=i32(u32(max(surface.refraction_params.w,0.0))%max(textureNumLayers(normal_texture2),1u));
+        let second=textureSample(normal_texture2,normal2_sampler,second_uv,second_layer).xyz*2.0-1.0;
+        tangent_normal=normalize(tangent_normal+second);
+    }
+    let original=input.clip_position.xy/vec2<f32>(textureDimensions(lightmap_texture));
+    var tint=surface.refraction_tint.rgb;
+    if surface.refraction_flags.z!=0u {
+        let tint_layer=i32(u32(max(surface.refraction_params.z,0.0))%max(textureNumLayers(glass_tint_texture),1u));
+        tint*=2.0*textureSample(glass_tint_texture,glass_tint_sampler,uv,tint_layer).rgb;
+    }
+    var scale=texel.a*surface.refraction_tint.a;
+    if (surface.refraction_flags.w&2u)!=0u {tint*=input.color;scale*=input.opacity;}
+    let warped=original+tangent_normal.xy*scale;
+    var color=glass_background(warped);
+    if surface.refraction_params.x!=0.0 {
+        let fraction=1.0/512.0;
+        color=glass_background(warped-vec2<f32>(0.5*fraction))*(4.0/9.0)
+            +glass_background(warped+vec2<f32>(fraction,-0.5*fraction))*(2.0/9.0)
+            +glass_background(warped+vec2<f32>(-0.5*fraction,fraction))*(2.0/9.0)
+            +glass_background(warped+vec2<f32>(fraction))*(1.0/9.0);
+    }
+    if (surface.refraction_flags.w&1u)!=0u && surface.refraction_params.x==0.0 {
+        return vec4<f32>(mix(color.rgb,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w)),color.a);
+    }
+    var silhouette=1.0;
+    if surface.refraction_params.y!=0.0 {
+        let facing=clamp(dot(input.eye_vertex_unit,input.normal_vertex_unit),0.0,1.0);
+        silhouette=facing*facing*facing;
+    }
+    var result=mix(glass_background(original).rgb,color.rgb*tint,silhouette);
+    if surface.refraction_flags.x!=0u {
+        let world_normal=input.tangent_s*tangent_normal.x+input.tangent_t*tangent_normal.y+input.normal_vertex_unit*tangent_normal.z;
+        let direction=source_cube_reflection(world_normal,input.eye_vertex_unit);
+        let radiance=textureSample(surface_environment,surface_env_sampler,direction).rgb;
+        result+=source_cube_specular(radiance,vec3<f32>(texel.a),surface.env_tint.rgb,surface.env_params.x,surface.env_params.y);
+    }
+    result=mix(result,uniforms.fog_color.rgb,view_fog_color_factor(input.world_position_clip.xyz,1.0/input.clip_position.w));
+    var alpha=texel.a;
+    if (surface.refraction_flags.w&2u)!=0u {alpha*=input.opacity;}
+    return vec4<f32>(result,alpha);
 }

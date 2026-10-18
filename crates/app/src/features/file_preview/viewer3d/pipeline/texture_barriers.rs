@@ -21,6 +21,7 @@ pub(super) enum TextureRole {
     SkyFace(usize),
     Stars(usize),
     ImmersionNormal,
+    RefractionTint,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -81,6 +82,14 @@ pub(super) fn validate_material(slot: &MaterialSlot) -> Result<(), TextureBarrie
     data(&slot.name, TextureRole::Normal, prepared.normal())?;
     data(&slot.name, TextureRole::Normal2, prepared.normal2())?;
     if let Some(surface) = slot.shader.surface() {
+        data(
+            &slot.name,
+            TextureRole::RefractionTint,
+            surface
+                .refraction
+                .as_ref()
+                .and_then(|g| g.tint_texture.as_deref()),
+        )?;
         data(
             &slot.name,
             TextureRole::Detail,
