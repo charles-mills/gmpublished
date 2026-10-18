@@ -120,6 +120,7 @@ fn dotted_and_extensionless_materials_keep_distinct_assets_skins_and_preview_nam
         )]),
     });
     let original = compile_model(&request).unwrap();
+    let original_destination = fs::canonicalize(&request.destination).unwrap();
     for file in original
         .files
         .iter()
@@ -127,9 +128,10 @@ fn dotted_and_extensionless_materials_keep_distinct_assets_skins_and_preview_nam
     {
         let relative = file
             .path
-            .strip_prefix(&request.destination)
+            .strip_prefix(&original_destination)
             .unwrap()
-            .to_string_lossy();
+            .to_string_lossy()
+            .replace('\\', "/");
         let expected = if relative.contains("__skins/") {
             [0, 255, 0, 255]
         } else if relative.ends_with("material.002.vtf") {
@@ -220,7 +222,7 @@ fn dotted_and_extensionless_materials_keep_distinct_assets_skins_and_preview_nam
             .iter()
             .filter(|file| file.kind == ModelOutputKind::Texture)
         {
-            let relative = file.path.strip_prefix(&request.destination).unwrap();
+            let relative = file.path.strip_prefix(&original_destination).unwrap();
             let path = destination.join(relative);
             assert_eq!(
                 fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),

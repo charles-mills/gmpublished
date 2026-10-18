@@ -3418,6 +3418,7 @@ fn authored_skin_exports_resolve_to_distinct_preview_colors() {
         },
     ];
     let report = compile_model(&request).unwrap();
+    let destination = fs::canonicalize(&destination).unwrap();
     let files = report.files.iter().map(|file| {
         (
             file.path

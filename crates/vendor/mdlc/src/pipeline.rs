@@ -1601,6 +1601,7 @@ smd = "a.smd"
         let output = export_fixture(&dir);
         let root = dir.join("out");
         let paths = write_files(&output, &root).unwrap();
+        let vvd_target = std::fs::canonicalize(&paths.vvd).unwrap();
         std::fs::write(&paths.mdl, b"previous-mdl").unwrap();
         std::fs::write(&paths.vvd, b"previous-vvd").unwrap();
         std::fs::remove_file(&paths.vtx).unwrap();
@@ -1608,7 +1609,7 @@ smd = "a.smd"
         std::fs::write(&stale, b"previous-phy").unwrap();
         let mut failed = false;
         let result = write_files_with_rename(&output, &root, &mut |from, to| {
-            if !failed && to == paths.vvd {
+            if !failed && to == vvd_target {
                 failed = true;
                 return Err(std::io::Error::other("injected replacement failure"));
             }
@@ -1636,15 +1637,17 @@ smd = "a.smd"
         let output = export_fixture(&dir);
         let root = dir.join("out");
         let paths = write_files(&output, &root).unwrap();
+        let vvd_target = std::fs::canonicalize(&paths.vvd).unwrap();
+        let mdl_target = std::fs::canonicalize(&paths.mdl).unwrap();
         std::fs::write(&paths.mdl, b"previous-mdl").unwrap();
         std::fs::write(&paths.vvd, b"previous-vvd").unwrap();
         let mut publication_failed = false;
         let result = write_files_with_rename(&output, &root, &mut |from, to| {
-            if !publication_failed && to == paths.vvd {
+            if !publication_failed && to == vvd_target {
                 publication_failed = true;
                 return Err(std::io::Error::other("injected replacement failure"));
             }
-            if publication_failed && to == paths.mdl {
+            if publication_failed && to == mdl_target {
                 return Err(std::io::Error::other("injected restore failure"));
             }
             std::fs::rename(from, to)

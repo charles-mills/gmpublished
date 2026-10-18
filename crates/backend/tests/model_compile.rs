@@ -30,13 +30,11 @@ fn direct_mesh_compiles_matching_source_files_for_gmod() {
     assert!(output.triangles > 0);
     assert!(output.vertices > 0);
     assert_eq!(output.materials, ["material"]);
+    let model_directory = fs::canonicalize(root.path().join("addon/models/props")).unwrap();
     for file in &output.files {
         let bytes = fs::read(&file.path).unwrap();
         assert_eq!(bytes.len() as u64, file.bytes);
-        assert!(
-            file.path
-                .starts_with(root.path().join("addon/models/props"))
-        );
+        assert!(file.path.starts_with(&model_directory));
         let checksum_offset = match file.kind {
             ModelOutputKind::Mdl => {
                 assert_eq!(&bytes[..4], b"IDST");

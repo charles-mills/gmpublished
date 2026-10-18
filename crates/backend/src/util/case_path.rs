@@ -88,17 +88,21 @@ mod tests {
 
     #[test]
     fn lookup_preserves_case_and_limits_parent_traversal_to_its_root() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("Textures")).unwrap();
-        let file = root.path().join("Textures/Paint.PNG");
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        fs::create_dir(root.join("Textures")).unwrap();
+        let file = root.join("Textures/Paint.PNG");
         fs::write(&file, b"pixels").unwrap();
+        let found = find_file(&root, Path::new("textures/paint.png"), false, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            find_file(root.path(), Path::new("textures/paint.png"), false, None).unwrap(),
-            Some(file.clone())
+            fs::canonicalize(found).unwrap(),
+            fs::canonicalize(&file).unwrap()
         );
         assert_eq!(
             find_file(
-                root.path(),
+                &root,
                 Path::new("Textures/../Textures/Paint.PNG"),
                 true,
                 None
@@ -108,16 +112,16 @@ mod tests {
         );
         for allow_parent in [false, true] {
             assert!(matches!(
-                find_file(root.path(), Path::new("../escape"), allow_parent, None),
+                find_file(&root, Path::new("../escape"), allow_parent, None),
                 Err(LookupError::InvalidPath(_))
             ));
         }
         assert!(matches!(
-            find_file(root.path(), Path::new("textures/paint.png"), false, Some(0)),
+            find_file(&root, Path::new("textures/absent.png"), false, Some(0)),
             Err(LookupError::EntryLimit)
         ));
         assert!(
-            find_file(root.path(), Path::new("absent"), false, None)
+            find_file(&root, Path::new("absent"), false, None)
                 .unwrap()
                 .is_none()
         );
@@ -126,22 +130,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn exact_names_win_ambiguous_aliases_fail_and_symlinks_stay_contained() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
         let outside = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("Paint.PNG"), b"a").unwrap();
-        fs::write(root.path().join("paint.png"), b"b").unwrap();
+        fs::write(root.join("Paint.PNG"), b"a").unwrap();
+        fs::write(root.join("paint.png"), b"b").unwrap();
         assert_eq!(
-            find_file(root.path(), Path::new("Paint.PNG"), false, None).unwrap(),
-            Some(root.path().join("Paint.PNG"))
+            find_file(&root, Path::new("Paint.PNG"), false, None).unwrap(),
+            Some(root.join("Paint.PNG"))
         );
         assert!(matches!(
-            find_file(root.path(), Path::new("PAINT.PNG"), false, None),
+            find_file(&root, Path::new("PAINT.PNG"), false, None),
             Err(LookupError::Ambiguous(_))
         ));
         fs::write(outside.path().join("secret"), b"private").unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("escape")).unwrap();
         assert!(matches!(
-            find_file(root.path(), Path::new("escape/secret"), false, None),
+            find_file(&root, Path::new("escape/secret"), false, None),
             Err(LookupError::OutsideRoot(_))
         ));
     }

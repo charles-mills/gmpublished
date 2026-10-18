@@ -755,6 +755,7 @@ fn fbx_source_copy_retains_bytes_and_resolved_texture_sidecars() {
     let stage = root.path().join("stage");
     fs::create_dir_all(input.join("Textures")).unwrap();
     fs::create_dir(&stage).unwrap();
+    let input = canonical(&input).unwrap();
     let source = input.join("character.fbx");
     let fbx = br#"; FBX 7.4.0 project file
 FBXHeaderExtension: {
@@ -1193,7 +1194,7 @@ fn edited_qc_reports_original_locations_and_rejects_unsafe_or_non_qc_overrides()
     request.qc_text = Some("\n$unknown\n".into());
     let error = compile_model(&request).unwrap_err().to_string();
     assert!(
-        error.contains(&format!("{}:2:", source.display())),
+        error.contains(&format!("{}:2:", canonical(&source).unwrap().display())),
         "{error}"
     );
     request.qc_text = Some(format!(
