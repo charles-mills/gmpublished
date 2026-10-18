@@ -13,6 +13,8 @@ use std::{
 use tempfile::TempPath;
 
 use crate::ArcBytes;
+use std::sync::Arc;
+use vformats::{ArchiveIndexCost, ArchiveIndexLimits};
 
 use super::{GmaEntry, GmaError, GmaFile, GmaHeader, GmaMetadata, is_unsafe_entry_path};
 use crate::util::main_thread_forbidden;
@@ -30,6 +32,9 @@ enum GmaSource {
 struct FileSource {
     file: File,
     len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    change: (u64, u64, i64, i64),
     #[cfg(not(any(unix, windows)))]
     cursor: parking_lot::Mutex<()>,
 }
@@ -37,10 +42,21 @@ struct FileSource {
 impl FileSource {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
-        let len = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        let len = metadata.len();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
         Ok(Self {
             file,
             len,
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            change: (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ),
             #[cfg(not(any(unix, windows)))]
             cursor: parking_lot::Mutex::new(()),
         })
@@ -141,8 +157,15 @@ impl Read for GmaRangeReader<'_> {
     }
 }
 
+#[derive(Default)]
+struct IndexCache {
+    cost: Option<ArchiveIndexCost>,
+    parsed: Option<Result<Arc<ParsedGma>, GmaError>>,
+}
+
 pub struct GmaView {
     source: GmaSource,
+    index: parking_lot::Mutex<IndexCache>,
 }
 
 impl GmaView {
@@ -150,12 +173,14 @@ impl GmaView {
         main_thread_forbidden!();
         Ok(Self {
             source: GmaSource::File(FileSource::open(path)?),
+            index: parking_lot::Mutex::default(),
         })
     }
 
     pub fn from_membuffer(bytes: ArcBytes) -> Self {
         Self {
             source: GmaSource::Mem(bytes),
+            index: parking_lot::Mutex::default(),
         }
     }
 
@@ -166,6 +191,7 @@ impl GmaView {
                 source,
                 _guard: temp_path,
             },
+            index: parking_lot::Mutex::default(),
         })
     }
 
@@ -194,10 +220,85 @@ impl GmaView {
         })
     }
 
-    fn parse_index(&self) -> Result<ParsedGma, GmaError> {
-        main_thread_forbidden!();
+    fn ensure_index_cost(
+        &self,
+        cache: &mut IndexCache,
+        limits: ArchiveIndexLimits,
+    ) -> Result<ArchiveIndexCost, GmaError> {
+        if let Some(cost) = cache.cost {
+            limits.check(cost).map_err(GmaError::IndexLimit)?;
+            return Ok(cost);
+        }
+        if let Some(Err(error)) = &cache.parsed {
+            return Err(error.clone());
+        }
         let len = self.source.len();
-        format::parse(self.range_reader(0, len)?, len)
+        match format::preflight(self.range_reader(0, len)?, len, limits) {
+            Ok(cost) => {
+                cache.cost = Some(cost);
+                Ok(cost)
+            }
+            Err(error @ GmaError::IndexLimit(_)) => Err(error),
+            Err(error) => {
+                cache.parsed = Some(Err(error.clone()));
+                Err(error)
+            }
+        }
+    }
+
+    pub fn stream_index_cost(
+        reader: impl Read,
+        archive_len: u64,
+        limits: ArchiveIndexLimits,
+    ) -> Result<ArchiveIndexCost, GmaError> {
+        format::preflight(reader, archive_len, limits)
+    }
+
+    pub fn stream_index(
+        reader: impl Read,
+        archive_len: u64,
+        limits: ArchiveIndexLimits,
+        cost: ArchiveIndexCost,
+    ) -> Result<GmaIndexBundle, GmaError> {
+        limits.check(cost).map_err(GmaError::IndexLimit)?;
+        limits
+            .check(index_bundle_cost(cost))
+            .map_err(GmaError::IndexLimit)?;
+        let parsed = format::parse(reader, archive_len, limits, cost)?;
+        Ok(GmaIndexBundle {
+            header: header_from_parsed(&parsed),
+            entries: indexed_entries_from_parsed(&parsed),
+        })
+    }
+
+    pub fn index_cost_with_limits(
+        &self,
+        limits: ArchiveIndexLimits,
+    ) -> Result<ArchiveIndexCost, GmaError> {
+        main_thread_forbidden!();
+        self.ensure_index_cost(&mut self.index.lock(), limits)
+    }
+
+    fn parse_index(&self) -> Result<Arc<ParsedGma>, GmaError> {
+        self.parse_index_with_limits(ArchiveIndexLimits::default())
+    }
+
+    fn parse_index_with_limits(
+        &self,
+        limits: ArchiveIndexLimits,
+    ) -> Result<Arc<ParsedGma>, GmaError> {
+        main_thread_forbidden!();
+        let mut cache = self.index.lock();
+        let cost = self.ensure_index_cost(&mut cache, limits)?;
+        if let Some(parsed) = &cache.parsed {
+            return parsed.clone();
+        }
+        let len = self.source.len();
+        let parsed = format::parse(self.range_reader(0, len)?, len, limits, cost).map(Arc::new);
+        if !matches!(&parsed, Err(GmaError::IndexLimit(_))) {
+            cache.parsed = Some(parsed.clone());
+        }
+        parsed
     }
 
     /// Opens `path` for safe positional reads. The initial file size bounds
@@ -226,9 +327,20 @@ impl GmaView {
         gma
     }
 
-    /// Parses handle, header, and entries once. Calling the individual accessors repeats the parse.
     pub fn meta(&self, path: impl AsRef<Path>) -> Result<GmaMetaBundle, GmaError> {
-        let parsed = self.parse_index()?;
+        self.meta_with_index_limits(path, ArchiveIndexLimits::default())
+    }
+
+    pub fn meta_with_index_limits(
+        &self,
+        path: impl AsRef<Path>,
+        limits: ArchiveIndexLimits,
+    ) -> Result<GmaMetaBundle, GmaError> {
+        let cost = self.index_cost_with_limits(limits)?;
+        limits
+            .check(index_bundle_cost(cost))
+            .map_err(GmaError::IndexLimit)?;
+        let parsed = self.parse_index_with_limits(limits)?;
         let handle = self.handle_from_parsed(&parsed, path);
         let header = GmaHeader {
             version: parsed.metadata.version,
@@ -276,6 +388,29 @@ impl GmaView {
         self.read_payload_bytes(entry.data_offset, entry.size)
     }
 
+    pub fn source_unchanged(&self) -> std::io::Result<bool> {
+        let source = match &self.source {
+            GmaSource::Mem(_) => return Ok(true),
+            GmaSource::File(source) | GmaSource::TempBacked { source, .. } => source,
+        };
+        let metadata = source.file.metadata()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if source.change
+                != (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            {
+                return Ok(false);
+            }
+        }
+        Ok(metadata.len() == source.len && metadata.modified().ok() == source.modified)
+    }
+
     pub fn read_payload_bytes(&self, offset: u64, len: u64) -> Result<Vec<u8>, GmaError> {
         let len = usize::try_from(len).map_err(|_| GmaError::FormatError)?;
         let mut bytes = Vec::new();
@@ -306,7 +441,8 @@ impl GmaView {
     }
 
     pub(super) fn extraction_entries(&self) -> Result<Vec<GmaIndexedEntry>, GmaError> {
-        Ok(indexed_entries_from_parsed(&self.parse_index()?))
+        self.parse_index()
+            .map(|parsed| indexed_entries_from_parsed(&parsed))
     }
 }
 
@@ -340,6 +476,14 @@ fn header_from_parsed(parsed: &ParsedGma) -> GmaHeader {
         author: meta.author.clone(),
         addon_version: meta.addon_version,
     }
+}
+
+fn index_bundle_cost(mut cost: ArchiveIndexCost) -> ArchiveIndexCost {
+    cost.record_bytes = cost.record_bytes.saturating_add(
+        (cost.entries as u64).saturating_mul(std::mem::size_of::<GmaIndexedEntry>() as u64),
+    );
+    cost.string_bytes = cost.string_bytes.saturating_mul(2);
+    cost
 }
 
 fn indexed_entries_from_parsed(parsed: &ParsedGma) -> Vec<GmaIndexedEntry> {
@@ -472,7 +616,7 @@ mod tests {
 
     use super::GmaView;
 
-    fn raw_gma(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(super) fn raw_gma(entries: &[(&str, &[u8])]) -> Vec<u8> {
         fn c_string(bytes: &mut Vec<u8>, value: &str) {
             bytes.extend_from_slice(value.as_bytes());
             bytes.push(0);
@@ -660,5 +804,90 @@ mod tests {
         assert!(!is_unsafe_entry_path("materials/models/foo.vmt"));
         assert!(!is_unsafe_entry_path("addon.json"));
         assert!(!is_unsafe_entry_path("foo..bar/baz"));
+    }
+}
+
+#[cfg(test)]
+mod index_policy_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn checked_cost_precedes_materialization_and_warm_profiles_recheck() {
+        let bytes = super::tests::raw_gma(&[("materials/a.vmt", b"UnlitGeneric {}")]);
+        let view = GmaView::from_membuffer(bytes.into());
+        let limits = ArchiveIndexLimits::default();
+        let cost = view.index_cost_with_limits(limits).unwrap();
+        assert!(view.index.lock().parsed.is_none());
+        let strict = ArchiveIndexLimits {
+            retained_bytes: cost.retained_bytes().unwrap() - 1,
+            ..limits
+        };
+        assert!(matches!(
+            view.parse_index_with_limits(strict),
+            Err(GmaError::IndexLimit(_))
+        ));
+        assert!(view.index.lock().parsed.is_none());
+        let first = view.parse_index_with_limits(limits).unwrap();
+        let second = view.parse_index_with_limits(limits).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(matches!(
+            view.parse_index_with_limits(strict),
+            Err(GmaError::IndexLimit(_))
+        ));
+        assert!(Arc::ptr_eq(
+            &first,
+            &view.parse_index_with_limits(limits).unwrap()
+        ));
+    }
+
+    #[test]
+    fn concurrent_access_shares_one_parsed_index_and_releases_it() {
+        let bytes = super::tests::raw_gma(&[("materials/a.vmt", b"UnlitGeneric {}")]);
+        let view = Arc::new(GmaView::from_membuffer(bytes.into()));
+        let parsed = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| scope.spawn(|| view.parse_index().unwrap()))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for other in &parsed {
+            assert!(Arc::ptr_eq(&parsed[0], other));
+        }
+        let weak = Arc::downgrade(&parsed[0]);
+        drop(parsed);
+        assert!(weak.upgrade().is_some());
+        drop(view);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn intrinsic_failure_is_cached_but_strict_profiles_do_not_poison_success() {
+        let view = GmaView::from_membuffer(Arc::from(b"not a GMA".as_slice()));
+        assert!(matches!(
+            view.index_cost_with_limits(ArchiveIndexLimits::default()),
+            Err(GmaError::InvalidHeader)
+        ));
+        assert!(matches!(
+            view.index.lock().parsed,
+            Some(Err(GmaError::InvalidHeader))
+        ));
+        let bytes = super::tests::raw_gma(&[("materials/a.vmt", b"UnlitGeneric {}")]);
+        let view = GmaView::from_membuffer(bytes.into());
+        let strict = ArchiveIndexLimits {
+            entries: 0,
+            ..ArchiveIndexLimits::default()
+        };
+        assert!(matches!(
+            view.index_cost_with_limits(strict),
+            Err(GmaError::IndexLimit(_))
+        ));
+        assert!(view.index.lock().parsed.is_none());
+        assert!(
+            view.index_cost_with_limits(ArchiveIndexLimits::default())
+                .is_ok()
+        );
     }
 }

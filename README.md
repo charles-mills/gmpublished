@@ -2,7 +2,7 @@
 
 gmpublished is a web-view free fork of [gmpublisher](https://github.com/WilliamVenner/gmpublisher), built with [Iced](https://iced.rs/).
 
-On top of the features offered by (and thanks to) gmpublisher, it includes full in-app preview tools for maps, models, code, materials and audio. Click [here](#compared-to-gmpublisher) for a more detailed comparison.
+On top of the features offered by (and thanks to) gmpublisher, it includes full in-app preview tools for maps, models, code, materials and audio. It also contains tools for exporting models to Garry's Mod, including an in-app preview, collision mesh generator, and QC generator. Click [here](#compared-to-gmpublisher) for a more detailed comparison.
 
 ## Installation
 

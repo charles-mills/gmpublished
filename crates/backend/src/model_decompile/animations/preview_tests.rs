@@ -56,7 +56,11 @@ fn absolute_playback_preserves_bind_weights_source_axes_and_interpolated_rotatio
 fn blend_delta_ik_and_malformed_companions_do_not_render_incorrect_poses() {
     let output = fixture("");
     let record = Reader(&output.mdl).table(188, 192, 212).unwrap()[0];
-    for (offset, value) in [(56, 2i32), (12, 4), (164, 1)] {
+    // A blend count that disagrees with the sequence grid is rejected during parsing.
+    let mut malformed_grid = output.mdl.clone();
+    malformed_grid[record + 56..record + 60].copy_from_slice(&2i32.to_le_bytes());
+    assert!(load_animation_preview(&malformed_grid, &output.vvd, &output.vtx, None).is_err());
+    for (offset, value) in [(12, 4i32), (164, 1)] {
         let mut raw = output.mdl.clone();
         raw[record + offset..record + offset + 4].copy_from_slice(&value.to_le_bytes());
         let preview = load_animation_preview(&raw, &output.vvd, &output.vtx, None).unwrap();

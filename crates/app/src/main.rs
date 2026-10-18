@@ -84,6 +84,7 @@ mod platform_chrome;
 mod platform_menu;
 #[cfg(target_os = "macos")]
 mod platform_open;
+mod preparation;
 mod spinner_clock;
 #[cfg(test)]
 #[path = "../build_support/steam_runtime.rs"]
@@ -105,9 +106,17 @@ static PANIC_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn main() -> ExitCode {
+    let shutdown = GpuShutdownGuard(true);
     let outcome = run();
-    // Flush after both GUI and CLI exit. Later messages can only reach stderr.
+    let gpu_shutdown: Result<(), features::file_preview::ShutdownError> = shutdown.finish();
     gmpublished_backend::shutdown_logging();
+    if let Err(error) = gpu_shutdown {
+        eprintln!("GPU completion shutdown failed: {error}");
+        if let Err(error) = outcome {
+            eprintln!("Error: {error}");
+        }
+        return ExitCode::FAILURE;
+    }
 
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -115,6 +124,24 @@ fn main() -> ExitCode {
             eprintln!("Error: {error}");
             eprintln!("Panic log: {}", panic_log_path().display());
             ExitCode::FAILURE
+        }
+    }
+}
+
+struct GpuShutdownGuard(bool);
+impl GpuShutdownGuard {
+    fn finish(mut self) -> Result<(), features::file_preview::ShutdownError> {
+        let result = features::file_preview::finish_gpu_shutdown();
+        self.0 = false;
+        result
+    }
+}
+impl Drop for GpuShutdownGuard {
+    fn drop(&mut self) {
+        if self.0
+            && let Err(error) = features::file_preview::finish_gpu_shutdown()
+        {
+            eprintln!("GPU completion shutdown failed during unwinding: {error}");
         }
     }
 }
@@ -153,13 +180,14 @@ fn run() -> Result<(), RunError> {
     let chrome_strategy =
         features::shell::ChromeStrategy::resolve(startup_settings.backend.titlebar);
 
+    let window_settings = window_settings(chrome_strategy);
     let application = iced::application(move || App::new(ctx.clone()), App::update, App::view);
     let application = assets::fonts::bundled_fonts()
         .into_iter()
         .fold(application, iced::Application::font);
 
     application
-        .window(window_settings(chrome_strategy))
+        .window(window_settings)
         .default_font(assets::fonts::default_font())
         .theme(App::theme)
         .subscription(App::subscription)

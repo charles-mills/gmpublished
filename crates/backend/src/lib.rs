@@ -20,6 +20,9 @@ pub(crate) use util::{stream_bytes, threads, write_nt_string};
 
 pub type ArcBytes = std::sync::Arc<[u8]>;
 
+#[allow(missing_docs)]
+pub mod source_discovery;
+
 mod execution;
 pub use execution::{
     CpuExecutor, ExecutionConfig, ExecutionInitError, ExecutionResources, ExecutionScheduleError,

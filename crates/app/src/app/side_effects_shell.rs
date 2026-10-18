@@ -104,11 +104,31 @@ impl App {
         })
     }
 
+    pub(super) fn release_preview_mouse_capture_task(&mut self) -> Task<RootMessage> {
+        let mut tasks = Vec::new();
+        if self.state.features.file_preview.mouse_captured() {
+            tasks.push(
+                self.apply_file_preview_message(file_preview::Message::MouseCaptureRequested(
+                    false,
+                )),
+            );
+        }
+        if self.state.features.model_preview.mouse_captured() {
+            tasks.push(
+                self.apply_model_preview_message(file_preview::Message::MouseCaptureRequested(
+                    false,
+                )),
+            );
+        }
+        Task::batch(tasks)
+    }
+
     pub(super) fn open_modal_stack_task(
         &mut self,
         modal: modal_stack::ActiveModal,
     ) -> Task<RootMessage> {
         Task::batch([
+            self.release_preview_mouse_capture_task(),
             self.dismiss_account_menu_task(self.update_context),
             self.dismiss_search_palette_task(),
             self.modal_stack_task(&open_modal_message(modal), self.update_context),
@@ -148,7 +168,7 @@ impl App {
             }
             window::Event::Unfocused => {
                 self.state.set_window_focused(false);
-                Task::none()
+                self.release_preview_mouse_capture_task()
             }
             // Resize layout runs natively; an async reposition would arrive a frame late.
             window::Event::Closed

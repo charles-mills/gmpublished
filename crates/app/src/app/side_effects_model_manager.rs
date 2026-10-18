@@ -546,16 +546,25 @@ fn export_model(
         if request.target == model_manager::ExportTarget::Blender {
             let destination = export_destination(&request.source, &request.destination, "blender");
             let resolver = std::cell::LazyCell::new(|| {
-                crate::bridge::materials::MaterialResolver::new(
+                crate::bridge::materials::MaterialResolver::new_with_source_policy_cancellable(
                     PreviewArchiveSource::from_folder(Vec::new()),
                     game_directory.map(Path::to_path_buf),
+                    Default::default(),
+                    crate::bridge::materials::MaterialResolver::default_archive_index_working_budget(),
+                    Default::default(),
+                    Default::default(),
                 )
             });
             let report = model_decompile::export_blender_model_with_cancel(
                 &request.source,
                 &destination,
                 cancel,
-                |path| resolver.entry_bytes(path),
+                |path| {
+                    resolver
+                        .as_ref()
+                        .ok()
+                        .and_then(|resolver| resolver.entry_bytes(path))
+                },
             )
             .map_err(|error| error.to_string())?;
             return Ok(model_manager::ExportResult {
@@ -618,13 +627,22 @@ fn compile_request(
     options.animation_settings = request.animation_settings;
     if load_surfaces && let Some(game_directory) = game_directory {
         let resolver = std::cell::LazyCell::new(|| {
-            crate::bridge::materials::MaterialResolver::new(
+            crate::bridge::materials::MaterialResolver::new_with_source_policy_cancellable(
                 PreviewArchiveSource::from_folder(Vec::new()),
                 Some(game_directory.to_path_buf()),
+                Default::default(),
+                crate::bridge::materials::MaterialResolver::default_archive_index_working_budget(),
+                Default::default(),
+                Default::default(),
             )
         });
-        model_compile::load_surface_properties(&mut options, |path| resolver.entry_bytes(path))
-            .map_err(|error| error.to_string())?;
+        model_compile::load_surface_properties(&mut options, |path| {
+            resolver
+                .as_ref()
+                .ok()
+                .and_then(|resolver| resolver.entry_bytes(path))
+        })
+        .map_err(|error| error.to_string())?;
     }
     Ok(options)
 }
@@ -819,6 +837,8 @@ fn prepare_preview(
         .map_err(|error| error.to_string())?
         .len();
     Ok(PreviewRequest {
+        cancellation: Default::default(),
+        map_texture_quality: Default::default(),
         request_id: generation,
         archive: PreviewArchiveSource::from_folder(files),
         entry_path,

@@ -1,6 +1,21 @@
 use super::{Effect, Message, State};
 
 pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
+    let was_captured = state.mouse_captured();
+    let mut effects = update_content(state, message);
+    if was_captured != state.mouse_captured() {
+        effects.insert(
+            0,
+            Effect::MouseCaptureChanged {
+                captured: state.mouse_captured(),
+                epoch: state.mouse_capture_epoch(),
+            },
+        );
+    }
+    effects
+}
+
+fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
         Message::WorkspaceLoadCancelled => {
             state.cancel_workspace_load();
@@ -90,6 +105,12 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             let _changed = state.apply_loaded(request_id, *result);
             Vec::new()
         }
+        Message::RenderFeedbackChanged(generation) => {
+            if !state.accepts_render_feedback(generation) {
+                return Vec::new();
+            }
+            Vec::new()
+        }
         Message::AnimationTick(now) => {
             state.tick_animation(now);
             if state.audio_playing()
@@ -163,6 +184,16 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.select_bodygroup_choice(group, choice);
             Vec::new()
         }
+        Message::MouseCaptureRequested(captured) => {
+            state.set_mouse_captured(captured);
+            Vec::new()
+        }
+        Message::MouseCaptureFailed(epoch) => {
+            if epoch == state.mouse_capture_epoch() {
+                state.set_mouse_captured(false);
+            }
+            Vec::new()
+        }
         Message::MapFogToggled(enabled) => {
             state.set_map_fog_enabled(enabled);
             Vec::new()
@@ -175,6 +206,9 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             state.set_map_visibility_enabled(enabled);
             Vec::new()
         }
+        Message::MapReducedTextureDetailToggled(reduced) => state
+            .reload_map_texture_quality(reduced)
+            .map_or_else(Vec::new, |request| vec![Effect::LoadRequested(request)]),
         Message::PhyDebugToggled(enabled) => {
             state.set_phy_debug_enabled(enabled);
             Vec::new()
@@ -253,7 +287,10 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
             ));
             Vec::new()
         }
-        Message::BackRequested => vec![Effect::ModalCloseRequested],
+        Message::BackRequested => {
+            state.set_mouse_captured(false);
+            vec![Effect::ModalCloseRequested]
+        }
         Message::ExpandToggled => {
             let was_expanded = state.expanded();
             state.toggle_expanded();

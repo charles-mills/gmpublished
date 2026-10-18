@@ -1,0 +1,17 @@
+{
+  "format": "SLL1",
+  "map": "gm_overlay_bump_contract_plain_u",
+  "face_count": 9460,
+  "physical_page_count": 19,
+  "profile": [
+    512,
+    256
+  ],
+  "bsp_sha256": "8aef2d73632af52dde6f66e842e62caf459dd66a10c7f523d45798bdf2d06ff0",
+  "oracle_sha256": "b82fba07889b92866179d75875179c2ca8353c9805c7a20277b5452e377bbb37",
+  "fixture_sha256": "26ba706a9d57d6783c11cf0ff339e13600f48e1d7112d57ea6cc523cfb041136",
+  "engine_sha256": "72528485332ebfb8de4afd5e3a07b09b42e4e44fd659f063d31803a05731fa16",
+  "module_sha256": "f2be34272e6d642a82d2cdd522dd6568bc2c597f0b21e6c03dbe7c8965a11bd3",
+  "inputs": "BSP texdata order, raw face extents/flags/styles; native canonical material and effective lightmap requirements.",
+  "expected": "Native signed lightmap page identity for every BSP face."
+}

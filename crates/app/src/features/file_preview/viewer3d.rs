@@ -6,7 +6,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Action, Viewport};
 use iced::{Event, Point, Rectangle};
 
-use crate::bridge::materials::{RenderMode, ResolvedBcMip, ResolvedTexture};
+use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::media::preview_model::ModelVertex;
 use gmpublished_domain::scene::map::{MapDoorClass, MapDoorMotion, MapDoorOpenDirection};
 use vformats::vtf::BcFormat;
@@ -21,9 +21,13 @@ use crate::media::preview_model::{
 };
 
 mod camera;
+
 mod doors;
 mod draw_plan;
+pub(super) mod feedback;
 mod pipeline;
+pub use pipeline::{ShutdownError, finish_gpu_shutdown};
+mod source_camera;
 #[cfg(test)]
 mod test_support;
 mod texture;
@@ -34,20 +38,41 @@ use doors::{
     door_world_bounds, expand_bounds, initial_door_swing, trace_aabb_against_aabb,
     transform_door_vertices,
 };
-use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem, prepare_draw_plans};
+use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem};
 use pipeline::ModelPrimitive;
 pub(super) use pipeline::StagePrimitive;
 use pipeline::Uniforms;
-use texture::{
-    TextureUploadLevel, bc_mip_is_valid, bc_texture_format, decode_bc_texture,
-    write_bc_texture_level, write_texture_level,
-};
+use texture::TextureUploadLevel;
 
-pub(super) const MODEL_SHADER_SOURCE: &str = include_str!("model_viewer.wgsl");
+pub(super) const MODEL_SHADER_SOURCE: &str = concat!(
+    include_str!("view_uniforms.wgsl"),
+    include_str!("material_uniforms.wgsl"),
+    include_str!("view_fog.wgsl"),
+    include_str!("lightmap_decode.wgsl"),
+    include_str!("model_lighting.wgsl"),
+    include_str!("model_lighting_context.wgsl"),
+    include_str!("cubemap.wgsl"),
+    "\n",
+    include_str!("surface.wgsl"),
+    "\n",
+    include_str!("model_viewer.wgsl")
+);
 const SHADER_SOURCE: &str = MODEL_SHADER_SOURCE;
-pub(super) const WATER_SHADER_SOURCE: &str = include_str!("water.wgsl");
-pub(super) const DETAIL_SHADER_SOURCE: &str = include_str!("detail.wgsl");
-pub(super) const SKY_SHADER_SOURCE: &str = include_str!("sky.wgsl");
+pub(super) const WATER_SHADER_SOURCE: &str = concat!(
+    include_str!("view_uniforms.wgsl"),
+    include_str!("material_uniforms.wgsl"),
+    include_str!("view_fog.wgsl"),
+    include_str!("lightmap_decode.wgsl"),
+    include_str!("water.wgsl")
+);
+pub(super) const DETAIL_SHADER_SOURCE: &str = concat!(
+    include_str!("view_uniforms.wgsl"),
+    include_str!("material_uniforms.wgsl"),
+    include_str!("view_fog.wgsl"),
+    include_str!("detail.wgsl")
+);
+pub(super) const SKY_SHADER_SOURCE: &str =
+    concat!(include_str!("view_uniforms.wgsl"), include_str!("sky.wgsl"));
 const BLIT_SHADER_SOURCE: &str = r"
 var<private> uvs: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(0.0, 0.0),
@@ -89,22 +114,34 @@ const CHECKERBOARD_MIP_2X2_BYTES: usize = 2 * 2 * 4;
 const CHECKERBOARD_MIP_1X1_BYTES: usize = 4;
 const PHY_DEBUG_RGBA: [u8; 4] = [48, 210, 255, 96];
 const MSAA_SAMPLE_COUNT: u32 = 4;
-const MATERIAL_ANISOTROPY_CLAMP: u16 = 16;
+
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 const AMBIENT: f32 = 0.35;
-const DETAIL_VERTEX_FLOAT_COUNT: u64 = 7;
-const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+const DETAIL_VERTEX_FLOAT_COUNT: u64 = 14;
+const MODEL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 15] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x3,
     2 => Float32x2,
     3 => Float32x2,
+    6 => Float32,
     4 => Float32x3,
     5 => Float32,
+    7 => Float32,
+    8 => Float32x3,
+    9 => Uint32,
+    10 => Float32x3,
+    11 => Float32x3,
+    12 => Float32,
+    13 => Uint32,
+    14 => Uint32,
 ];
-const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x3,
     1 => Float32x2,
     2 => Float32x2,
+    3 => Float32,
+    4 => Float32x3,
+    5 => Float32x3,
 ];
 
 pub(super) fn mid(min: Vec3, max: Vec3) -> Vec3 {
@@ -139,12 +176,15 @@ fn normalize_or_up(v: Vec3) -> Vec3 {
     v.normalize().unwrap_or(SOURCE_UP)
 }
 
-/// Source is Z-up.
 pub(super) const SOURCE_UP: Vec3 = Vec3::new(0.0, 0.0, 1.0);
 
 /// Right-handed look-at, column-major.
 pub(super) fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> [[f32; 4]; 4] {
-    let f = normalize_or_up(center - eye);
+    look_to(eye, center - eye, up)
+}
+
+pub(super) fn look_to(eye: Vec3, direction: Vec3, up: Vec3) -> [[f32; 4]; 4] {
+    let f = normalize_or_up(direction);
     let s = normalize_or_up(f.cross(up));
     let u = s.cross(f);
     [
@@ -189,6 +229,20 @@ pub(super) fn mat_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn look_to_keeps_rotation_independent_of_large_world_origin() {
+        let direction = Vec3::new(-0.624_695, 0.468_521_33, -0.624_695_06);
+        let origin = look_to(Vec3::ZERO, direction, SOURCE_UP);
+        for eye in [
+            Vec3::new(-3120.0, -3564.0, 650.0),
+            Vec3::new(32768.0, -32768.0, 16384.0),
+        ] {
+            let view = look_to(eye, direction, SOURCE_UP);
+            assert_eq!(view[..3], origin[..3]);
+            assert_ne!(look_at(eye, eye + direction, SOURCE_UP)[..3], origin[..3]);
+        }
+    }
 
     #[test]
     fn perspective_maps_near_to_one_and_far_to_zero() {

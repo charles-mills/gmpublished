@@ -41,6 +41,8 @@ fn extract_suffix_ws_id<S: AsRef<str>>(file_name: S) -> Option<WorkshopId> {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum GmaError {
+    #[error(transparent)]
+    IndexLimit(vformats::ArchiveIndexLimit),
     #[error("GMA I/O failed")]
     IoError(#[source] crate::IoFailure),
     #[error("the GMA is malformed")]
@@ -85,7 +87,7 @@ impl crate::error_key::HasErrorKey for GmaError {
         use crate::error_key::keys;
         match self {
             Self::IoError(_) => keys::IO_ERROR,
-            Self::FormatError => keys::GMA_FORMAT_ERROR,
+            Self::FormatError | Self::IndexLimit(_) => keys::GMA_FORMAT_ERROR,
             Self::InvalidHeader => keys::GMA_INVALID_HEADER,
             Self::EntryNotFound => keys::GMA_ENTRY_NOT_FOUND,
             Self::Lzma(_) => keys::LZMA,

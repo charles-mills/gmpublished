@@ -8,15 +8,72 @@ use gmpublished_domain::scene::map::{
     MapWalkCollision, StaticPropPlacement,
 };
 
+use super::props::{
+    bake_map_doors_from_loaded_model_cache, load_prop_model_paths_parallel,
+    unique_prop_model_paths_from,
+};
 use super::{
     DoorBakeResult, LoadedPropModel, MaterialTable, PropBakeResult, StaticPropLightingInputs,
-    bake_map_doors_with_prop_model_loader, bake_static_props_from_loaded_model_cache,
-    enrich_walk_collision_with_prop_collision, format_mib, load_unique_prop_models_parallel,
-    log_prop_door_material_resolution, pre_resolve_prop_materials,
-    refresh_entity_prop_aabb_visibility,
+    bake_static_props_from_loaded_model_cache, enrich_walk_collision_with_prop_collision,
+    format_mib, log_prop_door_material_resolution, refresh_entity_prop_aabb_visibility,
 };
 
+#[cfg(test)]
+mod tests;
+
+type PropModelCache = HashMap<String, Option<Arc<LoadedPropModel>>>;
+
+fn load_role_models(
+    roles: [Vec<String>; 3],
+    resolver: &MaterialResolver,
+    load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
+) -> [PropModelCache; 3] {
+    let mut seen = std::collections::HashSet::new();
+    let paths = roles
+        .iter()
+        .flatten()
+        .filter(|path| seen.insert(path.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let models = load_prop_model_paths_parallel(&paths, resolver, load_model);
+    roles.map(|paths| {
+        paths
+            .into_iter()
+            .map(|path| {
+                let model = models.get(&path).expect("discovered model path").clone();
+                (path, model)
+            })
+            .collect()
+    })
+}
+
+fn shared_model_geometry(
+    roles: [&PropModelCache; 3],
+) -> Result<
+    crate::media::preview_model::SharedModelGeometry,
+    crate::media::preview_model::GeometryError,
+> {
+    use crate::media::preview_model::{GeometryCounts, SharedModelGeometry};
+    let mut seen = std::collections::HashSet::new();
+    let mut summary = SharedModelGeometry::default();
+    for loaded in roles.into_iter().flat_map(HashMap::values).flatten() {
+        if !seen.insert(Arc::as_ptr(&loaded.model)) {
+            continue;
+        }
+        for mesh in &loaded.model.meshes {
+            summary.counts = summary.counts.checked_add(GeometryCounts::checked(
+                mesh.vertices.len(),
+                mesh.indices.len(),
+                1,
+            )?)?;
+        }
+        summary.model_count += 1;
+    }
+    Ok(summary)
+}
+
 pub(super) struct PropBuildPhase {
+    pub(super) geometry: crate::media::preview_model::PropGeometrySummary,
     pub(super) loaded_models: HashMap<String, Option<Arc<LoadedPropModel>>>,
     pub(super) world: PropBakeResult,
     pub(super) skybox: PropBakeResult,
@@ -37,16 +94,29 @@ pub(super) fn build_props(
     visibility: Option<&MapVisibility>,
     walk_collision: Option<MapWalkCollision>,
     ambient: &MapAmbientLighting,
+    environment_maps: super::cubemaps::PropEnvironmentMapInputs<'_>,
     environment_lighting: Option<&MapEnvironmentLighting>,
+    lightmap_source: Option<gmpublished_domain::scene::map::LightmapSource>,
     resolver: &MaterialResolver,
     table: &mut MaterialTable,
     load_model: &(impl Fn(&str, &MaterialResolver) -> Option<LoadedPropModel> + Sync),
 ) -> PropBuildPhase {
     let started = Instant::now();
     let load_started = Instant::now();
-    let loaded_models = load_unique_prop_models_parallel(static_props, resolver, load_model);
-    let skybox_loaded_models =
-        load_unique_prop_models_parallel(skybox_static_props, resolver, load_model);
+    let roles = [
+        unique_prop_model_paths_from(static_props.iter()),
+        unique_prop_model_paths_from(skybox_static_props.iter()),
+        unique_prop_model_paths_from(map_doors.iter().filter_map(|door| match &door.geometry {
+            gmpublished_domain::scene::map::MapDoorGeometry::Prop { placement } => {
+                Some(placement.as_ref())
+            }
+            gmpublished_domain::scene::map::MapDoorGeometry::Brush { .. } => None,
+        })),
+    ];
+    let [loaded_models, skybox_loaded_models, door_loaded_models] =
+        load_role_models(roles, resolver, load_model);
+    let shared_models =
+        shared_model_geometry([&loaded_models, &skybox_loaded_models, &door_loaded_models]);
     refresh_entity_prop_aabb_visibility(
         static_props,
         usize::try_from(raw_stats.world_static_prop_count)
@@ -83,35 +153,48 @@ pub(super) fn build_props(
     );
     let lighting = StaticPropLightingInputs {
         ambient,
+        environment_maps: Some(environment_maps),
         environment_lighting,
+        lightmap_source,
         walk_collision: walk_collision.as_ref(),
     };
-    let resolved = pre_resolve_prop_materials(static_props, &loaded_models, resolver);
     let world = bake_static_props_from_loaded_model_cache(
         static_props,
         resolver,
         table,
         &loaded_models,
-        Some(&resolved),
         lighting,
         load_started,
     );
-    let skybox_resolved =
-        pre_resolve_prop_materials(skybox_static_props, &skybox_loaded_models, resolver);
     let skybox = bake_static_props_from_loaded_model_cache(
         skybox_static_props,
         resolver,
         table,
         &skybox_loaded_models,
-        Some(&skybox_resolved),
         lighting,
         load_started,
     );
-    let doors =
-        bake_map_doors_with_prop_model_loader(map_doors, resolver, table, lighting, load_model);
+    let doors = bake_map_doors_from_loaded_model_cache(
+        map_doors,
+        resolver,
+        table,
+        lighting,
+        &door_loaded_models,
+    );
     log_prop_door_material_resolution(&doors.prop_material_resolutions);
+    log::debug!(
+        "map compiled lighting: world {:?}, skybox {:?}",
+        world.lighting_stats,
+        skybox.lighting_stats
+    );
 
     PropBuildPhase {
+        geometry: crate::media::preview_model::PropGeometrySummary {
+            shared_models,
+            world: world.geometry.clone(),
+            skybox: skybox.geometry.clone(),
+            doors: doors.geometry.clone(),
+        },
         loaded_models,
         world,
         skybox,

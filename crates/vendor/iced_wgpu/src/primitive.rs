@@ -44,11 +44,7 @@ pub trait Primitive: Debug + MaybeSend + MaybeSync + 'static {
     /// [`render`](Self::render) by returning `false` here.
     ///
     /// By default, it does nothing and returns `false`.
-    fn draw(
-        &self,
-        _pipeline: &Self::Pipeline,
-        _render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool {
+    fn draw(&self, _pipeline: &Self::Pipeline, _render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         false
     }
 
@@ -73,23 +69,37 @@ pub trait Pipeline: Any + MaybeSend + MaybeSync {
     ///
     /// This will only be called once, when the first [`Primitive`] with this kind
     /// of [`Pipeline`] is encountered.
-    fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self
     where
         Self: Sized;
 
-    /// Trims any cached data in the [`Pipeline`].
-    ///
-    /// This will normally be called at the end of a frame.
+    /// Creates a pipeline using the rendering adapter's capabilities.
+    fn new_with_capabilities(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        _capabilities: &wgpu::DownlevelCapabilities,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        Self::new(device, queue, format)
+    }
+
+    /// Starts demand collection for one compositor frame.
+    fn begin_prepare(&mut self) {}
+
+    /// Resolves collected demand before any primitive draws.
+    fn finish_prepare(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {}
+
+    /// Transfers frame-resource ownership after command submission.
+    fn submitted(&mut self, _queue: &wgpu::Queue) {}
+
+    /// Releases cached data after drawing.
     fn trim(&mut self) {}
 }
 
-pub(crate) trait Stored:
-    Debug + MaybeSend + MaybeSync + 'static
-{
+pub(crate) trait Stored: Debug + MaybeSend + MaybeSync + 'static {
     fn prepare(
         &self,
         storage: &mut Storage,
@@ -100,11 +110,7 @@ pub(crate) trait Stored:
         viewport: &Viewport,
     );
 
-    fn draw(
-        &self,
-        storage: &Storage,
-        render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool;
+    fn draw(&self, storage: &Storage, render_pass: &mut wgpu::RenderPass<'_>) -> bool;
 
     fn render(
         &self,
@@ -131,7 +137,13 @@ impl<P: Primitive> Stored for BlackBox<P> {
         viewport: &Viewport,
     ) {
         if !storage.has::<P>() {
-            storage.store::<P, _>(P::Pipeline::new(device, queue, format));
+            let pipeline = match storage.capabilities.as_ref() {
+                Some(capabilities) => {
+                    P::Pipeline::new_with_capabilities(device, queue, format, capabilities)
+                }
+                None => P::Pipeline::new(device, queue, format),
+            };
+            storage.store::<P, _>(pipeline);
         }
 
         let renderer = storage
@@ -144,11 +156,7 @@ impl<P: Primitive> Stored for BlackBox<P> {
             .prepare(renderer, device, queue, bounds, viewport);
     }
 
-    fn draw(
-        &self,
-        storage: &Storage,
-        render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool {
+    fn draw(&self, storage: &Storage, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         let renderer = storage
             .get::<P>()
             .expect("renderer should be initialized")
@@ -205,18 +213,52 @@ pub trait Renderer: core::Renderer {
 /// Stores custom, user-provided types.
 #[derive(Default)]
 pub struct Storage {
+    capabilities: Option<wgpu::DownlevelCapabilities>,
     pipelines: FxHashMap<TypeId, Box<dyn Pipeline>>,
+    preparing: bool,
 }
 
 impl Storage {
+    pub(crate) fn with_capabilities(capabilities: wgpu::DownlevelCapabilities) -> Self {
+        Self {
+            capabilities: Some(capabilities),
+            ..Self::default()
+        }
+    }
+
     /// Returns `true` if `Storage` contains a type `T`.
     pub fn has<T: 'static>(&self) -> bool {
         self.pipelines.contains_key(&TypeId::of::<T>())
     }
 
     /// Inserts the data `T` in to [`Storage`].
-    pub fn store<T: 'static, P: Pipeline>(&mut self, pipeline: P) {
+    pub fn store<T: 'static, P: Pipeline>(&mut self, mut pipeline: P) {
+        if self.preparing {
+            pipeline.begin_prepare();
+        }
         let _ = self.pipelines.insert(TypeId::of::<T>(), Box::new(pipeline));
+    }
+
+    pub(crate) fn begin_prepare(&mut self) {
+        assert!(!self.preparing, "nested primitive preparation");
+        self.preparing = true;
+        for pipeline in self.pipelines.values_mut() {
+            pipeline.begin_prepare();
+        }
+    }
+
+    pub(crate) fn finish_prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        assert!(self.preparing, "primitive preparation was not started");
+        for pipeline in self.pipelines.values_mut() {
+            pipeline.finish_prepare(device, queue);
+        }
+        self.preparing = false;
+    }
+
+    pub(crate) fn submitted(&mut self, queue: &wgpu::Queue) {
+        for pipeline in self.pipelines.values_mut() {
+            pipeline.submitted(queue);
+        }
     }
 
     /// Returns a reference to the data with type `T` if it exists in [`Storage`].

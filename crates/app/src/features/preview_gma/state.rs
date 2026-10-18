@@ -781,6 +781,7 @@ impl State {
         let archive = self.ready_archive()?;
         let entry = archive.entry(entry_path).ok()?;
         Some(PreviewRequest {
+            cancellation: Default::default(),
             request_id: Generation::INITIAL,
             archive: PreviewArchiveSource::from_gma(Arc::clone(archive)),
             entry_path: entry_path.to_owned(),
@@ -793,6 +794,7 @@ impl State {
             size_bytes: entry.size,
             crc32: entry.crc32,
             bypass_size_limits: false,
+            map_texture_quality: Default::default(),
         })
     }
 

@@ -49,6 +49,7 @@ const WORKSHOP_DRAG_PREFIX: &str = "gmpublished/workshop-id:";
 
 mod display;
 mod drag;
+
 mod hidden_addons;
 mod model_stage;
 mod model_workspace;
@@ -1592,12 +1593,16 @@ impl App {
             from, to,
             "shell::Effect::Navigated is emitted only when the route changes"
         );
-        self.route_transitioned_task(from, to)
+        Task::batch([
+            self.release_preview_mouse_capture_task(),
+            self.route_transitioned_task(from, to),
+        ])
     }
 
     pub(crate) fn view(&self) -> Element<'_, RootMessage> {
         let tokens = self.state.tokens;
-        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let now = Instant::now();
         let route_body: Element<'_, RootMessage> = container(crate::widgets::settle::settle(
             self.active_route_view(),
@@ -1792,18 +1797,21 @@ impl App {
         }
 
         // Capture shortcuts before a focused text input can consume them.
-        let shortcuts = if self.global_shortcuts_enabled() {
-            Some(map_global_shortcut as _)
-        } else if self.settings_shortcut_should_close() {
-            Some(map_settings_toggle_shortcut as _)
-        } else {
-            None
-        };
+        let shortcuts = self.mouse_capture_shortcut_mapper().or_else(|| {
+            if self.global_shortcuts_enabled() {
+                Some(map_global_shortcut as _)
+            } else if self.settings_shortcut_should_close() {
+                Some(map_settings_toggle_shortcut as _)
+            } else {
+                None
+            }
+        });
         shortcut_capture(layers, shortcuts).into()
     }
 
     fn active_route_view(&self) -> Element<'_, RootMessage> {
-        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n);
+        let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
+            .with_cpu_executor(self.environment.ctx.cpu_executor());
         let route = self.state.features.shell.route();
         let blocker = prerequisites::blocker_for(
             route,
@@ -1996,8 +2004,26 @@ impl App {
         self.apply_search_message(search::Message::DismissRequested, self.update_context)
     }
 
+    fn preview_mouse_captured(&self) -> bool {
+        self.state.features.file_preview.mouse_captured()
+            || self.state.features.model_preview.mouse_captured()
+    }
+
+    fn mouse_capture_shortcut_mapper(
+        &self,
+    ) -> Option<fn(&keyboard::Key, keyboard::Modifiers) -> Option<RootMessage>> {
+        if self.state.features.file_preview.mouse_captured() {
+            Some(map_mouse_capture_shortcut)
+        } else if self.state.features.model_preview.mouse_captured() {
+            Some(map_model_mouse_capture_shortcut)
+        } else {
+            None
+        }
+    }
+
     fn global_shortcuts_enabled(&self) -> bool {
-        self.state.features.modal_stack.active().is_none()
+        !self.preview_mouse_captured()
+            && self.state.features.modal_stack.active().is_none()
             && !self.state.features.modal_stack.overlay_active()
             && !self.state.features.context_menu.visible()
     }
@@ -2084,7 +2110,7 @@ impl App {
         );
         // The context menu owns Escape while visible. Global shortcuts are
         // handled by `shortcut_capture` before the widget tree sees them.
-        if !self.state.features.context_menu.visible() {
+        if !self.state.features.context_menu.visible() && !self.preview_mouse_captured() {
             streams.push(
                 modal_stack::subscription(&self.state.features.modal_stack)
                     .map(RootMessage::ModalStack),
@@ -2149,6 +2175,23 @@ fn addon_drag_cursor_overlay(
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+fn map_mouse_capture_shortcut(
+    key: &keyboard::Key,
+    _modifiers: keyboard::Modifiers,
+) -> Option<RootMessage> {
+    (*key == keyboard::Key::Named(keyboard::key::Named::Escape)).then_some(
+        RootMessage::FilePreview(file_preview::Message::MouseCaptureRequested(false)),
+    )
+}
+
+fn map_model_mouse_capture_shortcut(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> Option<RootMessage> {
+    map_mouse_capture_shortcut(key, modifiers)
+        .map(|_| RootMessage::ModelPreview(file_preview::Message::MouseCaptureRequested(false)))
 }
 
 fn map_settings_toggle_shortcut(

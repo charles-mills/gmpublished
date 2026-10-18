@@ -142,7 +142,6 @@ impl Renderer {
                 label: Some("iced_wgpu encoder"),
             },
         );
-
         self.prepare(&mut encoder, viewport);
         self.render(&mut encoder, target, clear_color, viewport);
 
@@ -173,6 +172,11 @@ impl Renderer {
 
         self.staging_belt.finish();
         let submission = self.engine.queue.submit([encoder.finish()]);
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .submitted(&self.engine.queue);
         self.staging_belt.recall();
         submission
     }
@@ -274,6 +278,11 @@ impl Renderer {
 
         self.staging_belt.finish();
         let index = self.engine.queue.submit([encoder.finish()]);
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .submitted(&self.engine.queue);
         self.staging_belt.recall();
 
         let slice = output_buffer.slice(..);
@@ -300,6 +309,11 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         viewport: &Viewport,
     ) {
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .begin_prepare();
         let scale_factor = viewport.scale_factor();
 
         self.text_viewport
@@ -412,6 +426,12 @@ impl Renderer {
                 prepare_span.finish();
             }
         }
+
+        self.engine
+            .primitive_storage
+            .write()
+            .expect("Write primitive storage")
+            .finish_prepare(&self.engine.device, &self.engine.queue);
     }
 
     fn render(
@@ -935,16 +955,18 @@ impl renderer::Headless for Renderer {
             .await
             .ok()?;
 
+        let requested_features = (wgpu::Features::TEXTURE_COMPRESSION_BC
+            | wgpu::Features::CLIP_DISTANCES
+            | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+            | wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER
+            | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING)
+            .intersection(adapter.features());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("iced_wgpu [headless]"),
-                // GMPUBLISHED PATCH: opt into BC texture compression when the
-                // adapter has it (universal on desktop; harmless intersection
-                // elsewhere). See GMPUBLISHED-PATCH.md.
-                required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
-                    .intersection(adapter.features()),
+                required_features: requested_features,
                 required_limits: wgpu::Limits {
-                    max_bind_groups: 2,
+                    max_bind_groups: 3,
                     ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,

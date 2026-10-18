@@ -110,11 +110,14 @@ fn model(blended: bool, lods: bool, offset: f32) -> Arc<ModelPreview> {
                 .material_names
                 .iter()
                 .map(|name| MaterialSlot {
+                    resolution: crate::bridge::materials::MaterialResolutionOutcome::Loaded,
+                    canonical_name: None,
+                    shader: Default::default(),
                     tint_base: None,
                     name: name.clone(),
                     texture: None,
                     texture2: None,
-                    force_opaque: true,
+                    alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
                     render_mode: RenderMode::Opaque,
                 })
                 .collect();
@@ -137,6 +140,8 @@ fn model(blended: bool, lods: bool, offset: f32) -> Arc<ModelPreview> {
         })
         .collect();
     Arc::new(ModelPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         pose_cache: Default::default(),
         root_lod,
         selected_lod: root_lod,

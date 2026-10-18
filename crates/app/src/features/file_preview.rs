@@ -7,6 +7,7 @@ mod update;
 mod view;
 mod viewer3d;
 mod workspace;
+pub use viewer3d::{ShutdownError, finish_gpu_shutdown};
 
 pub use effect::Effect;
 use iced::{Subscription, time};
@@ -23,7 +24,7 @@ pub fn embedded_expanded(state: &State) -> bool {
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {
-    if state.spinner_visible()
+    let animation = if state.spinner_visible()
         || state.audio_playing()
         || state.model_playing()
         || state.fly_speed_readout_visible()
@@ -33,5 +34,6 @@ pub fn subscription(state: &State) -> Subscription<Message> {
             .map(Message::AnimationTick)
     } else {
         Subscription::none()
-    }
+    };
+    Subscription::batch([animation, state.render_feedback_subscription()])
 }

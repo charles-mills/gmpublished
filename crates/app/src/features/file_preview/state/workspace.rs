@@ -45,6 +45,9 @@ impl State {
         if !self.loading() {
             return;
         }
+        if let Some(request) = &self.request {
+            request.cancellation.cancel();
+        }
         self.request_id.bump();
         if let Some(retained) = self.workspace_retained.take() {
             self.load = LoadState::Ready(retained.data);

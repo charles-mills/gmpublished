@@ -24,6 +24,8 @@ fn empty_render_scene(bounds_min: Vec3, bounds_max: Vec3) -> Arc<RenderScene> {
 
 pub(super) fn empty_model_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPreview {
     ModelPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         pose_cache: Default::default(),
         root_lod: 0,
         selected_lod: 0,
@@ -37,11 +39,29 @@ pub(super) fn empty_model_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPr
 
 pub(super) fn empty_preview(bounds_min: Vec3, bounds_max: Vec3) -> MapPreview {
     MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
+        surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
+        water_volumes: None,
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
         scene: empty_render_scene(bounds_min, bounds_max),
         mesh_visibility: Vec::new(),
         map_skybox_meshes: Vec::new(),
+        model_lighting: Vec::new(),
+        model_lighting_inputs: None,
         lightmap: None,
         skybox: None,
+        suns: Vec::new(),
+        cubemap_probes: Vec::new(),
+        sun_material_slots: Vec::new(),
         detail_sprites: Vec::new(),
         map_skybox_detail_sprites: Vec::new(),
         overlays: Vec::new(),

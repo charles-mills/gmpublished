@@ -14,6 +14,8 @@ pub fn workspace<'a>(
 ) -> Element<'a, Message> {
     let Some(data) = state.current() else {
         let viewer = iced::widget::shader(super::viewer3d::Viewer3d {
+            cpu_executor: ctx.cpu_executor.cloned(),
+            render_feedback: state.render_feedback().cloned().unwrap_or_default(),
             framing_bounds: None,
             studio_bounds: None,
             animation_pose: None,
@@ -38,6 +40,8 @@ pub fn workspace<'a>(
     };
     let tokens = *ctx.tokens;
     let viewer = iced::widget::shader(super::viewer3d::Viewer3d {
+        cpu_executor: ctx.cpu_executor.cloned(),
+        render_feedback: state.render_feedback().cloned().unwrap_or_default(),
         framing_bounds: state.model_framing_bounds(),
         studio_bounds: state.model_bounds(),
         animation_pose: state.model_animation_pose(),
@@ -169,6 +173,8 @@ fn empty_studio_model() -> std::sync::Arc<crate::media::preview_model::ModelPrev
             selected_lod: 0,
             lods: Vec::new(),
             animation: None,
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             scene: Arc::new(RenderScene {
                 meshes: Vec::new(),
                 materials: Vec::new(),

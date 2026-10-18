@@ -153,7 +153,7 @@ impl Compositor {
             [wgpu::Limits::default(), wgpu::Limits::downlevel_defaults()];
 
         let limits = limits.into_iter().map(|limits| wgpu::Limits {
-            max_bind_groups: 2,
+            max_bind_groups: 3,
             max_non_sampler_bindings: 2048,
             ..limits
         });
@@ -166,10 +166,11 @@ impl Compositor {
                     label: Some(
                         "iced_wgpu::window::compositor device descriptor",
                     ),
-                    // GMPUBLISHED PATCH: opt into BC texture compression when the
-                    // adapter has it (universal on desktop; harmless intersection
-                    // elsewhere). See GMPUBLISHED-PATCH.md.
-                    required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
+                    required_features: (wgpu::Features::TEXTURE_COMPRESSION_BC
+                        | wgpu::Features::CLIP_DISTANCES
+                        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+                        | wgpu::Features::INDEPENDENT_ANISOTROPIC_MIP_FILTER
+                        | wgpu::Features::NATIVE_ANISOTROPIC_POINT_FILTERING)
                         .intersection(adapter.features()),
                     required_limits: required_limits.clone(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -239,7 +240,6 @@ pub fn present(
                 viewport,
             );
 
-            // Present the frame
             on_pre_present();
             frame.present();
 

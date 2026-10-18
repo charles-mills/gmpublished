@@ -76,6 +76,8 @@ pub(super) fn prepare_imported_model_preview(
         .map_err(|error| error.to_string())?
         .len();
     let request = PreviewRequest {
+        cancellation: Default::default(),
+        map_texture_quality: Default::default(),
         request_id: generation,
         archive: PreviewArchiveSource::from_folder(indexed),
         entry_path,
@@ -188,6 +190,8 @@ pub(super) fn prepare_map_preview(
         .ok_or_else(|| "The map file name is invalid".to_owned())?;
     drop(file);
     Ok(PreviewRequest {
+        cancellation: Default::default(),
+        map_texture_quality: Default::default(),
         request_id: generation,
         archive: PreviewArchiveSource::from_folder([(
             entry_path.clone(),

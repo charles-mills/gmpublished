@@ -86,6 +86,7 @@ impl State {
         let map = self.begin_open(map);
         self.expanded = true;
         model.request_id = map.request_id;
+        model.cancellation = map.cancellation.clone();
         self.stage_request = Some(model.clone());
         (model, map)
     }
@@ -98,6 +99,7 @@ impl State {
         let map = self.begin_workspace_open(map);
         self.expanded = true;
         model.request_id = map.request_id;
+        model.cancellation = map.cancellation.clone();
         self.stage_request = Some(model.clone());
         (model, map)
     }

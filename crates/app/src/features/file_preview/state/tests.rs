@@ -23,6 +23,7 @@ fn archive() -> Arc<PreviewArchiveSource> {
 
 fn request(path: &str) -> PreviewRequest {
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(0),
         archive: archive(),
         entry_path: path.to_owned(),
@@ -30,6 +31,7 @@ fn request(path: &str) -> PreviewRequest {
         size_bytes: 12,
         crc32: 0xABCD_EF01,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -88,11 +90,29 @@ fn render_scene(
 
 fn empty_map(scene: Arc<RenderScene>) -> MapPreview {
     MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
+        surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
+        water_volumes: None,
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
         scene,
         mesh_visibility: Vec::new(),
         map_skybox_meshes: Vec::new(),
+        model_lighting: Vec::new(),
+        model_lighting_inputs: None,
         lightmap: None,
         skybox: None,
+        suns: Vec::new(),
+        cubemap_probes: Vec::new(),
+        sun_material_slots: Vec::new(),
         detail_sprites: Vec::new(),
         map_skybox_detail_sprites: Vec::new(),
         overlays: Vec::new(),
@@ -361,9 +381,11 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
                 start: 256.0,
                 end: 2048.0,
                 max_density: 0.75,
+                radial: false,
             }),
             sky_camera: None,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 4,
                 displacement_count: 1,
                 entity_count: 2,
@@ -373,6 +395,7 @@ fn loading_a_map_with_fog_exposes_only_the_available_controls() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 1,
                 skybox_prop_count: 0,
@@ -411,6 +434,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
         PreviewContent::Map {
             scene,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,
@@ -420,6 +444,7 @@ fn map_controls_are_hidden_for_non_map_and_maps_without_features() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -449,6 +474,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
         Vec::new(),
         Vec::new(),
         vec![MeshData {
+            geometry: crate::media::preview_model::MeshGeometry::Model,
             vertices: Vec::new(),
             indices: Vec::new(),
             material_index: 0,
@@ -466,6 +492,8 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
         selected_lod: 0,
         lods: vec![],
         animation: None,
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         scene: render_scene,
         skin_tables: vec![vec![0]],
         bodygroups: Vec::new(),
@@ -475,6 +503,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
         PreviewContent::Map {
             scene,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,
@@ -484,6 +513,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -522,6 +552,8 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
             selected_lod: 0,
             lods: vec![],
             animation: None,
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             scene: blank_scene(),
             skin_tables: vec![vec![0], vec![0]],
             bodygroups: vec![3],
@@ -575,6 +607,8 @@ fn staged_state() -> State {
         selected_lod: 0,
         lods: vec![],
         animation: None,
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         scene: blank_scene(),
         skin_tables: vec![vec![0], vec![1]],
         bodygroups: vec![2],
@@ -593,6 +627,7 @@ fn staged_with_model(model: Arc<ModelPreview>) -> State {
             sky_camera: None,
             spawn: None,
             stats: MapStats {
+                lightmap: Default::default(),
                 face_count: 0,
                 displacement_count: 0,
                 entity_count: 0,
@@ -602,6 +637,7 @@ fn staged_with_model(model: Arc<ModelPreview>) -> State {
                 placed_prop_count: 0,
                 skipped_prop_count: 0,
                 detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
                 overlay_count: 0,
                 skybox_face_count: 0,
                 skybox_prop_count: 0,
@@ -664,6 +700,8 @@ fn workspace_refresh_retains_model_and_rejects_superseded_results() {
     let superseded = state.begin_workspace_open(request("models/test.mdl"));
     let pending = state.begin_workspace_open(request("models/test.mdl"));
     assert!(pending.request_id > superseded.request_id);
+    assert!(superseded.cancellation.is_cancelled());
+    assert!(!pending.cancellation.is_cancelled());
     assert!(state.loading());
     assert_eq!(state.current(), Some(&data));
     assert_eq!(state.request(), Some(&original));
@@ -731,6 +769,38 @@ fn workspace_stage_refresh_preserves_camera_placement_and_selection() {
     assert_eq!(state.selected_skin(), 1);
     assert!(state.stage_can_undo());
     assert!(state.error().is_none());
+}
+
+#[test]
+fn cancelling_workspace_stage_cancels_both_loads_and_restores_the_scene() {
+    let mut state = staged_state();
+    let data = state.current().unwrap().clone();
+    let model = Arc::clone(state.stage_model().unwrap());
+    let (pending_model, pending_map) =
+        state.begin_workspace_stage(request("models/test.mdl"), request("maps/test.bsp"));
+    assert!(!pending_model.cancellation.is_cancelled());
+    assert!(!pending_map.cancellation.is_cancelled());
+
+    state.cancel_workspace_load();
+
+    assert!(pending_model.cancellation.is_cancelled());
+    assert!(pending_map.cancellation.is_cancelled());
+    assert!(!state.loading());
+    assert_eq!(state.current(), Some(&data));
+    assert!(Arc::ptr_eq(state.stage_model().unwrap(), &model));
+    assert!(!state.apply_stage_loaded(pending_map.request_id, Ok((data, model))));
+}
+
+#[test]
+fn workspace_open_releases_mouse_capture_and_renews_cancelled_requests() {
+    let mut state = staged_state();
+    state.set_mouse_captured(true);
+    let next = request("models/replacement.mdl");
+    next.cancellation.cancel();
+    let pending = state.begin_workspace_open(next);
+
+    assert!(!state.mouse_captured());
+    assert!(!pending.cancellation.is_cancelled());
 }
 
 #[test]
@@ -844,8 +914,19 @@ fn stage_gravity_drop_stops_at_exported_collision_bounds_and_undo_restores_start
         lightmap_uv: [0.0; 2],
         color: Vec3::splat(1.0),
         blend_alpha: 0.0,
+        lightmap_bump_step: 0.0,
+        lightmap_page: 0,
+        opacity: 1.0,
+        illumination: Vec3::splat(1.0),
+        lighting_mode: 0,
+        tangent_s: Vec3::ZERO,
+        tangent_t: Vec3::ZERO,
+        tangent_sign: 0.0,
+        lighting_context: 0,
+        surface_mark: 0,
     };
     scene.phy_debug_meshes = vec![MeshData {
+        geometry: crate::media::preview_model::MeshGeometry::Model,
         vertices: vec![vertex(Vec3::splat(-2.0)), vertex(Vec3::splat(2.0))],
         indices: vec![],
         material_index: 0,
@@ -954,6 +1035,7 @@ fn stage_placement_frames_off_origin_geometry_without_changing_its_pivot() {
     scene.bounds_min = Vec3::new(-1000.0, 500.0, -30.0);
     scene.bounds_max = Vec3::new(-800.0, 700.0, 70.0);
     scene.meshes = vec![MeshData {
+        geometry: crate::media::preview_model::MeshGeometry::Model,
         vertices: [
             scene.bounds_min,
             scene.bounds_max,
@@ -967,6 +1049,16 @@ fn stage_placement_frames_off_origin_geometry_without_changing_its_pivot() {
             lightmap_uv: [0.0; 2],
             color: Vec3::splat(1.0),
             blend_alpha: 0.0,
+            lightmap_bump_step: 0.0,
+            lightmap_page: 0,
+            opacity: 1.0,
+            illumination: Vec3::splat(1.0),
+            lighting_mode: 0,
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tangent_sign: 0.0,
+            lighting_context: 0,
+            surface_mark: 0,
         })
         .collect(),
         indices: vec![0, 1, 2],
@@ -1223,6 +1315,8 @@ fn lod_selection_swaps_geometry_clamps_to_root_and_resets_after_reload() {
             lods: scenes.to_vec(),
             scene: Arc::clone(&scenes[0]),
             animation: None,
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             skin_tables: vec![vec![0], vec![1]],
             bodygroups: vec![3],
         });
@@ -1379,8 +1473,19 @@ fn visible_bounds_ignore_other_choices_unused_vertices_and_removed_lod_meshes() 
         lightmap_uv: [0.0; 2],
         color: Vec3::splat(1.0),
         blend_alpha: 0.0,
+        lightmap_bump_step: 0.0,
+        lightmap_page: 0,
+        opacity: 1.0,
+        illumination: Vec3::splat(1.0),
+        lighting_mode: 0,
+        tangent_s: Vec3::ZERO,
+        tangent_t: Vec3::ZERO,
+        tangent_sign: 0.0,
+        lighting_context: 0,
+        surface_mark: 0,
     };
     let mesh = |choice, min, max, indices| MeshData {
+        geometry: crate::media::preview_model::MeshGeometry::Model,
         vertices: vec![vertex(min), vertex(max), vertex(Vec3::splat(1_000_000.0))],
         indices,
         material_index: 0,
@@ -1418,6 +1523,8 @@ fn visible_bounds_ignore_other_choices_unused_vertices_and_removed_lod_meshes() 
         lods: vec![Arc::clone(&scene), lower],
         scene,
         animation: None,
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
         skin_tables: vec![],
         bodygroups: vec![3],
     });

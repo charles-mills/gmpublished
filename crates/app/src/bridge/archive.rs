@@ -63,6 +63,16 @@ pub enum PreviewArchiveSourceError {
 }
 
 impl PreviewArchiveSource {
+    pub(crate) fn index_cost_with_limits(
+        &self,
+        limits: vformats::ArchiveIndexLimits,
+    ) -> Result<Option<vformats::ArchiveIndexCost>, GmaError> {
+        match self {
+            Self::Gma(archive) => archive.index_cost_with_limits(limits).map(Some),
+            Self::Folder(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn from_gma(archive: Arc<PreviewArchive>) -> Arc<Self> {
         Arc::new(Self::Gma(archive))
     }
@@ -170,6 +180,47 @@ impl PreviewArchiveSource {
 
     pub(crate) const fn supports_entry_extraction(&self) -> bool {
         matches!(self, Self::Gma(_))
+    }
+
+    pub(crate) fn folder_entry_path(&self, path: &str) -> Option<&std::path::Path> {
+        let Self::Folder(folder) = self else {
+            return None;
+        };
+        folder
+            .entries
+            .get(path)
+            .map(|entry| entry.disk_path.as_path())
+    }
+    pub(crate) fn folder_entry_file(
+        &self,
+        path: &str,
+    ) -> Result<Option<std::fs::File>, PreviewArchiveSourceError> {
+        let Self::Folder(folder) = self else {
+            return Ok(None);
+        };
+        let entry = folder
+            .entries
+            .get(path)
+            .ok_or_else(|| PreviewArchiveSourceError::EntryNotFound(path.to_owned()))?;
+        std::fs::File::open(&entry.disk_path)
+            .map(Some)
+            .map_err(|error| PreviewArchiveSourceError::FolderRead {
+                path: path.to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    pub(crate) fn entry_prefix(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, PreviewArchiveSourceError> {
+        match self {
+            Self::Gma(archive) => archive
+                .entry_prefix(path, max_bytes)
+                .map_err(PreviewArchiveSourceError::Gma),
+            Self::Folder(_) => unreachable!("folder entries use their opened handle"),
+        }
     }
 
     pub(crate) fn entry_bytes(&self, path: &str) -> Result<Vec<u8>, PreviewArchiveSourceError> {

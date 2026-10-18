@@ -8,7 +8,7 @@ use std::sync::Arc;
 use vformats::vtf::VtfFormat;
 
 use super::*;
-use crate::bridge::materials::DecodedTextureBudget;
+use crate::bridge::materials::{DecodedTextureBudget, TextureLoadOutcome};
 use crate::bridge::{archive::PreviewArchiveSource, gma::PreviewArchive};
 use crate::generation::Generation;
 use crate::media::preview_model::{MapStats, ModelVertex};
@@ -28,6 +28,7 @@ fn request(path: &str, bytes: &[u8]) -> PreviewRequest {
     .expect("fixture archive should load");
 
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: path.to_owned(),
@@ -35,6 +36,7 @@ fn request(path: &str, bytes: &[u8]) -> PreviewRequest {
         size_bytes: bytes.len() as u64,
         crc32: 0,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -46,6 +48,7 @@ fn request_from_archive(
 ) -> PreviewRequest {
     let display_name = path.rsplit('/').next().unwrap_or(&path).to_owned();
     PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: path,
@@ -53,6 +56,7 @@ fn request_from_archive(
         size_bytes,
         crc32,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -655,6 +659,105 @@ fn map_uv_normalization_divides_raw_texels_by_resolved_dimensions() {
 }
 
 #[test]
+fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
+    use gmpublished_domain::scene::map::{MapMesh, MapMeshVisibility, MapVertex};
+    let mesh = MapMesh {
+        entity: false,
+        vertices: vec![MapVertex {
+            position: Vec3::ZERO,
+            base_position: Vec3::ZERO,
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            tex_s: 256.0,
+            tex_t: 128.0,
+            texture_size: [128, 64],
+            lightmap_uv: [0.0; 2],
+            lightmap_page: None,
+            lightmap_bump_step: 0.0,
+            blend_alpha: 0.0,
+            opacity: 1.0,
+        }],
+        indices: vec![0],
+        material_index: 0,
+        visibility: MapMeshVisibility::default(),
+        surface_owners: Vec::new(),
+    };
+    let converted = map_preview::map_mesh_to_model_mesh(&mesh, &[]);
+    assert_eq!(converted.vertices[0].uv, [2.0, 2.0]);
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Water UV")
+            .entry("materials/water.vmt", b"Water { }".to_vec())
+            .build(),
+    )
+    .unwrap();
+    let resolved = MaterialResolver::new(Arc::new(archive), None)
+        .resolve_primary(&[], "water")
+        .into_material()
+        .unwrap();
+    assert_eq!(
+        [
+            resolved.texture.as_ref().unwrap().width(),
+            resolved.texture.as_ref().unwrap().height()
+        ],
+        [1, 1]
+    );
+    let material = MaterialSlot {
+        tint_base: None,
+        resolution: Default::default(),
+        canonical_name: None,
+        name: "water".into(),
+        shader: resolved.shader,
+        texture: resolved.texture,
+        texture2: None,
+        render_mode: RenderMode::Opaque,
+        alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
+    };
+    assert_eq!(
+        map_preview::map_mesh_to_model_mesh(&mesh, &[material]).vertices[0].uv,
+        [8.0, 4.0]
+    );
+
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Runtime mapping dimensions")
+            .entry(
+                "materials/replacement.vmt",
+                b"LightmappedGeneric { $basetexture replacement }".to_vec(),
+            )
+            .entry(
+                "materials/replacement.vtf",
+                fixture_vtf_bytes(64, 128, VtfFormat::Rgba8888, &[&vec![255; 64 * 128 * 4]]),
+            )
+            .entry(
+                "materials/invalid.vmt",
+                b"LightmappedGeneric { $basetexture invalid }".to_vec(),
+            )
+            .entry("materials/invalid.vtf", b"invalid".to_vec())
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    for (name, expected) in [("replacement", [4.0, 1.0]), ("invalid", [8.0, 4.0])] {
+        let resolved = resolver.resolve_primary(&[], name).into_material().unwrap();
+        let material = MaterialSlot {
+            tint_base: None,
+            resolution: Default::default(),
+            canonical_name: None,
+            name: name.into(),
+            shader: resolved.shader,
+            texture: resolved.texture,
+            texture2: None,
+            render_mode: RenderMode::Opaque,
+            alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
+        };
+        assert_eq!(
+            map_preview::map_mesh_to_model_mesh(&mesh, &[material]).vertices[0].uv,
+            expected
+        );
+    }
+}
+
+#[test]
 fn skybox_face_paths_follow_source_suffixes() {
     assert_eq!(
         SkyboxFace::ALL.map(|face| skybox_face_material_path("sky_day01_01", face)),
@@ -686,7 +789,7 @@ fn skybox_resolution_degrades_to_available_faces() {
     .expect("fixture archive should load");
     let resolver = MaterialResolver::new(Arc::new(archive), None);
 
-    let skybox = resolve_skybox("sky_test", &resolver).expect("one face should resolve");
+    let skybox = resolve_skybox("sky_test", &resolver, None).expect("one face should resolve");
 
     let face = skybox.faces[SkyboxFace::Ft.index()]
         .as_ref()
@@ -701,7 +804,135 @@ fn skybox_resolution_degrades_to_available_faces() {
     ] {
         assert!(skybox.faces[face.index()].is_none(), "{face:?}");
     }
-    assert!(resolve_skybox("sky_missing", &resolver).is_none());
+    assert!(resolve_skybox("sky_missing", &resolver, None).is_none());
+}
+
+#[test]
+fn painted_sky_retains_authored_state_and_loads_cloud_vtf_without_a_material() {
+    let pixels = [32, 96, 160, 255].repeat(4);
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Painted Sky Fixture")
+            .entry(
+                "materials/skybox/paintedup.vmt",
+                br"g_sky { Proxies { SkyPaint {} } }".to_vec(),
+            )
+            .entry("materials/skybox/clouds.vtf", create_vtf_bytes(&pixels))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let paint = gmpublished_domain::scene::map::MapSkyPaint {
+        top_color: Vec3::new(0.12, 0.34, 0.56),
+        fade_bias: 0.1,
+        star_texture: "skybox/clouds".into(),
+        star_scale: 2.0,
+        star_speed: 0.03,
+        ..Default::default()
+    };
+    let skybox = resolve_skybox("painted", &resolver, Some(&paint)).unwrap();
+    assert_eq!(skybox.paint.as_ref(), Some(&paint));
+    assert!(skybox.faces.iter().all(Option::is_none));
+    assert!(
+        skybox.materials[SkyboxFace::Up.index()]
+            .as_ref()
+            .unwrap()
+            .is_painted()
+    );
+    let clouds = skybox.materials[SkyboxFace::Up.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap()
+        .texture
+        .as_ref()
+        .unwrap();
+    assert_eq!(clouds.frame(0).unwrap()[0].bytes.as_slice(), pixels);
+}
+
+#[test]
+fn static_sky_preserves_patched_material_transform_and_linear_tint() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Static Sky Fixture")
+            .entry("materials/skybox/parent.vmt", br#"Sky { "$basetexture" "skybox/face" "$color" "[0.25 0.5 0.75]" }"#.to_vec())
+            .entry("materials/skybox/patchedup.vmt", br#"Patch { "include" "materials/skybox/parent.vmt" "insert" { "$basetexturetransform" "center 0 0 scale 1 2 rotate 0 translate 0 0" } }"#.to_vec())
+            .entry("materials/skybox/face.vtf", create_vtf_bytes(&[128; 16]))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let skybox = resolve_skybox("patched", &resolver, None).unwrap();
+    let material = skybox.materials[SkyboxFace::Up.index()].as_ref().unwrap();
+    assert_eq!(material.shader, "Sky");
+    assert_eq!(material.color, Vec3::new(0.25, 0.5, 0.75));
+    assert_eq!(
+        material.transform,
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]
+    );
+    assert!(skybox.paint.is_none());
+    assert!(material.painted.is_none());
+}
+
+#[test]
+fn painted_material_defaults_and_parameters_are_independent_of_lua_controller_defaults() {
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Painted Material State")
+            .entry(
+                "materials/skybox/independentup.vmt",
+                br#"g_sky {
+                "$topcolor" "[0.25 0.5 0.75]" "$bottomcolor" "[0.1 0.2 0.3]"
+                "$fadebias" "0.5" "$startexture" "skybox/stars"
+                "$starlayers" "2" "$starscale" "-2" "$starfade" "0.5" "$starpos" "0.75"
+            }"#
+                .to_vec(),
+            )
+            .entry(
+                "materials/skybox/controlledft.vmt",
+                br"g_sky { Proxies { SkyPaint {} } }".to_vec(),
+            )
+            .entry("materials/skybox/stars.vtf", create_vtf_bytes(&[128; 16]))
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let controller = gmpublished_domain::scene::map::MapSkyPaint::default();
+    let independent = resolve_skybox("independent", &resolver, Some(&controller)).unwrap();
+    let paint = independent.materials[SkyboxFace::Up.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap();
+    assert_eq!(paint.top_color, Vec3::new(0.25, 0.5, 0.75));
+    assert_eq!(paint.star_scale, -2.0);
+    assert_eq!(paint.star_fade, 0.5);
+    assert_eq!(paint.star_position, 0.75);
+    assert_eq!(paint.star_speed, 0.0);
+    assert!(paint.texture.is_some());
+
+    let no_controller = resolve_skybox("controlled", &resolver, None).unwrap();
+    assert!(no_controller.paint.is_none());
+    let paint = no_controller.materials[SkyboxFace::Ft.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap();
+    assert_eq!(paint.top_color, Vec3::ZERO);
+    assert_eq!(paint.bottom_color, Vec3::ZERO);
+    assert_eq!(paint.star_layers, 0);
+    assert!(paint.texture.is_none());
+
+    let controlled = resolve_skybox("controlled", &resolver, Some(&controller)).unwrap();
+    let paint = controlled.materials[SkyboxFace::Ft.index()]
+        .as_ref()
+        .unwrap()
+        .painted
+        .as_ref()
+        .unwrap();
+    assert_eq!(paint.top_color, controller.top_color);
+    assert_eq!(paint.star_scale, controller.client_star_scale());
+    assert_eq!(paint.star_speed, controller.client_star_speed());
 }
 
 #[test]
@@ -716,7 +947,10 @@ fn decoded_texture_budget_counts_deduped_bytes_once() {
                 "materials/test/second.vmt",
                 br#""LightmappedGeneric" { "$basetexture" "test/shared" }"#.to_vec(),
             )
-            .entry("materials/test/shared.vtf", create_vtf_bytes(&[64; 16]))
+            .entry(
+                "materials/test/shared.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[64; 4], &[64; 16]]),
+            )
             .build(),
     )
     .expect("fixture archive should load");
@@ -732,6 +966,59 @@ fn decoded_texture_budget_counts_deduped_bytes_once() {
 }
 
 #[test]
+fn material_slots_preserve_missing_identity_and_canonical_error_state() {
+    use crate::bridge::materials::{MaterialResolutionOutcome, SurfaceFamily};
+    let resolver = MaterialResolver::prop_lighting_fixture(
+        vec![
+            (
+                "materials/test/lit.vmt",
+                br#"LightmappedGeneric { "$basetexture" "test/absent" }"#.to_vec(),
+            ),
+            ("materials/test/malformed.vmt", Vec::new()),
+        ],
+        Vec::new(),
+    );
+    let names = vec![
+        "test/lit".to_owned(),
+        "TEST/MISSING_A.VMT".to_owned(),
+        "test/missing_b".to_owned(),
+        "test/malformed".to_owned(),
+    ];
+    let table = resolve_map_material_slots_serial(&names, &resolver);
+    assert_eq!(table.resolved_count(), 1);
+    assert_eq!(
+        table.slots()[0].resolution,
+        MaterialResolutionOutcome::Loaded
+    );
+    for index in [1, 2] {
+        let slot = &table.slots()[index];
+        assert_eq!(slot.name, names[index]);
+        assert_eq!(slot.resolution, MaterialResolutionOutcome::Missing);
+        assert_eq!(slot.canonical_name.as_deref(), Some("___error"));
+        assert_eq!(slot.shader.surface().unwrap().family, SurfaceFamily::Unlit);
+        assert_eq!(
+            slot.texture.as_ref().unwrap().original_dimensions(),
+            (32, 32)
+        );
+    }
+    assert!(Arc::ptr_eq(
+        table.slots()[1].texture.as_ref().unwrap(),
+        table.slots()[2].texture.as_ref().unwrap()
+    ));
+    assert_eq!(
+        table.slots()[3].resolution,
+        MaterialResolutionOutcome::Malformed
+    );
+    assert!(table.slots()[3].canonical_name.is_none());
+    assert!(table.slots()[3].texture.is_none());
+    assert!(
+        unresolved_material_names_for_debug(table.slots())
+            .0
+            .contains(&names[1])
+    );
+}
+
+#[test]
 fn decoded_texture_budget_counts_full_mip_chain_bytes() {
     let archive = PreviewArchive::from_gma(
         GmaFixtureBuilder::new("Map Texture Budget Fixture")
@@ -739,7 +1026,10 @@ fn decoded_texture_budget_counts_full_mip_chain_bytes() {
                 "materials/test/first.vmt",
                 br#""LightmappedGeneric" { "$basetexture" "test/first" }"#.to_vec(),
             )
-            .entry("materials/test/first.vtf", create_vtf_bytes(&[10; 16]))
+            .entry(
+                "materials/test/first.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[10; 4], &[10; 16]]),
+            )
             .build(),
     )
     .expect("fixture archive should load");
@@ -747,10 +1037,16 @@ fn decoded_texture_budget_counts_full_mip_chain_bytes() {
     let resolver = MaterialResolver::new(Arc::new(archive), None)
         .with_decoded_texture_budget(Arc::clone(&budget));
 
-    assert!(resolver.resolve(&[], "test/first").is_none());
+    assert_eq!(
+        resolver.resolve(&[], "test/first").unwrap().load_outcome(),
+        TextureLoadOutcome::QualityRejected
+    );
 
     assert_eq!(budget.decoded_bytes(), 0);
     assert_eq!(budget.rejected_textures(), 1);
+    let table = resolve_map_material_slots_serial(&["test/first".to_owned()], &resolver);
+    assert_eq!(table.resolved_count(), 0);
+    assert!(!table.slots()[0].has_resolved_base());
 }
 
 #[test]
@@ -769,9 +1065,18 @@ fn decoded_texture_budget_stops_and_counts_rejected_textures() {
                 "materials/test/third.vmt",
                 br#""LightmappedGeneric" { "$basetexture" "test/third" }"#.to_vec(),
             )
-            .entry("materials/test/first.vtf", create_vtf_bytes(&[10; 16]))
-            .entry("materials/test/second.vtf", create_vtf_bytes(&[20; 16]))
-            .entry("materials/test/third.vtf", create_vtf_bytes(&[30; 16]))
+            .entry(
+                "materials/test/first.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[10; 4], &[10; 16]]),
+            )
+            .entry(
+                "materials/test/second.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[20; 4], &[20; 16]]),
+            )
+            .entry(
+                "materials/test/third.vtf",
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[30; 4], &[30; 16]]),
+            )
             .build(),
     )
     .expect("fixture archive should load");
@@ -780,8 +1085,14 @@ fn decoded_texture_budget_stops_and_counts_rejected_textures() {
         .with_decoded_texture_budget(Arc::clone(&budget));
 
     assert!(resolver.resolve(&[], "test/first").is_some());
-    assert!(resolver.resolve(&[], "test/second").is_none());
-    assert!(resolver.resolve(&[], "test/third").is_none());
+    assert_eq!(
+        resolver.resolve(&[], "test/second").unwrap().load_outcome(),
+        TextureLoadOutcome::QualityRejected
+    );
+    assert_eq!(
+        resolver.resolve(&[], "test/third").unwrap().load_outcome(),
+        TextureLoadOutcome::QualityRejected
+    );
 
     assert_eq!(budget.decoded_bytes(), 20);
     assert_eq!(budget.rejected_textures(), 2);
@@ -834,8 +1145,8 @@ fn parallel_material_resolution_matches_serial_slots_in_order() {
     );
     assert_eq!(parallel.resolved_count(), serial.resolved_count());
     assert_eq!(
-        parallel.water_fallback_count(),
-        serial.water_fallback_count()
+        parallel.water_material_count(),
+        serial.water_material_count()
     );
 }
 
@@ -850,7 +1161,7 @@ fn parallel_material_resolution_respects_atomic_texture_budget() {
             )
             .entry(
                 format!("materials/test/{index}.vtf"),
-                create_vtf_bytes(&[index; 16]),
+                fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[&[index; 4], &[index; 16]]),
             );
     }
     let archive = PreviewArchive::from_gma(builder.build()).expect("fixture archive should load");
@@ -868,10 +1179,28 @@ fn parallel_material_resolution_respects_atomic_texture_budget() {
         resolved
             .slots()
             .iter()
-            .filter(|slot| slot.texture.is_some())
+            .filter(|slot| slot
+                .texture
+                .as_ref()
+                .is_some_and(|texture| texture.load_outcome() == TextureLoadOutcome::Loaded))
             .count(),
         2
     );
+    assert_eq!(
+        resolved
+            .slots()
+            .iter()
+            .filter(|slot| slot.texture.as_ref().is_some_and(
+                |texture| texture.load_outcome() == TextureLoadOutcome::QualityRejected
+            ))
+            .count(),
+        2
+    );
+    assert!(resolved.slots().iter().all(|slot| {
+        slot.texture
+            .as_ref()
+            .is_some_and(|texture| texture.has_effective_base_texture())
+    }));
     assert_eq!(budget.rejected_textures(), 2);
 }
 
@@ -916,8 +1245,6 @@ fn prop_transform_scales_positions_before_rotation_without_scaling_normals() {
 
 #[test]
 fn prop_transform_composes_roll_before_yaw() {
-    // yaw 90 + roll 90: Rx(roll) leaves +X alone, Rz(yaw) then sends it
-    // to +Y. The reversed composition would produce +Z instead.
     let placement = prop_placement(
         "models/test/chair.mdl",
         Vec3::new(0.0, 0.0, 0.0),
@@ -933,7 +1260,7 @@ fn prop_transform_composes_roll_before_yaw() {
 
 #[test]
 fn prop_lighting_adds_visible_sun_in_linear_space() {
-    let lighting = PropPlacementLighting {
+    let lighting = LegacyPropLightingFallback {
         ambient_cube: test_ambient_cube(Vec3::new(0.1, 0.1, 0.1)),
         sun: Some(PropSunLighting {
             direction_to_sun: Vec3::new(0.0, 0.0, 1.0),
@@ -942,8 +1269,6 @@ fn prop_lighting_adds_visible_sun_in_linear_space() {
         }),
     };
 
-    // Up-facing vertices get ambient and sun; down-facing vertices get ambient
-    // only. The ambient cube already includes sky bounce.
     assert_vec3_close(
         lighting.evaluate(Vec3::new(0.0, 0.0, 1.0)),
         Vec3::new(0.6, 0.35, 0.1),
@@ -956,7 +1281,7 @@ fn prop_lighting_adds_visible_sun_in_linear_space() {
 
 #[test]
 fn prop_lighting_keeps_shadowed_vertices_ambient_only() {
-    let lighting = PropPlacementLighting {
+    let lighting = LegacyPropLightingFallback {
         ambient_cube: test_ambient_cube(Vec3::new(0.25, 0.2, 0.15)),
         sun: Some(PropSunLighting {
             direction_to_sun: Vec3::new(0.0, 0.0, 1.0),
@@ -977,7 +1302,7 @@ fn prop_lighting_keeps_shadowed_vertices_ambient_only() {
 
 #[test]
 fn prop_bake_applies_skin_table_to_material_slot() {
-    let asset = test_prop_asset(1, vec![10, 11]);
+    let asset = test_prop_asset(vec![10, 11]);
     let placement = prop_placement(
         "models/test/chair.mdl",
         Vec3::new(10.0, 20.0, 30.0),
@@ -989,23 +1314,30 @@ fn prop_bake_applies_skin_table_to_material_slot() {
     assert!(bake_prop_placement(
         &placement,
         &asset,
-        PropPlacementLighting {
+        LegacyPropLightingFallback {
             ambient_cube: AmbientCube::WHITE,
             sun: None,
         },
         &mut meshes
     ));
 
-    let mesh = meshes.get(&11).expect("skin remapped material");
+    let mesh = meshes
+        .get(&map_preview::PropMeshDestination {
+            material_index: 11,
+            entity: false,
+            animation_instance: None,
+        })
+        .expect("skin remapped material");
     assert_eq!(mesh.indices, vec![0, 1, 2]);
     assert_vec3_close(mesh.vertices[0].position, Vec3::new(10.0, 21.0, 30.0));
     assert_eq!(mesh.vertices[0].lightmap_uv, [0.0; 2]);
     assert_eq!(mesh.vertices[0].blend_alpha, 0.0);
+    assert_eq!(mesh.vertices[0].opacity, 1.0);
 }
 
 #[test]
 fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
-    let asset = test_prop_asset(1, vec![0, 1]);
+    let asset = test_prop_asset(vec![0, 1]);
     let mut placement = prop_placement(
         "models/test/scaled_entity.mdl",
         Vec3::splat(0.0),
@@ -1018,14 +1350,20 @@ fn prop_bake_applies_modelscale_to_entity_prop_bounds() {
     assert!(bake_prop_placement(
         &placement,
         &asset,
-        PropPlacementLighting {
+        LegacyPropLightingFallback {
             ambient_cube: AmbientCube::WHITE,
             sun: None,
         },
         &mut meshes
     ));
 
-    let mesh = meshes.get(&0).expect("material mesh");
+    let mesh = meshes
+        .get(&map_preview::PropMeshDestination {
+            material_index: 0,
+            entity: false,
+            animation_instance: None,
+        })
+        .expect("material mesh");
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for vertex in &mesh.vertices {
@@ -1067,14 +1405,19 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         "door_skin",
         MaterialSlot {
             tint_base: None,
+            resolution: Default::default(),
+            canonical_name: None,
+            shader: Default::default(),
             name: "door_skin".to_owned(),
             texture: None,
             texture2: None,
-            force_opaque: true,
             render_mode: RenderMode::Opaque,
+            alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
         },
     );
     let door = gmpublished_domain::scene::map::MapDoor {
+        entity_index: 7,
+        brush_collision: None,
         class: gmpublished_domain::scene::map::MapDoorClass::PropDoorRotating,
         origin: Vec3::splat(0.0),
         angles: Vec3::splat(0.0),
@@ -1096,7 +1439,8 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
                 Vec3::splat(0.0),
                 Vec3::splat(0.0),
                 1,
-            ),
+            )
+            .into(),
         },
     };
 
@@ -1106,7 +1450,9 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
         &mut materials,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         &|_, _| {
@@ -1156,7 +1502,7 @@ fn prop_bake_counts_placement_cap_overflow_as_skipped() {
             0,
         ),
     ];
-    let asset = Arc::new(test_prop_asset(1, vec![0, 1]));
+    let asset = Arc::new(test_prop_asset(vec![0, 1]));
 
     let result = bake_static_props_with_loader(
         &placements,
@@ -1164,7 +1510,9 @@ fn prop_bake_counts_placement_cap_overflow_as_skipped() {
         100,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1204,7 +1552,9 @@ fn prop_bake_counts_triangle_cap_remaining_as_skipped() {
             0,
         ),
     ];
-    let asset = Arc::new(test_prop_asset(2, vec![0, 1]));
+    let mut asset = test_prop_asset(vec![0, 1]);
+    Arc::make_mut(&mut asset.model).meshes[0].indices = vec![0, 1, 2, 0, 1, 2];
+    let asset = Arc::new(asset);
 
     let result = bake_static_props_with_loader(
         &placements,
@@ -1212,7 +1562,9 @@ fn prop_bake_counts_triangle_cap_remaining_as_skipped() {
         3,
         StaticPropLightingInputs {
             ambient: &MapAmbientLighting::neutral(),
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1258,9 +1610,7 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
             visibility,
         )
     }));
-    // Use unequal vertex and index counts to catch mixed-up visibility offsets.
-    // Include both static and entity props to test the merged ranges.
-    let mut asset = test_prop_asset(2, vec![10, 11]);
+    let mut asset = test_prop_asset(vec![10, 11]);
     {
         let model = Arc::get_mut(&mut asset.model).expect("fresh model arc");
         model.meshes[0]
@@ -1279,7 +1629,9 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
         100,
         StaticPropLightingInputs {
             ambient: &ambient,
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1290,7 +1642,9 @@ fn parallel_prop_bake_matches_serial_output_for_mixed_sprp_and_entity_ranges() {
         100,
         StaticPropLightingInputs {
             ambient: &ambient,
+            environment_maps: None,
             environment_lighting: None,
+            lightmap_source: None,
             walk_collision: None,
         },
         |_| Some(Arc::clone(&asset)),
@@ -1338,10 +1692,12 @@ fn sprp_only_prop_bake_is_unchanged_when_entity_prop_list_is_empty() {
     let entity_props: Vec<StaticPropPlacement> = Vec::new();
     let mut combined = sprp_props.clone();
     combined.extend(entity_props);
-    let asset = Arc::new(test_prop_asset(1, vec![0, 1]));
+    let asset = Arc::new(test_prop_asset(vec![0, 1]));
     let lighting = StaticPropLightingInputs {
         ambient: &MapAmbientLighting::neutral(),
+        environment_maps: None,
         environment_lighting: None,
+        lightmap_source: None,
         walk_collision: None,
     };
 
@@ -1467,8 +1823,8 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
         direct_materials.resolved_count()
     );
     assert_eq!(
-        pre_resolved_materials.water_fallback_count(),
-        direct_materials.water_fallback_count()
+        pre_resolved_materials.water_material_count(),
+        direct_materials.water_material_count()
     );
     assert_eq!(
         direct_materials
@@ -1477,9 +1833,7 @@ fn pre_resolved_prop_materials_match_direct_prop_resolution() {
             .find(|material| material.name == "shared")
             .and_then(|material| material.texture.as_ref())
             .and_then(|texture| texture.rgba_bytes().map(Vec::from)),
-        Some(vec![
-            10, 10, 10, 255, 10, 10, 10, 255, 10, 10, 10, 255, 10, 10, 10, 255
-        ])
+        Some(vec![10; 16])
     );
 }
 
@@ -1606,6 +1960,33 @@ fn missing_static_prop_model_is_skipped_and_counted() {
 }
 
 #[test]
+fn map_without_baked_lighting_uses_fullbright_independently_of_atlas_availability() {
+    use crate::media::preview_model::ShadingMode;
+    for (has_channel, expected) in [(false, ShadingMode::Fullbright), (true, ShadingMode::Scene)] {
+        let mut bytes = static_prop_bsp_fixture_bytes();
+        if has_channel {
+            let offset = bytes.len();
+            bytes.extend_from_slice(&[128, 128, 128, 0]);
+            write_bsp_lump_entry(&mut bytes, 8, offset, 4, 0);
+        }
+        let request = request("maps/test.bsp", &bytes);
+        let data = map_preview_data_with_prop_model_loader(
+            &request,
+            &bytes,
+            None,
+            None,
+            &mut |_| {},
+            &|_, _| None,
+        );
+        let PreviewContent::Map { scene, .. } = data.content else {
+            panic!("expected map preview");
+        };
+        assert!(scene.lightmap.is_none());
+        assert_eq!(scene.shading_mode, expected);
+    }
+}
+
+#[test]
 fn map_preview_with_panicking_static_prop_model_still_returns_map() {
     let bytes = static_prop_bsp_fixture_bytes();
     let request = request("maps/test.bsp", &bytes);
@@ -1638,20 +2019,26 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
         .rev()
         .map(|index| MaterialSlot {
             tint_base: None,
+            resolution: Default::default(),
+            canonical_name: None,
+            shader: Default::default(),
             name: format!("missing_{index:02}"),
             texture: None,
             texture2: None,
-            force_opaque: true,
             render_mode: RenderMode::Opaque,
+            alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
         })
         .collect::<Vec<_>>();
     materials.push(MaterialSlot {
         tint_base: None,
+        resolution: Default::default(),
+        canonical_name: None,
+        shader: Default::default(),
         name: "missing_03".to_owned(),
         texture: None,
         texture2: None,
-        force_opaque: true,
         render_mode: RenderMode::Opaque,
+        alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
     });
 
     let (names, total) = unresolved_material_names_for_debug(&materials);
@@ -1662,7 +2049,12 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     assert_eq!(names[19], "missing_19");
 }
 
-fn prop_placement(model_path: &str, origin: Vec3, angles: Vec3, skin: i32) -> StaticPropPlacement {
+pub(super) fn prop_placement(
+    model_path: &str,
+    origin: Vec3,
+    angles: Vec3,
+    skin: i32,
+) -> StaticPropPlacement {
     prop_placement_with_visibility(
         model_path,
         origin,
@@ -1680,6 +2072,18 @@ fn prop_placement_with_visibility(
     visibility: impl Into<MapPropVisibility>,
 ) -> StaticPropPlacement {
     StaticPropPlacement {
+        entity: false,
+        initially_visible: true,
+        animation: None,
+        leaf_membership: gmpublished_domain::scene::map::MapPropLeafMembership::SpatialBounds,
+        static_prop_index: None,
+        lighting_origin: None,
+        lighting_origin_reference: None,
+        diffuse_modulation: [255; 4],
+        render_mode: 0,
+        flags: 0,
+        flags_ex: None,
+        extra_flags: None,
         model_path: model_path.to_owned(),
         origin,
         angles,
@@ -1690,10 +2094,23 @@ fn prop_placement_with_visibility(
     }
 }
 
-fn test_prop_asset(default_triangle_count: usize, material_indices: Vec<usize>) -> PropModelAsset {
+pub(super) fn test_prop_asset(material_indices: Vec<usize>) -> PropModelAsset {
     PropModelAsset {
         model: Arc::new(ModelData {
+            animation: None,
+            skin_vertices: Vec::new(),
+            mdl_flags: 0,
+            vertex_compression: vformats::mdl::VertexCompression::None,
+            illumination_position: Vec3::ZERO,
+            hull_min: Vec3::ZERO,
+            hull_max: Vec3::splat(1.0),
+            view_min: Vec3::ZERO,
+            view_max: Vec3::ZERO,
+            illumination_attachment_index: None,
+            illumination_attachment_position: None,
+            lighting: None,
             meshes: vec![MeshData {
+                geometry: crate::media::preview_model::MeshGeometry::Model,
                 vertices: vec![
                     model_vertex(Vec3::new(1.0, 0.0, 0.0)),
                     model_vertex(Vec3::new(0.0, 1.0, 0.0)),
@@ -1715,8 +2132,7 @@ fn test_prop_asset(default_triangle_count: usize, material_indices: Vec<usize>) 
             vertex_count: 3,
             triangle_count: 1,
         }),
-        material_indices,
-        default_triangle_count,
+        material_indices: material_indices.into_iter().enumerate().collect(),
     }
 }
 
@@ -1728,7 +2144,20 @@ fn test_loaded_prop_model(
     let material_count = material_names.len();
     LoadedPropModel {
         model: Arc::new(ModelData {
+            animation: None,
+            skin_vertices: Vec::new(),
+            mdl_flags: 0,
+            vertex_compression: vformats::mdl::VertexCompression::None,
+            illumination_position: Vec3::ZERO,
+            hull_min: Vec3::ZERO,
+            hull_max: Vec3::splat(1.0),
+            view_min: Vec3::ZERO,
+            view_max: Vec3::ZERO,
+            illumination_attachment_index: None,
+            illumination_attachment_position: None,
+            lighting: None,
             meshes: vec![MeshData {
+                geometry: crate::media::preview_model::MeshGeometry::Model,
                 vertices: vec![
                     model_vertex(Vec3::new(1.0, 0.0, 0.0)),
                     model_vertex(Vec3::new(0.0, 1.0, 0.0)),
@@ -1760,7 +2189,6 @@ fn test_loaded_prop_model(
             vertex_count: 3,
             triangle_count: 1,
         }),
-        default_triangle_count: 1,
         physics: LoadedPropPhysics::Missing,
         collision: None,
     }
@@ -1769,11 +2197,21 @@ fn test_loaded_prop_model(
 fn model_vertex(position: Vec3) -> ModelVertex {
     ModelVertex {
         position,
+        tangent_s: Vec3::ZERO,
+        tangent_t: Vec3::ZERO,
+        tangent_sign: 0.0,
+        lighting_context: 0,
+        surface_mark: 0,
         normal: Vec3::new(1.0, 0.0, 0.0),
         uv: [0.25, 0.75],
         lightmap_uv: [0.5, 0.5],
+        lightmap_bump_step: 0.0,
+        lightmap_page: 0,
         color: Vec3::splat(1.0),
         blend_alpha: 1.0,
+        opacity: 1.0,
+        illumination: Vec3::splat(1.0),
+        lighting_mode: 0,
     }
 }
 
@@ -1967,7 +2405,7 @@ fn material_slot_signatures(materials: &[MaterialSlot]) -> Vec<MaterialSlotSigna
                     .texture2
                     .as_ref()
                     .and_then(|texture| texture.rgba_bytes().map(Vec::from)),
-                material.force_opaque,
+                material.alpha_policy.force_opaque(),
                 material.render_mode,
                 material
                     .texture
@@ -2006,4 +2444,436 @@ fn tiny_wav_bytes() -> Vec<u8> {
 
 fn create_vtf_bytes(rgba: &[u8]) -> Vec<u8> {
     fixture_vtf_bytes(2, 2, VtfFormat::Rgba8888, &[rgba])
+}
+
+#[test]
+fn explicit_lightmap_source_survives_zero_uv_coordinates() {
+    use gmpublished_domain::scene::map::{MapMesh, MapMeshVisibility, MapVertex};
+    let mesh = MapMesh {
+        entity: false,
+        vertices: vec![MapVertex {
+            position: Vec3::ZERO,
+            base_position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            tangent_s: Vec3::ZERO,
+            tangent_t: Vec3::ZERO,
+            tex_s: 0.0,
+            tex_t: 0.0,
+            texture_size: [1, 1],
+            lightmap_uv: [0.0; 2],
+            lightmap_page: Some(gmpublished_domain::scene::map::LightmapPageId(0)),
+            lightmap_bump_step: 0.0,
+            blend_alpha: 0.0,
+            opacity: 1.0,
+        }],
+        indices: vec![0],
+        material_index: 0,
+        visibility: MapMeshVisibility::default(),
+        surface_owners: Vec::new(),
+    };
+    let vertex = map_preview::map_mesh_to_model_mesh(&mesh, &[]).vertices[0];
+    assert_eq!(vertex.lightmap_uv, [0.0; 2]);
+    assert_ne!(
+        vertex.lighting_mode & crate::media::preview_model::vertex_lighting::LIGHTMAP,
+        0
+    );
+    assert_eq!(
+        vertex.lighting_mode & crate::media::preview_model::vertex_lighting::PREVIEW,
+        0
+    );
+}
+
+#[test]
+fn compiled_surfaces_without_samples_use_constant_light() {
+    let mut receiver = surface_mark_receiver();
+    for vertex in &mut receiver.vertices {
+        vertex.lightmap_page = None;
+    }
+    for entity in [false, true] {
+        receiver.entity = entity;
+        let mesh = map_preview::map_mesh_to_model_mesh(&receiver, &[]);
+        assert!(mesh.vertices.iter().all(|vertex| {
+            vertex.lighting_mode == crate::media::preview_model::vertex_lighting::WORLD_CONSTANT
+                && vertex.illumination == Vec3::splat(1.0)
+        }));
+    }
+}
+
+fn surface_mark_receiver() -> gmpublished_domain::scene::map::MapMesh {
+    use gmpublished_domain::scene::map::{
+        MapMesh, MapMeshIndexRange, MapMeshSurfaceOwner, MapMeshVisibility, MapSurfaceOwner,
+        MapVertex,
+    };
+    MapMesh {
+        entity: false,
+        vertices: [[-64.0, -64.0], [-64.0, 64.0], [64.0, 64.0], [64.0, -64.0]]
+            .map(|[x, y]| MapVertex {
+                position: Vec3::new(x, y, 0.0),
+                base_position: Vec3::new(x, y, 0.0),
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                tangent_s: Vec3::new(1.0, 0.0, 0.0),
+                tangent_t: Vec3::new(0.0, 1.0, 0.0),
+                tex_s: x,
+                tex_t: y,
+                texture_size: [128; 2],
+                lightmap_uv: [0.25 + x / 512.0, 0.25 + y / 512.0],
+                lightmap_page: Some(gmpublished_domain::scene::map::LightmapPageId(0)),
+                lightmap_bump_step: 0.125,
+                blend_alpha: 0.0,
+                opacity: 1.0,
+            })
+            .to_vec(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        material_index: 0,
+        visibility: MapMeshVisibility {
+            always_visible: vec![MapMeshIndexRange {
+                face: 7,
+                start: 0,
+                count: 6,
+            }],
+            clusters: Vec::new(),
+        },
+        surface_owners: vec![MapMeshSurfaceOwner {
+            index_start: 0,
+            owner: MapSurfaceOwner::World,
+            solid: true,
+            allows_decals: true,
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
+            plane_distance: 0.0,
+            displacement: None,
+            texture_projection: Some(
+                gmpublished_domain::scene::map::MapSurfaceTextureProjection {
+                    vectors: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+                    minimum: [-64; 2],
+                    extent: [128; 2],
+                },
+            ),
+        }],
+    }
+}
+
+fn surface_mark() -> gmpublished_domain::scene::map::MapOverlay {
+    use gmpublished_domain::scene::map::{MapDecal, MapSurfaceOwner, MapSurfaceProjector};
+    let world = [surface_mark_receiver()];
+    MapSurfaceProjector::new(&world, &[], &[])
+        .project_decal(
+            &MapDecal {
+                id: 3,
+                material_name: "test/decal".to_owned(),
+                position: gmpublished_domain::scene::map::MapDecalPosition {
+                    authored_world: Vec3::ZERO,
+                    receiver_local: Vec3::ZERO,
+                },
+                owner: MapSurfaceOwner::World,
+                permanence: Default::default(),
+                projection_order: None,
+            },
+            gmpublished_domain::scene::map::MapDecalDimensions {
+                extent: [32.0, 16.0],
+                radius: 16.0,
+            },
+            &[true],
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+#[test]
+fn surface_marks_retain_receiver_geometry_lighting_and_draw_attachment() {
+    let mark = surface_mark();
+    let primitive = materials::overlay_primitive(&mark, 5);
+    assert_eq!(primitive.indices, mark.indices);
+    assert_eq!(primitive.source, mark.source);
+    assert_eq!(primitive.receiver_mesh, mark.receiver_mesh);
+    assert_eq!(primitive.receiver_range, mark.receiver_range);
+    assert_eq!(
+        primitive.receiver_material_index,
+        mark.receiver_material_index
+    );
+    assert_eq!(primitive.material_index, 5);
+    for (actual, expected) in primitive.vertices.iter().zip(&mark.vertices) {
+        assert_eq!(actual.position, expected.surface.position);
+        assert_eq!(actual.lightmap_uv, expected.surface.lightmap_uv);
+        assert_eq!(
+            actual.lightmap_bump_step,
+            expected.surface.lightmap_bump_step
+        );
+        assert_eq!(actual.tangent_s, expected.surface.tangent_s);
+        assert_eq!(actual.tangent_t, expected.surface.tangent_t);
+        assert_eq!(actual.uv, expected.uv);
+        assert_eq!(
+            actual.lighting_mode,
+            crate::media::preview_model::vertex_lighting::RECEIVER_LIGHTMAP
+                | crate::media::preview_model::vertex_lighting::BATCHED_STATIC_DECAL
+        );
+    }
+    let mut compiled = mark;
+    compiled.source =
+        gmpublished_domain::scene::map::MapSurfaceMarkSource::Overlay { index: 0, id: 3 };
+    let primitive = materials::overlay_primitive(&compiled, 5);
+    assert!(primitive.vertices.iter().all(|vertex| vertex.lighting_mode
+        == crate::media::preview_model::vertex_lighting::RECEIVER_LIGHTMAP));
+}
+
+#[test]
+fn static_decal_mapping_uses_original_dimensions_after_stored_mip_selection() {
+    use gmpublished_domain::scene::map::{MapDecal, MapSurfaceOwner, MapSurfaceProjector};
+    let mips = (0..7)
+        .rev()
+        .map(|mip| {
+            let pixels = (64_u32 >> mip).max(1) * (32_u32 >> mip).max(1);
+            [17, 31, 47, 255].repeat(pixels as usize)
+        })
+        .collect::<Vec<_>>();
+    let stored = mips.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let archive = PreviewArchive::from_gma(GmaFixtureBuilder::new("DecalDimensions")
+        .entry("materials/test/decal.vmt",br#"LightmappedGeneric { "$basetexture" "test/decal" "$decal" "1" "$decalscale" "0.5" }"#.to_vec())
+        .entry("materials/test/decal.vtf",fixture_vtf_bytes(64,32,VtfFormat::Rgba8888,&stored))
+        .build()).unwrap();
+    let resolver =
+        MaterialResolver::new(Arc::new(archive), None).with_decoded_texture_max_dimension(1);
+    let world = [surface_mark_receiver()];
+    let projector = MapSurfaceProjector::new(&world, &[], &[]);
+    let mut table = MaterialTable::default();
+    let decal = MapDecal {
+        id: 3,
+        material_name: "test/decal".to_owned(),
+        position: gmpublished_domain::scene::map::MapDecalPosition {
+            authored_world: Vec3::ZERO,
+            receiver_local: Vec3::ZERO,
+        },
+        owner: MapSurfaceOwner::World,
+        permanence: Default::default(),
+        projection_order: None,
+    };
+    let (world, sky) =
+        materials::resolve_map_decals(&[decal], &projector, &[true], &resolver, &mut table, None);
+    assert!(sky.overlays.is_empty());
+    assert_eq!(world.skipped_count, 0);
+    assert_eq!(world.overlays.len(), 1);
+    let texture = table.slots()[0].texture.as_ref().unwrap();
+    assert_eq!([texture.width(), texture.height()], [1, 1]);
+    assert_eq!(texture.original_dimensions(), (64, 32));
+    assert_eq!(texture.load_outcome(), TextureLoadOutcome::Loaded);
+    assert_eq!(texture.resident().unwrap().id().first_source_mip, 6);
+    assert_eq!(texture.rgba_bytes(), Some(&[17, 31, 47, 255][..]));
+    let vertices = &world.overlays[0].vertices;
+    let max = vertices
+        .iter()
+        .map(|vertex| vertex.position[0])
+        .max_by(f32::total_cmp)
+        .unwrap();
+    let min = vertices
+        .iter()
+        .map(|vertex| vertex.position[0])
+        .min_by(f32::total_cmp)
+        .unwrap();
+    assert!((max - min - 32.0).abs() < 1e-6);
+}
+
+#[test]
+fn surface_mark_statistics_count_authored_sources_instead_of_receiver_fragments() {
+    use gmpublished_domain::scene::map::MapSurfaceMarkSource;
+    let mut first = materials::overlay_primitive(&surface_mark(), 0);
+    first.source = MapSurfaceMarkSource::Overlay { index: 0, id: 11 };
+    let mut second = first.clone();
+    second.receiver_range.face = 8;
+    let mut third = first.clone();
+    third.source = MapSurfaceMarkSource::Decal {
+        entity_index: 11,
+        permanence: Default::default(),
+    };
+    let mut fourth = first.clone();
+    fourth.source = MapSurfaceMarkSource::Overlay { index: 1, id: 11 };
+    assert_eq!(
+        materials::authored_surface_mark_count(&[first, second, third, fourth]),
+        3
+    );
+}
+
+#[test]
+fn unavailable_surface_mark_material_is_counted_once_across_fragments() {
+    let first = surface_mark();
+    let resolver = MaterialResolver::new(
+        Arc::new(
+            PreviewArchive::from_gma(
+                GmaFixtureBuilder::new("UnavailableDecal")
+                    .entry(format!("materials/{}.vmt", first.material_name), Vec::new())
+                    .build(),
+            )
+            .unwrap(),
+        ),
+        None,
+    );
+    let mut second = first.clone();
+    second.receiver_range.face = 8;
+    let baked =
+        materials::resolve_map_overlays(&[first, second], &resolver, &mut MaterialTable::default());
+    assert_eq!(baked.skipped_count, 1);
+    assert!(baked.overlays.is_empty());
+}
+
+#[test]
+fn compacted_door_indices_remap_surface_mark_geometry_and_omit_unavailable_owners() {
+    use crate::media::preview_model::{DoorInstance, DoorSounds};
+    use gmpublished_domain::scene::map::{
+        MapDoorClass, MapDoorMotion, MapReceiverMesh, MapSurfaceMarkSource, MapSurfaceOwner,
+    };
+    let door = DoorInstance {
+        source_index: 5,
+        brush_collision: None,
+        class: MapDoorClass::FuncDoor,
+        origin: Vec3::ZERO,
+        angles: Vec3::ZERO,
+        local_bounds_min: Vec3::ZERO,
+        local_bounds_max: Vec3::ZERO,
+        visibility: MapVisibilityBucket::Always,
+        initial_progress: 0.0,
+        auto_close_after: None,
+        motion: MapDoorMotion::Linear {
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            distance: 64.0,
+            speed: 64.0,
+        },
+        sounds: DoorSounds::default(),
+        meshes: Vec::new(),
+    };
+    let mut available = materials::overlay_primitive(&surface_mark(), 0);
+    available.owner = MapSurfaceOwner::Door {
+        door_index: 5,
+        model_index: gmpublished_domain::scene::map::ModelIndex::new(1),
+    };
+    available.receiver_mesh = MapReceiverMesh::Door {
+        door_index: 5,
+        mesh_index: 2,
+    };
+    let mut missing = available.clone();
+    missing.owner = MapSurfaceOwner::Door {
+        door_index: 1,
+        model_index: gmpublished_domain::scene::map::ModelIndex::new(1),
+    };
+    missing.receiver_mesh = MapReceiverMesh::Door {
+        door_index: 1,
+        mesh_index: 0,
+    };
+    missing.source = MapSurfaceMarkSource::Decal {
+        entity_index: 20,
+        permanence: Default::default(),
+    };
+    let mut world = vec![available, missing.clone(), missing];
+    assert_eq!(
+        map_preview::remap_surface_mark_doors(&mut world, &mut Vec::new(), &[door]),
+        1
+    );
+    assert_eq!(world.len(), 1);
+    assert_eq!(
+        world[0].owner,
+        MapSurfaceOwner::Door {
+            door_index: 0,
+            model_index: gmpublished_domain::scene::map::ModelIndex::new(1)
+        }
+    );
+    assert_eq!(
+        world[0].receiver_mesh,
+        MapReceiverMesh::Door {
+            door_index: 0,
+            mesh_index: 2
+        }
+    );
+}
+
+#[test]
+fn cancelled_preview_routes_stop_before_archive_or_content_decoding() {
+    for path in [
+        "maps/missing.bsp",
+        "models/missing.mdl",
+        "particles/missing.pcf",
+    ] {
+        let request = request(path, &[]);
+        request.cancellation.cancel();
+        let cpu = gmpublished_backend::CpuExecutor::build(2).unwrap();
+        let result = load_preview(&request, &Tokens::dark(), None, &cpu, &mut |_| {
+            panic!("cancelled load emitted a stage")
+        });
+        assert!(
+            matches!(result, Err(PreviewLoadError::Cancelled(_))),
+            "{path}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn particle_materials_keep_unknown_source_failures_and_blocked_texture_outcomes() {
+    use crate::bridge::materials::MaterialResolutionOutcome;
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    std::fs::create_dir_all(game.join("garrysmod")).unwrap();
+    std::fs::write(game.join("garrysmod/addons"), []).unwrap();
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Particle sources")
+            .entry(
+                "materials/particle/authored.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/unavailable" }"#.to_vec(),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), Some(game));
+    let material = resolve_particle_material(&resolver, "particle/unknown".to_owned());
+    assert_eq!(
+        material.resolution,
+        MaterialResolutionOutcome::SourceUnavailable
+    );
+    assert!(material.texture.is_none());
+    assert!(material.is_unavailable());
+    let authored = resolve_particle_material(&resolver, "particle/authored".to_owned());
+    assert_eq!(authored.resolution, MaterialResolutionOutcome::Loaded);
+    assert_eq!(
+        authored.texture.as_ref().unwrap().load_outcome(),
+        TextureLoadOutcome::SourceUnavailable
+    );
+    assert!(authored.is_unavailable());
+    let preview = ParticlePreview {
+        file: Default::default(),
+        systems: Vec::new(),
+        materials: vec![material, authored],
+        sheet_stats: Default::default(),
+        source_discovery: resolver.source_discovery_stats().clone(),
+    };
+    assert!(!preview.source_discovery.failures.is_empty());
+    assert!(preview.has_unavailable_content());
+}
+
+#[test]
+fn particle_native_missing_and_invalid_base_images_remain_sampleable() {
+    use crate::bridge::materials::MaterialResolutionOutcome;
+    let resolver = MaterialResolver::prop_lighting_fixture(
+        vec![
+            (
+                "materials/particle/missing.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/absent" }"#.to_vec(),
+            ),
+            (
+                "materials/particle/invalid.vmt",
+                br#"UnlitGeneric { "$basetexture" "particle/bad" }"#.to_vec(),
+            ),
+            (
+                "materials/particle/bad.vtf",
+                b"invalid selected payload".to_vec(),
+            ),
+        ],
+        Vec::new(),
+    );
+    for (name, outcome) in [
+        ("missing", TextureLoadOutcome::MissingSource),
+        ("invalid", TextureLoadOutcome::InvalidSource),
+    ] {
+        let slot = resolve_particle_material(&resolver, format!("particle/{name}"));
+        assert_eq!(slot.resolution, MaterialResolutionOutcome::Loaded);
+        let texture = slot.texture.unwrap();
+        assert_eq!(texture.load_outcome(), outcome);
+        assert!(!texture.load_outcome().is_unavailable());
+        assert_eq!(texture.mip_chain().next().unwrap().width, 32);
+    }
 }

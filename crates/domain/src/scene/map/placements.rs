@@ -1,38 +1,39 @@
 use super::{
-    BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropSolid, MapPropVisibility,
-    MapVisibilityBucket, Overlay, SkyboxPartition, StaticProp, StaticPropPlacement,
-    cluster_in_range, is_preview_material_visible, normalize_entity_prop_model_path,
-    normalize_material_name, normalize_static_prop_model_path, parse_entity_bool,
-    parse_entity_float, parse_entity_i32, parse_entity_vec3, point_visibility_bucket,
-    vector_is_finite_nonzero,
+    BTreeSet, GeometryPartition, MapBsp, MapEntity, MapPropLeafMembership, MapPropSolid,
+    MapPropVisibility, MapVisibilityBucket, SkyboxPartition, StaticProp, StaticPropPlacement,
+    cluster_in_range, normalize_entity_prop_model_path, normalize_static_prop_model_path,
+    parse_entity_bool, parse_entity_float, parse_entity_i32, parse_entity_vec3,
+    point_visibility_bucket,
 };
 use crate::math::Vec3;
 
 /// `SolidType::Physics` (the vphysics collision mode) in the static prop
 /// game lump's `solid` byte.
 const STATIC_PROP_SOLID_PHYSICS: u8 = 6;
+const STATIC_PROP_USE_LIGHTING_ORIGIN: u8 = 0x02;
 
 const DETAIL_PROP_TYPE_SPRITE: u8 = 1;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MapLightingOriginReference {
+    pub name: String,
+    /// Authored BSP entity index, independent of runtime edict allocation.
+    pub first_entity: Option<usize>,
+    pub match_count: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MapDetailSprite {
     pub origin: Vec3,
+    pub angles: Vec3,
+    pub orientation: u8,
+    pub fast_eligible: bool,
+    pub leaf_index: u16,
+    pub underwater_leaf: bool,
     pub upper_left: [f32; 2],
     pub lower_right: [f32; 2],
     pub tex_upper_left: [f32; 2],
     pub tex_lower_right: [f32; 2],
-    pub visibility: MapVisibilityBucket,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MapOverlay {
-    pub id: i32,
-    pub material_name: String,
-    pub positions: [Vec3; 4],
-    pub normal: Vec3,
-    pub u: [f32; 2],
-    pub v: [f32; 2],
-    pub face_count: u16,
     pub visibility: MapVisibilityBucket,
 }
 
@@ -43,19 +44,41 @@ pub(super) fn partitioned_static_prop_placements(
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
     let cluster_count = bsp.cluster_count();
-    for prop in bsp.static_props_iter().filter_map(|prop| {
-        let origin = prop.origin;
-        let visibility = static_prop_leaf_visibility(bsp, prop, cluster_count);
-        Some(StaticPropPlacement {
-            model_path: normalize_static_prop_model_path(bsp.static_prop_model(prop))?,
-            origin: Vec3::from(origin),
-            angles: Vec3::from(prop.angles),
-            skin: prop.skin,
-            scale: 1.0,
-            solid: static_prop_solid(prop.solid),
-            visibility,
+    for prop in bsp
+        .static_props_iter()
+        .enumerate()
+        .filter_map(|(index, prop)| {
+            let origin = prop.origin;
+            let leaves = static_prop_render_leaves(bsp, prop);
+            let visibility = static_prop_leaf_visibility(bsp, prop, &leaves, cluster_count);
+            Some(StaticPropPlacement {
+                entity: false,
+                initially_visible: true,
+                animation: None,
+                static_prop_index: Some(index),
+                lighting_origin: (prop.flags & STATIC_PROP_USE_LIGHTING_ORIGIN != 0)
+                    .then_some(Vec3::from(prop.lighting_origin))
+                    .filter(|origin| origin.is_finite()),
+                lighting_origin_reference: None,
+                diffuse_modulation: prop.diffuse_modulation.unwrap_or([255; 4]),
+                render_mode: 0,
+                flags: prop.flags,
+                flags_ex: prop.flags_ex,
+                extra_flags: prop.extra_flags,
+                model_path: normalize_static_prop_model_path(bsp.static_prop_model(prop))?,
+                origin: Vec3::from(origin),
+                angles: Vec3::from(prop.angles),
+                skin: prop.skin,
+                scale: prop
+                    .uniform_scale
+                    .filter(|scale| scale.is_finite() && *scale > 0.0)
+                    .unwrap_or(1.0),
+                solid: static_prop_solid(prop.solid),
+                leaf_membership: MapPropLeafMembership::Compiled(leaves),
+                visibility,
+            })
         })
-    }) {
+    {
         match partition.point_partition(bsp, prop.origin) {
             GeometryPartition::Visible => visible.push(prop),
             GeometryPartition::Skybox => skybox.push(prop),
@@ -64,27 +87,37 @@ pub(super) fn partitioned_static_prop_placements(
     (visible, skybox)
 }
 
-fn static_prop_leaf_visibility(
-    bsp: &MapBsp,
-    prop: &StaticProp,
-    cluster_count: u32,
-) -> MapPropVisibility {
+fn static_prop_render_leaves(bsp: &MapBsp, prop: &StaticProp) -> Vec<u16> {
     let model = bsp.static_prop_model(prop);
     let leaf_count = usize::from(prop.leaf_count);
     if leaf_count == 0 {
         log::debug!(
-            "bsp static prop {model} at {:?} has empty leaf list: using Always",
+            "bsp static prop {model} at {:?} has empty leaf list: not registered",
             prop.origin
         );
-        return MapPropVisibility::Always;
+        return Vec::new();
     }
     let Some(prop_leaves) = bsp.static_prop_leaves(prop) else {
         log::debug!(
-            "bsp static prop {model} leaf list out of range first={} count={leaf_count}: using Always",
+            "bsp static prop {model} leaf list out of range first={} count={leaf_count}: not registered",
             prop.first_leaf
         );
-        return MapPropVisibility::Always;
+        return Vec::new();
     };
+    prop_leaves.to_vec()
+}
+
+fn static_prop_leaf_visibility(
+    bsp: &MapBsp,
+    prop: &StaticProp,
+    prop_leaves: &[u16],
+    cluster_count: u32,
+) -> MapPropVisibility {
+    if prop_leaves.is_empty() {
+        return MapPropVisibility::Always;
+    }
+    let model = bsp.static_prop_model(prop);
+    let leaf_count = prop_leaves.len();
     let mut clusters = BTreeSet::<u32>::new();
     let mut invalid_clusters = 0_usize;
     for leaf_index in prop_leaves {
@@ -116,12 +149,21 @@ fn static_prop_leaf_visibility(
 }
 
 const ENTITY_PROP_CLASSNAMES: &[&str] = &[
+    "dynamic_prop",
     "prop_dynamic",
     "prop_dynamic_override",
     "prop_physics",
     "prop_physics_multiplayer",
     "prop_physics_override",
 ];
+
+const EFFECT_NO_DRAW: i32 = 0x20;
+
+fn is_dynamic_prop(classname: &str) -> bool {
+    ["prop_dynamic", "prop_dynamic_override", "dynamic_prop"]
+        .iter()
+        .any(|expected| classname.eq_ignore_ascii_case(expected))
+}
 
 pub(super) fn partitioned_entity_prop_placements(
     bsp: &MapBsp,
@@ -130,7 +172,7 @@ pub(super) fn partitioned_entity_prop_placements(
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
     let cluster_count = bsp.cluster_count();
-    for entity in bsp.entities.iter() {
+    for (entity_index, entity) in bsp.entities.iter().enumerate() {
         let Some(classname) = entity.prop("classname").filter(|classname| {
             ENTITY_PROP_CLASSNAMES
                 .iter()
@@ -138,7 +180,9 @@ pub(super) fn partitioned_entity_prop_placements(
         }) else {
             continue;
         };
-        let Some(placement) = entity_prop_placement(entity, classname, bsp, cluster_count) else {
+        let Some(placement) =
+            entity_prop_placement(entity, entity_index, classname, bsp, cluster_count)
+        else {
             continue;
         };
         if entity.prop("parentname").is_some()
@@ -159,6 +203,7 @@ pub(super) fn partitioned_entity_prop_placements(
 
 fn entity_prop_placement(
     entity: &MapEntity,
+    entity_index: usize,
     classname: &str,
     bsp: &MapBsp,
     cluster_count: u32,
@@ -196,15 +241,124 @@ fn entity_prop_placement(
         .map_or(1.0, |value| parse_entity_prop_model_scale(value, classname));
     let solid = entity_prop_solid(entity);
 
+    let (lighting_origin, lighting_origin_reference) = entity_lighting_origin(entity, bsp);
     Some(StaticPropPlacement {
+        entity: true,
+        initially_visible: entity
+            .prop("effects")
+            .and_then(parse_entity_i32)
+            .unwrap_or(0)
+            & EFFECT_NO_DRAW
+            == 0
+            && !(is_dynamic_prop(classname)
+                && entity
+                    .prop("startdisabled")
+                    .and_then(super::parse_entity_bool)
+                    .unwrap_or(false)),
+        animation: entity_prop_animation(entity, entity_index, classname),
+        static_prop_index: None,
+        lighting_origin,
+        lighting_origin_reference,
+        diffuse_modulation: entity_diffuse_modulation(entity),
+        render_mode: entity
+            .prop("rendermode")
+            .and_then(parse_entity_i32)
+            .unwrap_or(0),
+        flags: 0,
+        flags_ex: None,
+        extra_flags: None,
         model_path,
         origin,
         angles,
         skin,
         scale,
         solid,
+        leaf_membership: MapPropLeafMembership::SpatialBounds,
         visibility: point_visibility_bucket(bsp, origin, cluster_count).into(),
     })
+}
+
+fn entity_prop_animation(
+    entity: &MapEntity,
+    entity_index: usize,
+    classname: &str,
+) -> Option<super::MapPropAnimation> {
+    if !is_dynamic_prop(classname) {
+        return None;
+    }
+    let default_sequence = entity
+        .prop("defaultanim")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let sequence_index = entity
+        .prop("sequence")
+        .and_then(parse_entity_i32)
+        .and_then(|index| usize::try_from(index).ok());
+    let random = entity
+        .prop("randomanimation")
+        .and_then(parse_entity_i32)
+        .filter(|value| *value != 0)
+        .map(|_| super::MapPropRandomAnimation {
+            minimum_interval: entity
+                .prop("minanimtime")
+                .and_then(super::parse_entity_float)
+                .unwrap_or(5.0),
+            maximum_interval: entity
+                .prop("maxanimtime")
+                .and_then(super::parse_entity_float)
+                .unwrap_or(10.0),
+        });
+    if default_sequence.is_none() && sequence_index.is_none() && random.is_none() {
+        return None;
+    }
+    Some(super::MapPropAnimation {
+        entity_index,
+        hammer_id: entity.prop("hammerid").and_then(|value| value.parse().ok()),
+        default_sequence,
+        sequence_index: sequence_index.unwrap_or(0),
+        initial_cycle: entity
+            .prop("cycle")
+            .and_then(super::parse_entity_float)
+            .unwrap_or(0.0),
+        playback_rate: entity
+            .prop("playbackrate")
+            .and_then(super::parse_entity_float)
+            .unwrap_or(1.0),
+        random,
+    })
+}
+
+fn entity_lighting_origin(
+    entity: &MapEntity,
+    bsp: &MapBsp,
+) -> (Option<Vec3>, Option<MapLightingOriginReference>) {
+    let Some(name) = entity
+        .prop("lightingorigin")
+        .filter(|name| !name.is_empty())
+    else {
+        return (None, None);
+    };
+    let mut matches = bsp
+        .entities
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| entity.prop("targetname") == Some(name));
+    let first = matches.next();
+    let match_count = usize::from(first.is_some()) + matches.count();
+    let origin = first.and_then(|(_, target)| target.prop("origin").and_then(parse_entity_vec3));
+    let reference = MapLightingOriginReference {
+        name: name.to_owned(),
+        first_entity: first.map(|(index, _)| index),
+        match_count,
+    };
+    if origin.is_none() || match_count > 1 {
+        log::warn!(
+            "map prop lighting anchor {name:?}: matches {match_count}, first entity {:?}, finite origin {}",
+            reference.first_entity,
+            origin.is_some()
+        );
+    }
+    (origin, Some(reference))
 }
 
 fn static_prop_solid(solid: u8) -> MapPropSolid {
@@ -212,6 +366,26 @@ fn static_prop_solid(solid: u8) -> MapPropSolid {
         STATIC_PROP_SOLID_PHYSICS => MapPropSolid::Physics,
         _ => MapPropSolid::None,
     }
+}
+
+pub(super) fn entity_diffuse_modulation(entity: &MapEntity) -> [u8; 4] {
+    let mut color = [255_u8; 4];
+    if let Some(value) = entity.prop("rendercolor") {
+        let components = value
+            .split_ascii_whitespace()
+            .map(parse_entity_float)
+            .collect::<Option<Vec<_>>>();
+        if let Some(components) = components.filter(|components| matches!(components.len(), 3 | 4))
+        {
+            for (channel, value) in color.iter_mut().zip(components) {
+                *channel = value.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    if let Some(alpha) = entity.prop("renderamt").and_then(parse_entity_float) {
+        color[3] = alpha.clamp(0.0, 255.0) as u8;
+    }
+    color
 }
 
 fn entity_prop_solid(entity: &MapEntity) -> MapPropSolid {
@@ -235,17 +409,49 @@ pub(super) fn parse_entity_prop_model_scale(value: &str, classname: &str) -> f32
     scale
 }
 
+fn detail_sprite_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        log::warn!("invalid detail sprite scale {scale}; using one");
+        1.0
+    }
+}
+
+fn detail_sprite_fast_eligible(prop: &vformats::bsp::DetailProp) -> bool {
+    prop.prop_type == DETAIL_PROP_TYPE_SPRITE
+        && prop.light_style_count == 0
+        && prop.orientation == 2
+        && prop.shape_angle == 0
+        && prop.shape_size == 0
+        && prop.sway_amount == 0
+}
+
+pub(super) struct DetailSpritePlacements {
+    pub world: Vec<MapDetailSprite>,
+    pub skybox: Vec<MapDetailSprite>,
+    pub invalid_leaves: u32,
+}
+
 pub(super) fn partitioned_detail_sprite_placements(
     bsp: &MapBsp,
     partition: &SkyboxPartition,
-) -> (Vec<MapDetailSprite>, Vec<MapDetailSprite>) {
+) -> DetailSpritePlacements {
     let sprites = bsp.detail_sprites();
     let mut visible = Vec::new();
     let mut skybox = Vec::new();
+    let mut invalid_leaves = 0_u32;
     let cluster_count = bsp.cluster_count();
     for prop in bsp.detail_props_iter() {
-        // vformats prop_type is vbsp detail_type; model_index is vbsp prop_type.
         if prop.prop_type != DETAIL_PROP_TYPE_SPRITE {
+            continue;
+        }
+        let Some(leaf) = bsp.leaves.get(usize::from(prop.leaf)) else {
+            invalid_leaves = invalid_leaves.saturating_add(1);
+            continue;
+        };
+        if prop.orientation > 2 {
+            log::warn!("unsupported detail sprite orientation {}", prop.orientation);
             continue;
         }
         let Some(sprite) = sprites.get(usize::from(prop.model_index)) else {
@@ -257,100 +463,33 @@ pub(super) fn partitioned_detail_sprite_placements(
         };
         let placement = MapDetailSprite {
             origin: Vec3::from(prop.origin),
-            upper_left: sprite.upper_left,
-            lower_right: sprite.lower_right,
+            angles: Vec3::from(prop.angles),
+            orientation: prop.orientation,
+            fast_eligible: detail_sprite_fast_eligible(prop),
+            leaf_index: prop.leaf,
+            underwater_leaf: leaf.leaf_water_data >= 0,
+            upper_left: sprite
+                .upper_left
+                .map(|value| value * detail_sprite_scale(prop.scale)),
+            lower_right: sprite
+                .lower_right
+                .map(|value| value * detail_sprite_scale(prop.scale)),
             tex_upper_left: sprite.tex_upper_left,
             tex_lower_right: sprite.tex_lower_right,
-            visibility: point_visibility_bucket(bsp, Vec3::from(prop.origin), cluster_count),
+            visibility: super::visibility::visibility_bucket(leaf.cluster, cluster_count),
         };
-        match partition.point_partition(bsp, placement.origin) {
+        match partition.cluster_partition(leaf.cluster) {
             GeometryPartition::Visible => visible.push(placement),
             GeometryPartition::Skybox => skybox.push(placement),
         }
     }
-    (visible, skybox)
-}
-
-pub(super) fn partitioned_map_overlays(
-    bsp: &MapBsp,
-    partition: &SkyboxPartition,
-) -> (Vec<MapOverlay>, Vec<MapOverlay>) {
-    let mut visible = Vec::new();
-    let mut skybox = Vec::new();
-    let cluster_count = bsp.cluster_count();
-    for (overlay, mapped) in bsp.overlays.iter().filter_map(|overlay| {
-        let texinfo = usize::try_from(overlay.texinfo)
-            .ok()
-            .and_then(|index| bsp.texinfos.get(index))?;
-        let material_name = normalize_material_name(bsp.texinfo_name(texinfo))?;
-        if !is_preview_material_visible(&material_name) {
-            return None;
-        }
-        Some((
-            overlay,
-            MapOverlay {
-                id: overlay.id,
-                material_name,
-                positions: overlay_quad_positions(OverlayBasis::from_overlay(overlay))?,
-                normal: Vec3::from(overlay.basis_normal).normalize_or_zero(),
-                u: overlay.u,
-                v: overlay.v,
-                face_count: overlay.face_count().try_into().unwrap_or(u16::MAX),
-                visibility: point_visibility_bucket(bsp, Vec3::from(overlay.origin), cluster_count),
-            },
-        ))
-    }) {
-        match partition.point_partition(bsp, Vec3::from(overlay.origin)) {
-            GeometryPartition::Visible => visible.push(mapped),
-            GeometryPartition::Skybox => skybox.push(mapped),
-        }
-    }
-    (visible, skybox)
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct OverlayBasis {
-    pub(super) id: i32,
-    pub(super) basis_normal: Vec3,
-    pub(super) uv_points: [Vec3; 4],
-    pub(super) origin: Vec3,
-}
-
-impl OverlayBasis {
-    pub(super) fn from_overlay(overlay: &Overlay) -> Self {
-        Self {
-            id: overlay.id,
-            basis_normal: Vec3::from(overlay.basis_normal),
-            uv_points: overlay.uv_points.map(Vec3::from),
-            origin: Vec3::from(overlay.origin),
-        }
+    DetailSpritePlacements {
+        world: visible,
+        skybox,
+        invalid_leaves,
     }
 }
 
-pub(super) fn overlay_quad_positions(overlay: OverlayBasis) -> Option<[Vec3; 4]> {
-    let normal = overlay.basis_normal.normalize_or_zero();
-    if !vector_is_finite_nonzero(normal) {
-        log::debug!("bsp overlay {} skipped: invalid basis normal", overlay.id);
-        return None;
-    }
-    // vbsp packs BasisU in uv_points[0..3].z and the V-flip flag in [3].z.
-    // The xy pairs are corners in that basis; z is not a normal offset.
-    // See source-sdk-2013 utils/vbsp/overlay.cpp.
-    let uv_points = overlay.uv_points;
-    let u_axis = Vec3::new(uv_points[0][2], uv_points[1][2], uv_points[2][2]).normalize_or_zero();
-    if !vector_is_finite_nonzero(u_axis) {
-        log::debug!(
-            "bsp overlay {} skipped: degenerate packed U basis",
-            overlay.id
-        );
-        return None;
-    }
-    let mut v_axis = normal.cross(u_axis).normalize_or_zero();
-    if uv_points[3][2] == 1.0 {
-        v_axis *= -1.0;
-    }
-    let origin = overlay.origin;
-    // Preview simplification: render one quad from the overlay plane points
-    // and do not clip it back to the referenced faces.
-    Some(uv_points.map(|point| origin + ((u_axis * point[0]) + (v_axis * point[1]))))
-}
+#[cfg(test)]
+#[path = "placements/tests.rs"]
+mod tests;

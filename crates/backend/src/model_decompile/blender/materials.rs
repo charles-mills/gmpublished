@@ -620,7 +620,15 @@ mod tests {
             checksum: 0,
             version: 48,
             flags: 0,
+            illumination_position: [0.0; 3],
+            hull_min: [0.0; 3],
+            hull_max: [0.0; 3],
+            view_min: [0.0; 3],
+            view_max: [0.0; 3],
+            attachments: Vec::new(),
+            illumination_attachment_index: None,
             bones: Vec::new(),
+            linear_bones: None,
             textures: names.iter().map(|value| (*value).to_owned()).collect(),
             texture_paths: directories
                 .iter()
@@ -630,6 +638,10 @@ mod tests {
             skin_table: Vec::new(),
             body_parts: Vec::new(),
             local_animations: Vec::new(),
+            sequences: Vec::new(),
+            included_model_count: 0,
+            bone_controller_count: 0,
+            flex_descriptor_count: 0,
             sequence_count: 0,
         }
     }

@@ -1,46 +1,67 @@
-use super::resources::RenderResources;
-use super::{MSAA_SAMPLE_COUNT, wgpu};
+use super::resources::{RenderResources, ViewPipelines};
+use super::wgpu;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ColorTransfer {
+    Linear,
+    Encoded,
+}
+
+impl ColorTransfer {
+    pub(super) fn format(self, format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+        match self {
+            Self::Linear => format,
+            Self::Encoded => format.remove_srgb_suffix(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct RenderTargets {
+    pub(super) resolve_texture: wgpu::Texture,
+    pub(super) glass: std::sync::OnceLock<super::glass::Snapshot>,
     pub color: wgpu::TextureView,
-    pub resolve_texture: wgpu::Texture,
     pub resolve_view: wgpu::TextureView,
+    encoded_color: wgpu::TextureView,
+    encoded_resolve: wgpu::TextureView,
     pub depth: wgpu::TextureView,
-    pub refraction: Option<RefractionTarget>,
     pub blit_bind_group: wgpu::BindGroup,
     pub size: (u32, u32),
     pub format: wgpu::TextureFormat,
-}
-
-#[derive(Debug)]
-pub struct RefractionTarget {
-    pub texture: wgpu::Texture,
-    pub bind_group: wgpu::BindGroup,
+    pub sample_count: u32,
 }
 
 impl RenderTargets {
+    pub(super) fn color_attachment(&self, transfer: ColorTransfer) -> &wgpu::TextureView {
+        match transfer {
+            ColorTransfer::Linear => &self.color,
+            ColorTransfer::Encoded => &self.encoded_color,
+        }
+    }
+
+    pub(super) fn resolve_attachment(&self, transfer: ColorTransfer) -> Option<&wgpu::TextureView> {
+        (self.sample_count > 1).then_some(match transfer {
+            ColorTransfer::Linear => &self.resolve_view,
+            ColorTransfer::Encoded => &self.encoded_resolve,
+        })
+    }
+
+    pub fn size_for_device(device: &wgpu::Device, size: (u32, u32)) -> (u32, u32) {
+        proportional_size(size, device.limits().max_texture_dimension_2d)
+    }
+
     pub fn ensure(
         slot: &mut Option<Self>,
         device: &wgpu::Device,
-        resources: &RenderResources,
-        width: u32,
-        height: u32,
-        needs_refraction: bool,
+        resources: &ViewPipelines,
+        size: (u32, u32),
     ) {
-        let size = (width.max(1), height.max(1));
+        let size = Self::size_for_device(device, size);
         if slot.as_ref().is_some_and(|targets| {
-            targets.size == size && targets.format == resources.target_format
+            targets.size == size
+                && targets.format == resources.target_format
+                && targets.sample_count == resources.sample_count
         }) {
-            if let Some(targets) = slot.as_mut() {
-                if needs_refraction {
-                    targets.ensure_refraction(device, resources);
-                } else {
-                    // Drop the refraction texture when switching to a waterless scene, even if
-                    // the viewport size and format are unchanged.
-                    targets.refraction = None;
-                }
-            }
             return;
         }
         let extent = wgpu::Extent3d {
@@ -48,16 +69,13 @@ impl RenderTargets {
             height: size.1,
             depth_or_array_layers: 1,
         };
-        let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("file_preview.model_viewer.msaa_color"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: MSAA_SAMPLE_COUNT,
-            dimension: wgpu::TextureDimension::D2,
-            format: resources.target_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let encoded_format = ColorTransfer::Encoded.format(resources.target_format);
+        let encoded_formats = [encoded_format];
+        let view_formats = if encoded_format == resources.target_format {
+            &[][..]
+        } else {
+            &encoded_formats[..]
+        };
         let resolve = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("file_preview.model_viewer.msaa_resolve"),
             size: extent,
@@ -68,20 +86,42 @@ impl RenderTargets {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats,
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("file_preview.model_viewer.depth"),
             size: extent,
             mip_level_count: 1,
-            sample_count: MSAA_SAMPLE_COUNT,
+            sample_count: resources.sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let color = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_texture = if resources.sample_count > 1 {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("file_preview.model_viewer.msaa_color"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: resources.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: resources.target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats,
+            })
+        } else {
+            resolve.clone()
+        };
+        let color = color_texture.create_view(&Default::default());
+        let encoded_color = color_texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(encoded_format),
+            ..Default::default()
+        });
+        let resolve_view = resolve.create_view(&Default::default());
+        let encoded_resolve = resolve.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(encoded_format),
+            ..Default::default()
+        });
         let depth = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("file_preview.model_viewer.blit_bind_group"),
@@ -97,66 +137,157 @@ impl RenderTargets {
                 },
             ],
         });
-        let mut targets = Self {
-            color,
+        let targets = Self {
             resolve_texture: resolve,
+            glass: Default::default(),
+            color,
             resolve_view,
+            encoded_color,
+            encoded_resolve,
             depth,
-            refraction: None,
             blit_bind_group,
             size,
             format: resources.target_format,
+            sample_count: resources.sample_count,
         };
-        if needs_refraction {
-            targets.ensure_refraction(device, resources);
-        }
         *slot = Some(targets);
     }
+}
 
-    fn ensure_refraction(&mut self, device: &wgpu::Device, resources: &RenderResources) {
-        if self.refraction.is_some() {
+#[derive(Debug, Eq, PartialEq)]
+struct WaterBindingKey {
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    uniforms: wgpu::Buffer,
+    refraction: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    reflection: wgpu::TextureView,
+}
+
+#[derive(Debug)]
+pub struct WaterBindings {
+    key: WaterBindingKey,
+    pub bind_group: wgpu::BindGroup,
+}
+
+#[derive(Clone, Copy)]
+pub struct WaterBindingInputs<'a> {
+    pub uniforms: &'a wgpu::Buffer,
+    pub refraction: &'a wgpu::TextureView,
+    pub depth: &'a wgpu::TextureView,
+    pub reflection: &'a wgpu::TextureView,
+}
+
+impl WaterBindings {
+    pub fn ensure(
+        slot: &mut Option<Self>,
+        device: &wgpu::Device,
+        resources: &RenderResources,
+        inputs: WaterBindingInputs<'_>,
+    ) {
+        let WaterBindingInputs {
+            uniforms,
+            refraction,
+            depth,
+            reflection,
+        } = inputs;
+        let key = WaterBindingKey {
+            layout: resources.water_frame_layout.clone(),
+            sampler: resources.water_refraction_sampler.clone(),
+            uniforms: uniforms.clone(),
+            refraction: refraction.clone(),
+            depth: depth.clone(),
+            reflection: reflection.clone(),
+        };
+        if slot.as_ref().is_some_and(|bindings| bindings.key == key) {
             return;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("file_preview.model_viewer.refraction"),
-            size: wgpu::Extent3d {
-                width: self.size.0,
-                height: self.size.1,
-                depth_or_array_layers: 1,
+        let bind_group =
+            create_water_bind_group(device, resources, uniforms, refraction, depth, reflection);
+        *slot = Some(Self { key, bind_group });
+    }
+}
+
+fn create_water_bind_group(
+    device: &wgpu::Device,
+    resources: &RenderResources,
+    uniforms: &wgpu::Buffer,
+    refraction: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    reflection: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("file_preview.planar_frame"),
+        layout: &resources.water_frame_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("file_preview.model_viewer.water_frame_bind_group"),
-            layout: &resources.water_frame_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: resources.uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&resources.water_refraction_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.depth),
-                },
-            ],
-        });
-        self.refraction = Some(RefractionTarget {
-            texture,
-            bind_group,
-        });
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(refraction),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&resources.water_refraction_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(reflection),
+            },
+        ],
+    })
+}
+
+/// Colour MSAA + resolved colour + MSAA depth, excluding driver overhead.
+pub fn bytes_per_pixel_for_samples(format: wgpu::TextureFormat, sample_count: u32) -> u64 {
+    let count = u64::from(sample_count);
+    u64::from(format.block_copy_size(None).unwrap_or(4)) * (count + u64::from(count > 1))
+        + 4 * count
+}
+
+fn proportional_size(size: (u32, u32), limit: u32) -> (u32, u32) {
+    let (width, height) = (size.0.max(1), size.1.max(1));
+    let longest = width.max(height);
+    let limit = limit.max(1);
+    if longest <= limit {
+        return (width, height);
+    }
+    let scale = |side| (u64::from(side) * u64::from(limit) / u64::from(longest)).max(1) as u32;
+    (scale(width), scale(height))
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::proportional_size;
+
+    #[test]
+    fn target_cap_preserves_aspect_and_dimensions_within_limit() {
+        for (size, limit, expected) in [
+            ((1920, 1080), 4096, (1920, 1080)),
+            ((32768, 16384), 8192, (8192, 4096)),
+            ((16384, 32768), 8192, (4096, 8192)),
+            ((u32::MAX, u32::MAX / 2), 16384, (16384, 8191)),
+            ((0, 0), 8192, (1, 1)),
+            ((u32::MAX, 1), 1, (1, 1)),
+        ] {
+            assert_eq!(proportional_size(size, limit), expected);
+        }
+    }
+
+    #[test]
+    fn integer_rounding_changes_only_the_subpixel_short_dimension() {
+        for (width, height) in [(32000, 17003), (31, 32768), (u32::MAX, 333333)] {
+            let (x, y) = proportional_size((width, height), 8192);
+            assert!(x <= 8192 && y <= 8192 && x > 0 && y > 0);
+            let factor = 8192.0 / f64::from(width.max(height));
+            assert!((f64::from(x) - f64::from(width) * factor).abs() < 1.0);
+            assert!((f64::from(y) - f64::from(height) * factor).abs() < 1.0);
+        }
     }
 }

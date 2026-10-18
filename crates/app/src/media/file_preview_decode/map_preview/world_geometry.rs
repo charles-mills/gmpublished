@@ -9,6 +9,7 @@ pub(in super::super) fn map_fog_to_preview(fog: gmpublished_domain::scene::map::
         start: fog.start,
         end: fog.end,
         max_density: fog.max_density,
+        radial: fog.radial,
     }
 }
 
@@ -35,18 +36,42 @@ pub(in super::super) fn map_mesh_to_model_mesh(
     mesh: &gmpublished_domain::scene::map::MapMesh,
     materials: &[MaterialSlot],
 ) -> MeshData {
-    let (width, height) = material_dimensions(materials, mesh.material_index);
+    let mapping_dimensions = material_dimensions(materials, mesh.material_index);
     MeshData {
+        geometry: crate::media::preview_model::MeshGeometry::Brush,
         vertices: mesh
             .vertices
             .iter()
             .map(|vertex| ModelVertex {
+                lighting_context: 0,
+                surface_mark: 0,
                 position: vertex.position,
                 normal: vertex.normal,
-                uv: normalize_map_uv(vertex.tex_s, vertex.tex_t, width, height),
+                tangent_s: vertex.tangent_s,
+                tangent_t: vertex.tangent_t,
+                tangent_sign: vertex
+                    .normal
+                    .cross(vertex.tangent_s)
+                    .dot(vertex.tangent_t)
+                    .signum(),
+                uv: normalize_map_uv(
+                    vertex.tex_s,
+                    vertex.tex_t,
+                    mapping_dimensions.map_or(vertex.texture_size[0], |size| size.0),
+                    mapping_dimensions.map_or(vertex.texture_size[1], |size| size.1),
+                ),
                 lightmap_uv: vertex.lightmap_uv,
+                lightmap_bump_step: vertex.lightmap_bump_step,
+                lightmap_page: vertex.lightmap_page.map_or(0, |page| page.0 + 1),
                 color: Vec3::splat(1.0),
                 blend_alpha: vertex.blend_alpha,
+                opacity: vertex.opacity,
+                illumination: Vec3::splat(1.0),
+                lighting_mode: if vertex.lightmap_page.is_some() {
+                    crate::media::preview_model::vertex_lighting::LIGHTMAP
+                } else {
+                    crate::media::preview_model::vertex_lighting::WORLD_CONSTANT
+                },
             })
             .collect(),
         indices: mesh.indices.clone(),

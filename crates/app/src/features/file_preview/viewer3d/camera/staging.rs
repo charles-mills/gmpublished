@@ -7,7 +7,7 @@ use crate::features::file_preview::state::StageTransform;
 pub(in super::super) struct StageGrab {
     distance: f32,
     offset: Vec3,
-    direction: Vec3,
+    pub(super) direction: Vec3,
 }
 
 impl FlyViewer {
@@ -57,7 +57,11 @@ impl FlyViewer {
                 Some(Action::publish(Message::StageUndoRequested).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                let point = cursor.position_over(bounds)?;
+                let point = if self.mouse_captured {
+                    bounds.center()
+                } else {
+                    cursor.position_over(bounds)?
+                };
                 let (eye, direction) = cursor_ray(camera, bounds, point)?;
                 let collision = self.scene.walk_collision.as_ref()?;
                 let trace =
@@ -73,7 +77,11 @@ impl FlyViewer {
                 Some(Action::publish(Message::StageTransformChanged(transform)).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
-                let point = cursor.position_over(bounds)?;
+                let point = if self.mouse_captured {
+                    bounds.center()
+                } else {
+                    cursor.position_over(bounds)?
+                };
                 let (eye, direction) = cursor_ray(camera, bounds, point)?;
                 let local = stage.local_bounds?;
                 let distance = ray_box_distance(
@@ -96,7 +104,9 @@ impl FlyViewer {
                 });
                 Some(Action::publish(Message::StageMoveStarted).and_capture())
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) if camera.stage_grab.is_some() => {
+            Event::Mouse(mouse::Event::CursorMoved { .. })
+                if camera.stage_grab.is_some() && !self.mouse_captured =>
+            {
                 let point = cursor.position()?;
                 let (eye, direction) = cursor_ray(camera, bounds, point)?;
                 let grab = camera.stage_grab.as_mut()?;
@@ -211,6 +221,9 @@ mod tests {
         };
         let local = model.visible_bounds(Some(&pose), &[]).unwrap();
         let mut viewer = FlyViewer {
+            cpu_executor: None,
+            render_feedback: Default::default(),
+            mouse_captured: false,
             scene: std::sync::Arc::new(empty_preview(Vec3::splat(-1024.0), Vec3::splat(1024.0))),
             content_id: 1,
             fog: None,
@@ -281,6 +294,9 @@ mod tests {
             empty_model_preview, empty_preview,
         };
         let viewer = FlyViewer {
+            cpu_executor: None,
+            render_feedback: Default::default(),
+            mouse_captured: false,
             scene: std::sync::Arc::new(empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0))),
             content_id: 1,
             fog: None,

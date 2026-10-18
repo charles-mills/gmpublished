@@ -16,6 +16,7 @@ pub struct MapFog {
     pub start: f32,
     pub end: f32,
     pub max_density: f32,
+    pub radial: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +71,7 @@ pub(super) fn map_sky_camera(entities: &[MapEntity]) -> Option<MapSkyCamera> {
                     entity.prop("fogstart"),
                     entity.prop("fogend"),
                     entity.prop("fogmaxdensity"),
+                    entity.prop("fogradial"),
                     sky_camera_fog_enabled,
                 ),
             })
@@ -98,6 +100,7 @@ pub(super) fn map_fog(entities: &[MapEntity]) -> Option<MapFog> {
                 entity.prop("fogstart"),
                 entity.prop("fogend"),
                 entity.prop("fogmaxdensity"),
+                entity.prop("fogradial"),
                 fog_bool_enabled,
             )
         })
@@ -109,11 +112,13 @@ fn parse_map_fog(
     fogstart: Option<&str>,
     fogend: Option<&str>,
     fogmaxdensity: Option<&str>,
+    fogradial: Option<&str>,
     enabled: fn(&str) -> bool,
 ) -> Option<MapFog> {
     fogenable.filter(|value| enabled(value))?;
     let fog = MapFog {
         color_srgb: parse_fog_color(fogcolor?)?,
+        radial: fogradial.is_some_and(fog_bool_enabled),
         start: parse_fog_float(fogstart?)?,
         end: parse_fog_float(fogend?)?,
         max_density: fogmaxdensity

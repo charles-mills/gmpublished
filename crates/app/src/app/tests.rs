@@ -2316,6 +2316,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
     )
     .expect("fixture archive should load");
     preview_model::PreviewRequest {
+        cancellation: Default::default(),
         request_id: Generation::from_raw(1),
         archive: PreviewArchiveSource::from_gma(Arc::new(archive)),
         entry_path: "lua/autorun/init.lua".to_owned(),
@@ -2323,6 +2324,7 @@ fn file_preview_request() -> preview_model::PreviewRequest {
         size_bytes: 12,
         crc32: 0x1234_5678,
         bypass_size_limits: false,
+        map_texture_quality: Default::default(),
     }
 }
 
@@ -2358,6 +2360,8 @@ fn model_workspace_preserves_selection_without_replacing_archive_previews() {
     let data = preview_model::PreviewData::from_request(
         &request,
         preview_model::PreviewContent::Model(Arc::new(preview_model::ModelPreview {
+            model_animations: Vec::new(),
+            model_animation_issues: Vec::new(),
             pose_cache: Default::default(),
             root_lod: 0,
             selected_lod: 0,
@@ -2827,4 +2831,171 @@ fn selected_interface_language_updates_workshop_query_language_at_runtime() {
             .ctx
             .set_workshop_language(WorkshopLanguage::English)
     );
+}
+
+#[test]
+fn captured_map_escape_releases_mouse_without_requesting_modal_close() {
+    let message = super::map_mouse_capture_shortcut(
+        &keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::default(),
+    );
+    assert!(matches!(
+        message,
+        Some(RootMessage::FilePreview(
+            file_preview::Message::MouseCaptureRequested(false)
+        ))
+    ));
+    assert!(
+        super::map_mouse_capture_shortcut(
+            &keyboard::Key::Character("v".into()),
+            keyboard::Modifiers::default()
+        )
+        .is_none()
+    );
+}
+
+fn capture_map_preview(app: &mut App, workspace: bool) {
+    let state = if workspace {
+        &mut app.state.features.model_preview
+    } else {
+        &mut app.state.features.file_preview
+    };
+    let mut request = file_preview_request();
+    request.entry_path = "maps/capture.bsp".into();
+    let request = state.begin_open(request);
+    let scene = preview_model::MapPreview {
+        model_animations: Vec::new(),
+        model_animation_issues: Vec::new(),
+        texture_preparation: Default::default(),
+        prop_geometry: Default::default(),
+        renderables: Vec::new(),
+        map_skybox_renderables: Vec::new(),
+        shading_mode: crate::media::preview_model::ShadingMode::Scene,
+        surface_receivers: Vec::new(),
+        surface_lightmaps: None,
+        displacement_batches: Default::default(),
+        water_volumes: None,
+        entity_meshes: Vec::new(),
+        skybox_entity_meshes: Vec::new(),
+        scene: Arc::clone(&crate::model_animation_test_support::animated_model().scene),
+        mesh_visibility: Vec::new(),
+        map_skybox_meshes: Vec::new(),
+        model_lighting: Vec::new(),
+        model_lighting_inputs: None,
+        lightmap: None,
+        skybox: None,
+        suns: Vec::new(),
+        cubemap_probes: Vec::new(),
+        sun_material_slots: Vec::new(),
+        detail_sprites: Vec::new(),
+        map_skybox_detail_sprites: Vec::new(),
+        overlays: Vec::new(),
+        map_skybox_overlays: Vec::new(),
+        doors: Vec::new(),
+        visibility: None,
+        walk_collision: None,
+    };
+    let data = preview_model::PreviewData::from_request(
+        &request,
+        preview_model::PreviewContent::Map {
+            scene: Arc::new(scene),
+            fog: None,
+            sky_camera: None,
+            spawn: None,
+            stats: preview_model::MapStats {
+                lightmap: Default::default(),
+                face_count: 0,
+                displacement_count: 0,
+                entity_count: 0,
+                material_count: 0,
+                resolved_material_count: 0,
+                static_prop_count: 0,
+                placed_prop_count: 0,
+                skipped_prop_count: 0,
+                detail_sprite_count: 0,
+                invalid_detail_leaves: 0,
+                overlay_count: 0,
+                skybox_face_count: 0,
+                skybox_prop_count: 0,
+                skybox_detail_sprite_count: 0,
+                skybox_overlay_count: 0,
+                cluster_count: 0,
+                version: 20,
+            },
+        },
+    );
+    assert!(state.apply_loaded(request.request_id, Ok(data)));
+    let _effects = file_preview::update(state, file_preview::Message::MouseCaptureRequested(true));
+    assert!(state.mouse_captured());
+}
+
+#[test]
+fn capture_shortcuts_release_the_preview_that_owns_the_mouse() {
+    for workspace in [false, true] {
+        let mut app = App::new_for_test();
+        capture_map_preview(&mut app, workspace);
+        assert!(!app.global_shortcuts_enabled());
+        let mapper = app.mouse_capture_shortcut_mapper().unwrap();
+        assert!(
+            mapper(
+                &keyboard::Key::Character("v".into()),
+                keyboard::Modifiers::default()
+            )
+            .is_none()
+        );
+        let release = mapper(
+            &keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        )
+        .unwrap();
+        assert!(match &release {
+            RootMessage::ModelPreview(file_preview::Message::MouseCaptureRequested(false)) =>
+                workspace,
+            RootMessage::FilePreview(file_preview::Message::MouseCaptureRequested(false)) =>
+                !workspace,
+            _ => false,
+        });
+
+        let _task = app.update(release);
+        assert!(!app.preview_mouse_captured());
+        assert!(app.mouse_capture_shortcut_mapper().is_none());
+        assert!(app.state.features.modal_stack.active().is_none());
+    }
+}
+
+#[test]
+fn losing_window_focus_releases_both_preview_capture_states() {
+    let mut app = App::new_for_test();
+    capture_map_preview(&mut app, false);
+    capture_map_preview(&mut app, true);
+
+    let _task = app.update(RootMessage::WindowEvent(
+        iced::window::Id::unique(),
+        iced::window::Event::Unfocused,
+    ));
+
+    assert!(!app.state.features.file_preview.mouse_captured());
+    assert!(!app.state.features.model_preview.mouse_captured());
+}
+
+#[test]
+fn leaving_models_or_opening_a_modal_releases_workspace_capture() {
+    for open_modal in [false, true] {
+        let mut app = App::new_for_test();
+        let _task = app.update(RootMessage::Shell(shell::Message::Navigate(
+            shell::Route::Models,
+        )));
+        capture_map_preview(&mut app, true);
+
+        let _task = if open_modal {
+            app.open_modal_stack_task(modal_stack::ActiveModal::Settings)
+        } else {
+            app.update(RootMessage::Shell(shell::Message::Navigate(
+                shell::Route::Downloader,
+            )))
+        };
+
+        assert!(!app.preview_mouse_captured());
+        assert!(app.state.features.model_preview.is_open());
+    }
 }
