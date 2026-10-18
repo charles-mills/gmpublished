@@ -3483,3 +3483,191 @@ fn sparse_large_animation_sources_keep_last_frame_reads_and_policy_bounded() {
         assert_eq!(working.current_bytes(), 0);
     }
 }
+
+#[test]
+fn patch_color_modulation_preserves_shared_bc_texture_and_alpha() {
+    let block = solid_bc1_red_block();
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Tinted BC")
+            .entry(
+                "materials/test/base.vmt",
+                br#"VertexLitGeneric { "$basetexture" "test/shared" }"#.to_vec(),
+            )
+            .entry(
+                "materials/test/tinted.vmt",
+                br#"Patch { include "materials/test/base.vmt" insert { "$color2" "[0.25 1 1]" } }"#
+                    .to_vec(),
+            )
+            .entry(
+                "materials/test/shared.vtf",
+                create_bc_vtf_bytes(4, 4, VtfFormat::Dxt1, &[block.as_slice()]),
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None).with_bc_texture_support(true);
+    let original = resolver.resolve(&[], "test/base").unwrap();
+    assert!(original.is_bc());
+    let tinted = resolver.resolve(&[], "test/tinted").unwrap();
+    assert!(tinted.is_bc());
+    assert!(Arc::ptr_eq(
+        original.resident().unwrap(),
+        tinted.resident().unwrap()
+    ));
+    let material = resolver
+        .resolve_primary(&[], "test/tinted")
+        .into_material()
+        .unwrap();
+    assert_eq!(material.shader.surface().unwrap().color2, [0.25, 1.0, 1.0]);
+    let original_again = resolver.resolve(&[], "test/base").unwrap();
+    assert!(Arc::ptr_eq(
+        original.resident().unwrap(),
+        original_again.resident().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        tinted.resident().unwrap(),
+        resolver
+            .resolve(&[], "test/tinted")
+            .unwrap()
+            .resident()
+            .unwrap()
+    ));
+}
+
+#[test]
+fn color_and_color2_multiply_in_linear_space_and_preserve_texture_alpha() {
+    let archive = archive_with_texture(
+        "materials/test/tint.vmt",
+        r#"VertexLitGeneric { "$basetexture" "test/shared" "$color" "{127.5 255 255}" "$color2" "[0.5 1 0]" "$translucent" "1" }"#,
+        "materials/test/shared.vtf",
+        &[
+            255, 128, 64, 90, 255, 128, 64, 90, 255, 128, 64, 90, 255, 128, 64, 90,
+        ],
+    );
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let texture = resolver.resolve(&[], "test/tint").unwrap();
+    assert_eq!(&texture_rgba(&texture)[..4], &[255, 128, 64, 90]);
+    let material = resolver
+        .resolve_primary(&[], "test/tint")
+        .into_material()
+        .unwrap();
+    let surface = material.shader.surface().unwrap();
+    assert_eq!(surface.color, [0.5, 1.0, 1.0]);
+    assert_eq!(surface.color2, [0.5, 1.0, 0.0]);
+    assert_eq!(parse_material_color("[NaN 0 0]"), None);
+    assert_eq!(parse_material_color("[1 1]"), None);
+}
+
+#[test]
+fn editable_model_tint_retains_base_channels_hidden_by_inherited_color2() {
+    let mut texture_bytes = create_vtf_bytes(&[255, 128, 64, 90].repeat(4));
+    texture_bytes[20..24]
+        .copy_from_slice(&vformats::vtf::texture_flags::EIGHTBITALPHA.to_le_bytes());
+    let archive = PreviewArchive::from_gma(
+        GmaFixtureBuilder::new("Editable tint")
+            .entry(
+                "materials/test/base.vmt",
+                br#"VertexLitGeneric { "$basetexture" "test/shared" "$color" "[0.5 1 1]" "$translucent" "1" }"#.to_vec(),
+            )
+            .entry(
+                "materials/test/tinted.vmt",
+                br#"Patch { include "materials/test/base.vmt" insert { "$color2" "[0 0.5 1]" } }"#.to_vec(),
+            )
+            .entry(
+                "materials/test/shared.vtf",
+                texture_bytes,
+            )
+            .build(),
+    )
+    .unwrap();
+    let resolver = MaterialResolver::new(Arc::new(archive), None);
+    let original = resolver
+        .resolve_primary(&[], "test/tinted")
+        .into_material()
+        .unwrap();
+    let unchanged = resolver
+        .resolve_primary(&[], "test/base")
+        .into_material()
+        .unwrap();
+    let texture = original.texture.as_ref().unwrap();
+    assert_eq!(&texture_rgba(texture)[..4], &[255, 128, 64, 90]);
+    assert!(Arc::ptr_eq(
+        texture.resident().unwrap(),
+        unchanged.texture.as_ref().unwrap().resident().unwrap()
+    ));
+    assert_eq!(original.render_mode, RenderMode::Translucent);
+    let surface = original.shader.surface().unwrap();
+    assert_eq!(surface.color, [0.5, 1.0, 1.0]);
+    assert_eq!(surface.color2, [0.0, 0.5, 1.0]);
+}
+
+#[test]
+fn authored_skin_exports_resolve_to_distinct_preview_colors() {
+    use gmpublished_backend::model_compile::{ModelCompileRequest, compile_model};
+    use gmpublished_backend::model_project::{ModelSkin, SkinMaterial};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("cube.smd");
+    fs::write(
+        &source,
+        include_bytes!("../../../../vendor/mdlc/tests/fixtures/cube.smd"),
+    )
+    .unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([255; 4]))
+        .save(root.path().join("material.png"))
+        .unwrap();
+    let custom = root.path().join("blue.png");
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([30, 70, 170, 255]))
+        .save(&custom)
+        .unwrap();
+    let destination = root.path().join("addon");
+    let mut request = ModelCompileRequest::new(source, destination.clone());
+    request.skins = vec![
+        ModelSkin {
+            name: "Black".into(),
+            replacements: BTreeMap::from([(
+                "material".into(),
+                SkinMaterial::Tint { color: [20; 3] },
+            )]),
+        },
+        ModelSkin {
+            name: "Blue".into(),
+            replacements: BTreeMap::from([(
+                "material".into(),
+                SkinMaterial::Texture { path: custom },
+            )]),
+        },
+    ];
+    let report = compile_model(&request).unwrap();
+    let files = report.files.iter().map(|file| {
+        (
+            file.path
+                .strip_prefix(&destination)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            file.bytes,
+            file.path.clone(),
+        )
+    });
+    let resolver = MaterialResolver::new(PreviewArchiveSource::from_folder(files), None);
+    let base = resolver.resolve(&[], "material").unwrap();
+    let black = resolver.resolve(&[], "__skins/skin_1/material").unwrap();
+    let blue = resolver.resolve(&[], "__skins/skin_2/material").unwrap();
+    assert_eq!(&texture_rgba(&base)[..4], &[255; 4]);
+    assert_eq!(&texture_rgba(&black)[..4], &[255; 4]);
+    let black = resolver
+        .resolve_primary(&[], "__skins/skin_1/material")
+        .into_material()
+        .unwrap();
+    let expected = srgb_byte_to_linear(20);
+    assert!(
+        black
+            .shader
+            .surface()
+            .unwrap()
+            .color2
+            .iter()
+            .all(|value| (*value - expected).abs() < 1e-6)
+    );
+    assert_eq!(&texture_rgba(&blue)[..4], &[30, 70, 170, 255]);
+}

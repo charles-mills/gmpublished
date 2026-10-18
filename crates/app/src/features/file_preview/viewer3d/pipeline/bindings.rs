@@ -94,13 +94,22 @@ impl BindingSnapshot {
         request: &FrameRequest,
         owned: &mut ProxyBindings,
     ) -> Result<(), String> {
-        owned
-            .0
-            .retain(|slot, _| request.evaluated_materials.contains_key(slot));
+        owned.0.retain(|slot, _| {
+            request.evaluated_materials.contains_key(slot)
+                || request
+                    .material_tints
+                    .iter()
+                    .any(|(index, _)| index == slot)
+        });
         for key in &request.materials {
-            let Some(shader) = request.evaluated_materials.get(&key.slot) else {
+            let tint = request
+                .material_tints
+                .iter()
+                .find_map(|(slot, tint)| (*slot == key.slot).then_some(*tint));
+            let shader = request.evaluated_materials.get(&key.slot);
+            if shader.is_none() && tint.is_none() {
                 continue;
-            };
+            }
             if owned.0.get(&key.slot).is_none_or(|(old, _)| old != key) {
                 let slot = &request.source.render_scene().materials[key.slot];
                 let binding = cache
@@ -119,8 +128,12 @@ impl BindingSnapshot {
             }
             let binding = &owned.0[&key.slot].1;
             let mut slot = request.source.render_scene().materials[key.slot].clone();
-            slot.shader = shader.clone();
-            binding.buffers.write(queue, &slot, &key.frames);
+            if let Some(shader) = shader {
+                slot.shader = shader.clone();
+            }
+            binding
+                .buffers
+                .write_tinted(queue, &slot, &key.frames, tint);
             self.materials.0.insert(key.slot, Arc::clone(binding));
         }
         Ok(())
@@ -1056,6 +1069,7 @@ pub(super) struct FrameRequest {
     pub clock: crate::bridge::materials::AnimationClock,
     pub frame_water_time: f32,
     pub evaluated_materials: HashMap<usize, crate::bridge::materials::MaterialShader>,
+    pub material_tints: Vec<(usize, [u8; 3])>,
 }
 impl FrameRequest {
     pub fn new(
@@ -1099,6 +1113,7 @@ impl FrameRequest {
             clock,
             frame_water_time: water_time,
             evaluated_materials: HashMap::new(),
+            material_tints: primitive.material_tints.clone(),
         })
     }
     pub fn evaluate_proxies(

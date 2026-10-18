@@ -1,4 +1,9 @@
+mod model_animation;
+mod staging;
+mod workspace;
 use gmpublished_domain::math::Vec3;
+use staging::StageState;
+pub use staging::StageTransform;
 use std::time::{Duration, Instant};
 
 use iced::widget::pane_grid;
@@ -68,6 +73,10 @@ impl OrbitPose {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Modal visibility, mouse capture, expansion, and workspace loading are independent states"
+)]
 pub struct State {
     open: bool,
     mouse_captured: bool,
@@ -75,7 +84,17 @@ pub struct State {
     expanded: bool,
     load: LoadState,
     request_id: Generation,
+    camera_epoch: Generation,
     request: Option<PreviewRequest>,
+    stage: Option<StageState>,
+    stage_request: Option<PreviewRequest>,
+    workspace_retained: Option<WorkspaceRetained>,
+    workspace_pending: bool,
+    workspace_error: Option<PreviewLoadError>,
+    workspace_transform: [[f32; 4]; 4],
+    workspace_camera_bounds: Option<crate::media::preview_model::ModelBounds>,
+    workspace_material_tints: Vec<(usize, [u8; 3])>,
+    workspace_skin_remap: Option<Vec<u16>>,
     spinner: SpinnerClock,
     content_ui: ContentUiState,
     inspector_panes: split_pane::State<Pane>,
@@ -92,6 +111,14 @@ enum LoadState {
     Failed(PreviewLoadError),
 }
 
+#[derive(Debug)]
+struct WorkspaceRetained {
+    data: Box<PreviewData>,
+    request: Option<PreviewRequest>,
+}
+
+/// CP0 is the effect origin, pinned at the viewport centre; the rest fan out
+/// along +X so two-point effects (beams, tracers) are visible immediately.
 const fn default_particle_control_points() -> [Vec3; MAX_CONTROL_POINTS] {
     let mut points = [Vec3::splat(0.0); MAX_CONTROL_POINTS];
     let mut index = 1;
@@ -128,11 +155,35 @@ struct AudioUiState {
 
 #[derive(Debug, Default)]
 struct ModelUiState {
+    framing_bounds: Option<crate::media::preview_model::ModelBounds>,
+    animation: model_animation::Playback,
     render_feedback: std::sync::Arc<super::viewer3d::feedback::RenderFeedback>,
     selected_skin: usize,
     bodygroup_choices: Vec<usize>,
     orbit_pose: Option<OrbitPose>,
     phy_debug_enabled: bool,
+}
+
+impl ModelUiState {
+    fn for_model(model: &crate::media::preview_model::ModelPreview) -> Self {
+        let animation = model_animation::Playback::for_model(model);
+        let bodygroup_choices = vec![0; model.bodygroups.len()];
+        let pose =
+            animation.sequence.map(
+                |sequence| gmpublished_backend::model_decompile::PreviewPose {
+                    sequence,
+                    cycle: 0.0,
+                    parameters: animation.parameters.clone(),
+                },
+            );
+        let framing_bounds = model.visible_bounds(pose.as_ref(), &bodygroup_choices);
+        Self {
+            animation,
+            bodygroup_choices,
+            framing_bounds,
+            ..Self::default()
+        }
+    }
 }
 
 #[expect(clippy::struct_excessive_bools)]
@@ -220,11 +271,7 @@ impl ContentUiState {
                 duration_secs: *duration_secs,
                 ..AudioUiState::default()
             }),
-            PreviewContent::Model(model) => Self::Model(ModelUiState {
-                render_feedback: Default::default(),
-                bodygroup_choices: vec![0; model.bodygroups.len()],
-                ..ModelUiState::default()
-            }),
+            PreviewContent::Model(model) => Self::Model(ModelUiState::for_model(model)),
             PreviewContent::Map { .. } => Self::Map(MapUiState::default()),
             PreviewContent::Particle(_) => Self::Particle(ParticleUiState::default()),
             PreviewContent::Code { .. }
@@ -240,8 +287,11 @@ impl ContentUiState {
                 audio.duration_secs = *duration_secs;
             }
             (Self::Model(model_ui), PreviewContent::Model(model)) => {
+                let fresh = ModelUiState::for_model(model);
+                model_ui.animation = fresh.animation;
+                model_ui.framing_bounds = fresh.framing_bounds;
                 model_ui.selected_skin = 0;
-                model_ui.bodygroup_choices = vec![0; model.bodygroups.len()];
+                model_ui.bodygroup_choices = fresh.bodygroup_choices;
             }
             (Self::Map(_), PreviewContent::Map { .. })
             | (Self::Particle(_), PreviewContent::Particle(_)) => {}
@@ -259,7 +309,17 @@ impl Default for State {
             expanded: false,
             load: LoadState::Idle,
             request_id: Generation::INITIAL,
+            camera_epoch: Generation::INITIAL,
             request: None,
+            stage: None,
+            stage_request: None,
+            workspace_retained: None,
+            workspace_pending: false,
+            workspace_error: None,
+            workspace_transform: workspace::IDENTITY,
+            workspace_camera_bounds: None,
+            workspace_material_tints: vec![],
+            workspace_skin_remap: None,
             spinner: SpinnerClock::Idle,
             content_ui: ContentUiState::None,
             inspector_panes: split_pane::State::vertical(
@@ -323,14 +383,27 @@ impl State {
     pub(crate) fn error(&self) -> Option<&PreviewLoadError> {
         match &self.load {
             LoadState::Failed(error) => Some(error),
-            _ => None,
+            _ => self.workspace_error.as_ref(),
         }
     }
 
     pub(crate) fn current(&self) -> Option<&PreviewData> {
         match &self.load {
             LoadState::Ready(data) => Some(data.as_ref()),
-            _ => None,
+            _ => self
+                .workspace_retained
+                .as_ref()
+                .map(|retained| retained.data.as_ref()),
+        }
+    }
+
+    fn current_mut(&mut self) -> Option<&mut PreviewData> {
+        match &mut self.load {
+            LoadState::Ready(data) => Some(data.as_mut()),
+            _ => self
+                .workspace_retained
+                .as_mut()
+                .map(|retained| retained.data.as_mut()),
         }
     }
 
@@ -391,7 +464,10 @@ impl State {
     }
 
     pub(crate) const fn request(&self) -> Option<&PreviewRequest> {
-        self.request.as_ref()
+        match &self.workspace_retained {
+            Some(retained) => retained.request.as_ref(),
+            None => self.request.as_ref(),
+        }
     }
 
     pub(crate) fn related_preview(
@@ -426,6 +502,14 @@ impl State {
         Some(request)
     }
 
+    pub(crate) fn requested_map_texture_quality(
+        &self,
+    ) -> Option<crate::media::preview_model::MapTextureQuality> {
+        self.request
+            .as_ref()
+            .map(|request| request.map_texture_quality)
+    }
+
     pub(crate) fn reload_map_texture_quality(&mut self, reduced: bool) -> Option<PreviewRequest> {
         use crate::media::preview_model::MapTextureQuality;
         if !matches!(self.current()?.content, PreviewContent::Map { .. }) {
@@ -449,6 +533,17 @@ impl State {
         if let ContentUiState::Map(map) = &mut self.content_ui {
             map.render_feedback = Default::default();
         }
+        // Keep the last good scene and staged model available while only its map textures reload.
+        // This is not a workspace replacement: apply_loaded must preserve the stage and selection.
+        if self.workspace_retained.is_none()
+            && let LoadState::Ready(data) = std::mem::take(&mut self.load)
+        {
+            self.workspace_retained = Some(WorkspaceRetained {
+                data,
+                request: self.request.take(),
+            });
+        }
+        self.workspace_error = None;
         self.request = Some(request.clone());
         self.load = LoadState::Loading { stage: None };
         self.spinner.stop();
@@ -466,9 +561,49 @@ impl State {
         self.open = true;
         self.expanded = false;
         self.load = LoadState::Loading { stage: None };
+        self.stage = None;
+        self.stage_request = None;
+        self.workspace_retained = None;
+        self.workspace_pending = false;
+        self.workspace_error = None;
+        self.workspace_transform = workspace::IDENTITY;
+        self.workspace_camera_bounds = None;
+        self.workspace_material_tints.clear();
+        self.workspace_skin_remap = None;
         self.request = Some(request.clone());
         self.spinner.stop();
         self.content_ui = ContentUiState::from_request(&request);
+        request
+    }
+
+    pub(crate) fn begin_workspace_open(&mut self, mut request: PreviewRequest) -> PreviewRequest {
+        if let Some(previous) = &self.request {
+            previous.cancellation.cancel();
+        }
+        request.cancellation = Default::default();
+        self.set_mouse_captured(false);
+        if self.workspace_retained.is_none()
+            && matches!(&self.load, LoadState::Ready(data) if matches!(data.content, PreviewContent::Model(_) | PreviewContent::Map { .. }))
+            && let LoadState::Ready(data) = std::mem::take(&mut self.load)
+        {
+            self.workspace_retained = Some(WorkspaceRetained {
+                data,
+                request: self.request.take(),
+            });
+        }
+        if self.workspace_retained.is_none() {
+            self.content_ui = ContentUiState::from_request(&request);
+            self.stage = None;
+        }
+        self.request_id.bump();
+        request.request_id = self.request_id;
+        self.open = true;
+        self.load = LoadState::Loading { stage: None };
+        self.request = Some(request.clone());
+        self.stage_request = None;
+        self.workspace_pending = true;
+        self.workspace_error = None;
+        self.spinner.stop();
         request
     }
 
@@ -551,12 +686,28 @@ impl State {
         }
     }
 
+    pub(super) const fn camera_epoch(&self) -> Generation {
+        self.camera_epoch
+    }
+
+    pub(super) fn reset_model_camera(&mut self) {
+        if self.open && matches!(self.content_ui, ContentUiState::Model(_)) {
+            if self.workspace_camera_bounds.is_some() {
+                self.workspace_camera_bounds = self.model_bounds();
+            }
+            self.set_orbit_pose(OrbitPose::default());
+            self.camera_epoch.bump();
+        }
+    }
+
     pub(crate) const fn fly_speed_readout_visible(&self) -> bool {
         self.open
             && matches!(&self.content_ui, ContentUiState::Map(map) if map.speed_readout.is_some())
     }
 
     pub(super) fn tick_animation(&mut self, now: Instant) {
+        self.tick_stage(now);
+        self.tick_model_animation(now);
         if self.spinner_visible() {
             self.spinner.advance_or_start(now);
         }
@@ -595,20 +746,66 @@ impl State {
         request_id: Generation,
         result: Result<PreviewData, PreviewLoadError>,
     ) -> bool {
-        if !self.open || self.request_id != request_id {
+        if !self.open || self.request_id != request_id || !self.loading() {
             return false;
         }
 
         match result {
             Ok(data) => {
+                let mut selection = None;
+                if self.workspace_pending {
+                    let same_source = self.workspace_retained.as_ref().is_some_and(|retained| {
+                        retained.request.as_ref().map(|request| &request.entry_path)
+                            == self.request.as_ref().map(|request| &request.entry_path)
+                    });
+                    if !same_source {
+                        self.content_ui = ContentUiState::from_content(&data.content);
+                        self.camera_epoch.bump();
+                    } else if let ContentUiState::Model(model) = &self.content_ui {
+                        selection = Some((model.selected_skin, model.bodygroup_choices.clone()));
+                    }
+                    self.stage = None;
+                }
                 self.content_ui.reconcile_with_content(&data.content);
+                if let (
+                    Some((skin, choices)),
+                    ContentUiState::Model(ui),
+                    PreviewContent::Model(model),
+                ) = (selection, &mut self.content_ui, &data.content)
+                {
+                    ui.selected_skin = skin.min(model.skin_tables.len().saturating_sub(1));
+                    for (index, choice) in ui.bodygroup_choices.iter_mut().enumerate() {
+                        *choice = choices
+                            .get(index)
+                            .copied()
+                            .unwrap_or(0)
+                            .min(model.bodygroups[index].saturating_sub(1));
+                    }
+                }
                 self.load = LoadState::Ready(Box::new(data));
+                self.workspace_retained = None;
+                if self.workspace_pending {
+                    self.refresh_model_framing();
+                    if self.workspace_camera_bounds.is_none() {
+                        self.workspace_camera_bounds = self
+                            .model_selection()
+                            .and_then(|model| model.framing_bounds);
+                    }
+                }
             }
             Err(error) => {
-                self.content_ui = ContentUiState::None;
-                self.load = LoadState::Failed(error);
+                if let Some(retained) = self.workspace_retained.take() {
+                    self.load = LoadState::Ready(retained.data);
+                    self.request = retained.request;
+                    self.workspace_error = Some(error);
+                } else {
+                    self.content_ui = ContentUiState::None;
+                    self.load = LoadState::Failed(error);
+                }
             }
         }
+        self.workspace_pending = false;
+        self.stage_request = None;
         true
     }
 
@@ -675,6 +872,9 @@ impl State {
     }
 
     pub(crate) const fn selected_skin(&self) -> usize {
+        if let Some(stage) = &self.stage {
+            return stage.selection.selected_skin;
+        }
         match &self.content_ui {
             ContentUiState::Model(model) => model.selected_skin,
             _ => 0,
@@ -682,6 +882,9 @@ impl State {
     }
 
     pub(crate) fn bodygroup_choices(&self) -> &[usize] {
+        if let Some(stage) = &self.stage {
+            return &stage.selection.bodygroup_choices;
+        }
         match &self.content_ui {
             ContentUiState::Model(model) => &model.bodygroup_choices,
             _ => &[],
@@ -710,6 +913,9 @@ impl State {
     }
 
     pub(crate) const fn phy_debug_enabled(&self) -> bool {
+        if let Some(stage) = &self.stage {
+            return stage.selection.phy_debug_enabled;
+        }
         match &self.content_ui {
             ContentUiState::Model(model) => model.phy_debug_enabled,
             ContentUiState::Map(map) => map.phy_debug_enabled,
@@ -743,6 +949,9 @@ impl State {
     }
 
     pub(crate) fn phy_debug_control_visible(&self) -> bool {
+        if let Some(stage) = &self.stage {
+            return !stage.model.scene.phy_debug_meshes.is_empty();
+        }
         match self.current().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => !model.scene.phy_debug_meshes.is_empty(),
             Some(PreviewContent::Map { scene, .. }) => !scene.scene.phy_debug_meshes.is_empty(),
@@ -769,6 +978,10 @@ impl State {
     }
 
     pub(super) fn set_phy_debug_enabled(&mut self, enabled: bool) {
+        if let Some(stage) = &mut self.stage {
+            stage.selection.phy_debug_enabled = enabled;
+            return;
+        }
         match &mut self.content_ui {
             ContentUiState::Model(model) => model.phy_debug_enabled = enabled,
             ContentUiState::Map(map) => map.phy_debug_enabled = enabled,
@@ -776,14 +989,31 @@ impl State {
         }
     }
 
+    pub(crate) fn selected_lod(&self) -> usize {
+        self.current_model().map_or(0, |model| model.selected_lod)
+    }
+
+    pub(super) fn select_lod(&mut self, lod: usize) {
+        if let Some(stage) = &mut self.stage {
+            stage.model = stage.model.at_lod(lod);
+        } else if let Some(data) = self.current_mut()
+            && let PreviewContent::Model(model) = &mut data.content
+        {
+            *model = model.at_lod(lod);
+        }
+        self.refresh_model_framing();
+    }
+
     pub(super) fn select_skin(&mut self, skin: usize) {
         let skin_count = self
             .current_model()
             .map_or(0, |model| model.skin_tables.len());
-        if skin < skin_count
-            && let ContentUiState::Model(model) = &mut self.content_ui
-        {
-            model.selected_skin = skin;
+        if skin < skin_count {
+            if let Some(stage) = &mut self.stage {
+                stage.selection.selected_skin = skin;
+            } else if let ContentUiState::Model(model) = &mut self.content_ui {
+                model.selected_skin = skin;
+            }
         }
     }
 
@@ -794,17 +1024,27 @@ impl State {
         else {
             return;
         };
+        let model = if let Some(stage) = &mut self.stage {
+            Some(&mut stage.selection)
+        } else if let ContentUiState::Model(model) = &mut self.content_ui {
+            Some(model)
+        } else {
+            None
+        };
         if choice < choices
-            && let ContentUiState::Model(model) = &mut self.content_ui
-            && let Some(slot) = model.bodygroup_choices.get_mut(group)
+            && let Some(slot) = model.and_then(|model| model.bodygroup_choices.get_mut(group))
         {
             *slot = choice;
+            self.refresh_model_framing();
         }
     }
 
     pub(crate) fn current_model(
         &self,
     ) -> Option<&std::sync::Arc<crate::media::preview_model::ModelPreview>> {
+        if let Some(stage) = &self.stage {
+            return Some(&stage.model);
+        }
         match self.current().map(|data| &data.content) {
             Some(PreviewContent::Model(model)) => Some(model),
             _ => None,
@@ -949,6 +1189,15 @@ impl State {
         self.expanded = false;
         self.request = None;
         self.load = LoadState::Idle;
+        self.stage = None;
+        self.stage_request = None;
+        self.workspace_retained = None;
+        self.workspace_pending = false;
+        self.workspace_error = None;
+        self.workspace_transform = workspace::IDENTITY;
+        self.workspace_camera_bounds = None;
+        self.workspace_material_tints.clear();
+        self.workspace_skin_remap = None;
         self.spinner.stop();
         self.content_ui = ContentUiState::None;
     }

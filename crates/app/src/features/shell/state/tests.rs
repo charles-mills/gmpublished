@@ -125,6 +125,7 @@ fn route_labels_cover_all_sidebar_items() {
         "installed-addons",
         "downloader",
         "size-analyzer",
+        "models",
     ];
     assert_eq!(Route::ALL.map(Route::label_key), expected);
 }

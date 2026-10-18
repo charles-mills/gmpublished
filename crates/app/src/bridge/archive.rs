@@ -108,6 +108,16 @@ impl PreviewArchiveSource {
         }
     }
 
+    pub(crate) fn entry_disk_path(&self, path: &str) -> Option<&std::path::Path> {
+        match self {
+            Self::Folder(folder) => folder
+                .entries
+                .get(path)
+                .map(|entry| entry.disk_path.as_path()),
+            Self::Gma(_) => None,
+        }
+    }
+
     pub(crate) fn entry(
         &self,
         path: &str,

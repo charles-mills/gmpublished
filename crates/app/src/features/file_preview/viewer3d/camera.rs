@@ -7,6 +7,7 @@ use super::{
     door_world_bounds, half_extent, initial_door_swing, mid, mouse, shader,
 };
 use crate::bridge::materials::AnimationClock;
+use gmpublished_backend::model_decompile::PreviewPose;
 use gmpublished_domain::math::QAngle;
 use gmpublished_domain::math::Vec3;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,23 +28,32 @@ impl Default for ViewId {
 }
 
 pub struct Viewer3d {
+    pub framing_bounds: Option<crate::media::preview_model::ModelBounds>,
+    pub studio_bounds: Option<crate::media::preview_model::ModelBounds>,
     pub(crate) cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     pub(crate) render_feedback: Arc<super::feedback::RenderFeedback>,
     pub model: Arc<ModelPreview>,
+    pub animation_pose: Option<PreviewPose>,
     pub content_id: u64,
     pub skin_remap: Vec<u16>,
     pub bodygroup_choices: Vec<usize>,
     pub phy_debug_visible: bool,
     pub pose: Option<OrbitPose>,
+    pub camera_epoch: crate::generation::Generation,
+    pub reserved_space: [f32; 2],
+    pub studio_grid: bool,
+    pub live_transform: [[f32; 4]; 4],
+    pub material_tints: Vec<(usize, [u8; 3])>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Camera {
     pub(super) view_id: ViewId,
     pub(super) content_id: Option<u64>,
     /// `distance` is a multiplier over the model's auto-framed distance.
     pub(super) orbit: Orbit,
     pub(super) drag_from: Option<Point>,
+    reset_epoch: crate::generation::Generation,
     animation_started_at: Option<std::time::Instant>,
     animation_last_frame: Option<std::time::Instant>,
     pub(super) animation_clock: AnimationClock,
@@ -56,6 +66,7 @@ impl Default for Camera {
             content_id: None,
             orbit: Orbit::new(ZoomFloor::SolidMesh),
             drag_from: None,
+            reset_epoch: crate::generation::Generation::INITIAL,
             animation_started_at: None,
             animation_last_frame: None,
             animation_clock: AnimationClock::default(),
@@ -64,6 +75,14 @@ impl Default for Camera {
 }
 
 impl Camera {
+    fn sync(&mut self, viewer: &Viewer3d) {
+        if self.reset_epoch != viewer.camera_epoch {
+            self.content_id = None;
+            self.reset_epoch = viewer.camera_epoch;
+        }
+        self.ensure_spawn(viewer.content_id, viewer.pose);
+    }
+
     pub(super) fn ensure_spawn(&mut self, content_id: u64, pose: Option<OrbitPose>) {
         if self.content_id == Some(content_id) {
             return;
@@ -103,7 +122,7 @@ impl shader::Program<Message> for Viewer3d {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
-        camera.ensure_spawn(self.content_id, self.pose);
+        camera.sync(self);
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let position = cursor.position_over(bounds)?;
@@ -147,7 +166,36 @@ impl shader::Program<Message> for Viewer3d {
     }
 
     fn draw(&self, camera: &Camera, _cursor: mouse::Cursor, bounds: Rectangle) -> ModelPrimitive {
+        let mut camera = camera.clone();
+        camera.sync(self);
+        let available = Rectangle {
+            width: (bounds.width - self.reserved_space[0]).max(1.0),
+            height: (bounds.height - self.reserved_space[1]).max(1.0),
+            ..bounds
+        };
+        let mut uniforms =
+            Uniforms::for_model(&self.model, &camera, available, self.framing_bounds);
+        // Keep the scene behind floating panes while framing the model in the uncovered area.
+        let scale_x = (available.width / bounds.width.max(1.0)).min(1.0);
+        let scale_y = (available.height / bounds.height.max(1.0)).min(1.0);
+        for column in &mut uniforms.view_proj {
+            column[0] = column[0] * scale_x + column[3] * (scale_x - 1.0);
+            column[1] = column[1] * scale_y + column[3] * (1.0 - scale_y);
+        }
+        let framing = self.studio_bounds.or(self.framing_bounds).unwrap_or(
+            crate::media::preview_model::ModelBounds {
+                min: self.model.scene.bounds_min,
+                max: self.model.scene.bounds_max,
+            },
+        );
+        let studio_grid = self
+            .studio_grid
+            .then(|| super::pipeline::StudioGrid::new(uniforms.view_proj, framing));
+        uniforms.apply_model_transform(self.live_transform);
         ModelPrimitive {
+            studio_grid,
+            stage: None,
+            animation_pose: self.animation_pose.clone(),
             cpu_executor: self.cpu_executor.clone(),
             render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: None,
@@ -161,11 +209,12 @@ impl shader::Program<Message> for Viewer3d {
             preview: PreviewScene::Model(Arc::clone(&self.model)),
             content_id: self.content_id,
             skin_remap: self.skin_remap.clone(),
+            material_tints: self.material_tints.clone(),
             bodygroup_choices: self.bodygroup_choices.clone(),
             map_skybox_visible: true,
             visibility_culling: false,
             phy_debug_visible: self.phy_debug_visible,
-            uniforms: Uniforms::for_model(&self.model, camera, bounds),
+            uniforms,
             submerged: false,
             map_skybox_uniforms: None,
             sky_uniforms: None,
@@ -208,6 +257,7 @@ pub struct FlyViewer {
     pub pose: Option<FlyPose>,
     pub movement_mode: Option<MovementMode>,
     pub requested_movement_mode: Option<MovementMode>,
+    pub stage: Option<super::pipeline::StagePrimitive>,
     pub mouse_captured: bool,
 }
 
@@ -257,6 +307,8 @@ pub struct FlyCamera {
     pub(super) view_id: ViewId,
     pub(super) content_id: Option<u64>,
     pub(super) position: Option<Vec3>,
+    pub(super) stage_grab: Option<StageGrab>,
+    pub(super) stage_collision: Option<stage_collision::StageCollision>,
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     pub(super) speed: f32,
@@ -388,6 +440,10 @@ impl HeldKeys {
     }
 }
 
+mod stage_collision;
+mod staging;
+use staging::StageGrab;
+
 mod bob;
 mod duck;
 mod trace;
@@ -420,6 +476,8 @@ impl FlyCamera {
             return false;
         }
         self.content_id = Some(content_id);
+        self.stage_grab = None;
+        self.stage_collision = None;
         self.input_captured = false;
         self.held = HeldKeys::default();
         self.last_frame = None;
@@ -702,6 +760,10 @@ impl shader::Program<Message> for FlyViewer {
             self.pose,
             self.movement_mode,
         );
+        if camera.sync_stage_collision(self.stage.as_ref()) && camera.mode == MovementMode::Walk {
+            camera.grounded = false;
+            camera.last_frame = None;
+        }
         if camera.input_captured && !self.mouse_captured {
             camera.release_input();
         }
@@ -714,6 +776,9 @@ impl shader::Program<Message> for FlyViewer {
             }
             changed
         });
+        if let Some(action) = self.stage_interaction(camera, event, bounds, cursor) {
+            return Some(action);
+        }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if !self.mouse_captured {
@@ -731,8 +796,11 @@ impl shader::Program<Message> for FlyViewer {
                 camera.yaw -= delta.0 as f32 * FLY_LOOK_SENSITIVITY;
                 camera.pitch = (camera.pitch - delta.1 as f32 * FLY_LOOK_SENSITIVITY)
                     .clamp(MIN_PITCH, MAX_PITCH);
-                camera
-                    .camera_update_message()
+                let direction = camera.forward();
+                if let Some(grab) = &mut camera.stage_grab {
+                    grab.direction = direction;
+                }
+                self.camera_message(camera, Vec::new())
                     .map(|message| Action::publish(message).and_capture())
             }
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
@@ -771,8 +839,8 @@ impl shader::Program<Message> for FlyViewer {
                         camera.held.walk_toggle = true;
                         camera.toggle_walk(&self.scene);
                         camera.last_frame = None;
-                        return camera
-                            .camera_update_message()
+                        return self
+                            .camera_message(camera, Vec::new())
                             .map(|message| Action::publish(message).and_capture());
                     }
                     return Some(Action::capture());
@@ -824,7 +892,7 @@ impl shader::Program<Message> for FlyViewer {
                         camera.last_frame = None;
                         return Action::request_redraw().and_capture();
                     }
-                    camera.camera_update_message().map_or_else(
+                    self.camera_message(camera, Vec::new()).map_or_else(
                         || Action::request_redraw().and_capture(),
                         |message| Action::publish(message).and_capture(),
                     )
@@ -843,7 +911,7 @@ impl shader::Program<Message> for FlyViewer {
                     camera.last_frame = None;
                     camera.move_factor = 0.0;
                     if initialized || mode_request_seen || mode_request_changed {
-                        return camera.camera_update_message().map(Action::publish);
+                        return self.camera_message(camera, Vec::new()).map(Action::publish);
                     }
                     let redraw = camera.animated_scene || self.render_feedback.wants_redraw(*now);
                     return redraw.then(Action::request_redraw);
@@ -851,19 +919,15 @@ impl shader::Program<Message> for FlyViewer {
                 if let Some(last) = camera.last_frame {
                     let dt = now.saturating_duration_since(last).as_secs_f32().min(0.1);
                     let audio_events = camera.integrate(&self.scene, self.content_id, dt);
-                    if !audio_events.is_empty()
-                        && let Some(pose) = camera.pose()
-                    {
+                    if !audio_events.is_empty() {
                         camera.last_frame = Some(*now);
-                        return Some(Action::publish(Message::FlyCameraAndDoorAudioChanged {
-                            pose,
-                            mode: camera.mode(),
-                            door_audio_events: audio_events,
-                        }));
+                        return self
+                            .camera_message(camera, audio_events)
+                            .map(Action::publish);
                     }
                 }
                 camera.last_frame = Some(*now);
-                camera.camera_update_message().map_or_else(
+                self.camera_message(camera, Vec::new()).map_or_else(
                     || Some(Action::request_redraw()),
                     |message| Some(Action::publish(message)),
                 )
@@ -886,6 +950,23 @@ impl shader::Program<Message> for FlyViewer {
             camera.water_time,
         );
         ModelPrimitive {
+            studio_grid: None,
+            stage: self
+                .stage
+                .as_ref()
+                .map(|stage| super::pipeline::StagePrimitive {
+                    model: Arc::clone(&stage.model),
+                    animation_pose: stage.animation_pose.clone(),
+                    local_bounds: stage.local_bounds,
+                    content_id: stage.content_id,
+                    transform: stage.transform,
+                    live_transform: stage.live_transform,
+                    material_tints: stage.material_tints.clone(),
+                    skin_remap: stage.skin_remap.clone(),
+                    bodygroup_choices: stage.bodygroup_choices.clone(),
+                    phy_debug_visible: stage.phy_debug_visible,
+                }),
+            animation_pose: None,
             cpu_executor: self.cpu_executor.clone(),
             render_feedback: Some(Arc::clone(&self.render_feedback)),
             view_camera: Some(super::pipeline::view_camera::ViewCamera::fly(
@@ -917,6 +998,7 @@ impl shader::Program<Message> for FlyViewer {
             prepared_frame: std::sync::atomic::AtomicUsize::new(usize::MAX),
             skybox_transform: self.sky_camera.map(|camera| (camera.origin, camera.scale)),
             preview: PreviewScene::Map(Arc::clone(&self.scene)),
+            material_tints: Vec::new(),
             content_id: self.content_id,
             skin_remap: Vec::new(),
             bodygroup_choices: Vec::new(),
@@ -952,12 +1034,14 @@ impl shader::Program<Message> for FlyViewer {
 
     fn mouse_interaction(
         &self,
-        _camera: &FlyCamera,
+        camera: &FlyCamera,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         if self.mouse_captured {
             mouse::Interaction::Hidden
+        } else if camera.stage_grab.is_some() {
+            mouse::Interaction::Grabbing
         } else if cursor.position_over(bounds).is_some() {
             mouse::Interaction::Crosshair
         } else {
@@ -968,7 +1052,7 @@ impl shader::Program<Message> for FlyViewer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{empty_preview, floor_scene};
+    use super::super::test_support::{empty_model_preview, empty_preview, floor_scene};
     use super::*;
     use shader::Program as _;
 
@@ -987,6 +1071,7 @@ mod tests {
             pose: None,
             movement_mode: Some(MovementMode::Fly),
             requested_movement_mode: None,
+            stage: None,
             mouse_captured: captured,
             render_feedback: Default::default(),
         }
@@ -1250,6 +1335,7 @@ mod tests {
             pose: None,
             movement_mode: Some(MovementMode::Fly),
             requested_movement_mode: None,
+            stage: None,
             mouse_captured: false,
             render_feedback: Default::default(),
         }
@@ -1434,6 +1520,58 @@ mod tests {
     }
 
     #[test]
+    fn workspace_camera_reset_frames_uncovered_area_without_input() {
+        let model = Arc::new(empty_model_preview(Vec3::splat(-10.0), Vec3::splat(10.0)));
+        let mut camera = Camera::default();
+        camera.ensure_spawn(
+            7,
+            Some(OrbitPose {
+                yaw: 1.5,
+                pitch: -0.5,
+                distance: 4.0,
+            }),
+        );
+        let viewer = Viewer3d {
+            cpu_executor: None,
+            render_feedback: Default::default(),
+            model,
+            content_id: 7,
+            framing_bounds: None,
+            studio_bounds: None,
+            animation_pose: None,
+            skin_remap: Vec::new(),
+            bodygroup_choices: Vec::new(),
+            phy_debug_visible: false,
+            pose: Some(OrbitPose::default()),
+            camera_epoch: crate::generation::Generation::INITIAL.next(),
+            reserved_space: [320.0, 80.0],
+            studio_grid: false,
+            live_transform: super::super::identity_matrix(),
+            material_tints: Vec::new(),
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(1200.0, 800.0));
+        let primitive = <Viewer3d as shader::Program<Message>>::draw(
+            &viewer,
+            &camera,
+            mouse::Cursor::Unavailable,
+            bounds,
+        );
+        let center = primitive.uniforms.view_proj[3];
+        let center_x = (center[0] / center[3] + 1.0) * bounds.width * 0.5;
+        let center_y = (1.0 - center[1] / center[3]) * bounds.height * 0.5;
+        assert!((center_x - 440.0).abs() < 0.001);
+        assert!((center_y - 360.0).abs() < 0.001);
+        let radius = Vec3::splat(10.0).length();
+        let eye = Vec3::from([
+            primitive.uniforms.camera_position[0],
+            primitive.uniforms.camera_position[1],
+            primitive.uniforms.camera_position[2],
+        ]);
+        assert!((eye.length() - radius * 2.2).abs() < 0.001);
+        assert_eq!(primitive.content_id, 7);
+    }
+
+    #[test]
     fn restored_fly_mode_keeps_fly_pose() {
         let scene = floor_scene();
         let pose = FlyPose {
@@ -1511,9 +1649,23 @@ mod tests {
         let scene = empty_preview(Vec3::splat(-32.0), Vec3::splat(32.0));
         let animation = gmpublished_domain::scene::model::animation_for_tests();
         let viewer = Viewer3d {
+            framing_bounds: None,
+            studio_bounds: None,
+            animation_pose: None,
+            camera_epoch: crate::generation::Generation::INITIAL,
+            reserved_space: [0.0; 2],
+            studio_grid: false,
+            live_transform: super::super::identity_matrix(),
+            material_tints: Vec::new(),
             cpu_executor: None,
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
+                pose_cache: Default::default(),
+                physics_hulls: Default::default(),
+                root_lod: 0,
+                selected_lod: 0,
+                lods: Vec::new(),
+                animation: None,
                 model_animations: vec![ModelAnimationInstance {
                     model_path: "models/fixtures/two-bone.mdl".to_owned(),
                     entity_index: None,
@@ -1591,9 +1743,23 @@ mod tests {
         }"#,
         );
         let viewer = Viewer3d {
+            framing_bounds: None,
+            studio_bounds: None,
+            animation_pose: None,
+            camera_epoch: crate::generation::Generation::INITIAL,
+            reserved_space: [0.0; 2],
+            studio_grid: false,
+            live_transform: super::super::identity_matrix(),
+            material_tints: Vec::new(),
             cpu_executor: None,
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
+                pose_cache: Default::default(),
+                physics_hulls: Default::default(),
+                root_lod: 0,
+                selected_lod: 0,
+                lods: Vec::new(),
+                animation: None,
                 model_animations: Vec::new(),
                 model_animation_issues: Vec::new(),
                 scene: Arc::clone(&fly.scene.scene),

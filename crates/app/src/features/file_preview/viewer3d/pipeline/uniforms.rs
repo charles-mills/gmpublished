@@ -86,7 +86,7 @@ pub struct Uniforms {
     pub fog: FogUniform,
     pub water_time_sky_tint: [f32; 4],
     pub water_depth_params: [f32; 4],
-    /// World-space half-space retained by this view; zero disables clipping.
+    /// Half-space in the submitted geometry coordinates; zero disables clipping.
     pub clip_plane: [f32; 4],
     /// Exact optical plane for height fog; independent of clip bias.
     pub medium_plane: [f32; 4],
@@ -279,6 +279,47 @@ impl MaterialUniform {
 }
 
 impl Uniforms {
+    pub fn apply_model_transform(&mut self, transform: [[f32; 4]; 4]) {
+        self.view_proj = mat_mul(self.view_proj, transform);
+        self.raster_clip.view_projection = mat_mul(self.raster_clip.view_projection, transform);
+        let local_plane = |plane: [f32; 4]| {
+            transform.map(|column| column.into_iter().zip(plane).map(|(a, b)| a * b).sum())
+        };
+        self.clip_plane = local_plane(self.clip_plane);
+        self.medium_plane = local_plane(self.medium_plane);
+        let scale_squared = (0..3)
+            .map(|axis| transform[0][axis].powi(2))
+            .sum::<f32>()
+            .max(f32::MIN_POSITIVE);
+        let inverse_vector = |vector: [f32; 3]| -> [f32; 3] {
+            std::array::from_fn(|axis| {
+                (0..3)
+                    .map(|channel| transform[axis][channel] * vector[channel])
+                    .sum::<f32>()
+                    / scale_squared
+            })
+        };
+        let eye = inverse_vector(std::array::from_fn(|axis| {
+            self.camera_position[axis] - transform[3][axis]
+        }));
+        self.camera_position[..3].copy_from_slice(&eye);
+        // Radial fog measures local eye-to-vertex distance. The other modes
+        // consume projected depth, which remains in world units after M is composed.
+        if self.fog.mode == FogMode::Radial as u32 {
+            let scale = scale_squared.sqrt();
+            self.fog.start /= scale;
+            self.fog.end /= scale;
+        }
+        let light = Vec3::from(inverse_vector([
+            self.light[0],
+            self.light[1],
+            self.light[2],
+        ]))
+        .normalize()
+        .unwrap_or(SOURCE_UP);
+        self.light[..3].copy_from_slice(light.as_array());
+    }
+
     pub(super) fn with_clip_camera(mut self, camera: Option<ViewCamera>) -> Self {
         self.raster_clip = camera.map_or_else(
             || RasterClip::world_space(self.clip_plane),
@@ -471,9 +512,16 @@ impl Uniforms {
         }
     }
 
-    pub fn for_model(model: &ModelPreview, camera: &Camera, bounds: Rectangle) -> Self {
-        let center = mid(model.scene.bounds_min, model.scene.bounds_max);
-        let radius = half_extent(model.scene.bounds_min, model.scene.bounds_max).max(1.0);
+    pub fn for_model(
+        model: &ModelPreview,
+        camera: &Camera,
+        bounds: Rectangle,
+        framing_bounds: Option<crate::media::preview_model::ModelBounds>,
+    ) -> Self {
+        let bounds_min = framing_bounds.map_or(model.scene.bounds_min, |b| b.min);
+        let bounds_max = framing_bounds.map_or(model.scene.bounds_max, |b| b.max);
+        let center = mid(bounds_min, bounds_max);
+        let radius = half_extent(bounds_min, bounds_max).max(1.0);
         let distance = radius * 2.2 * camera.orbit.distance();
 
         let eye = [
@@ -1081,6 +1129,53 @@ mod tests {
         FlyCamera, FogMode, FogUniform, MapFog, MapSkyCamera, Rectangle, Uniforms, Vec3,
         average_srgb_rgba,
     };
+
+    #[test]
+    fn live_uniform_transform_preserves_world_camera_and_light() {
+        let scene = empty_preview(Vec3::splat(-128.0), Vec3::splat(128.0));
+        let camera = FlyCamera::default();
+        let mut uniforms = Uniforms::for_fly(
+            &scene,
+            &camera,
+            Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0)),
+            None,
+            0.0,
+        );
+        let original_projection = uniforms.view_proj;
+        uniforms.camera_position = [8.0, 14.0, 20.0, 0.0];
+        uniforms.light = [0.0, 1.0, 0.0, 0.35];
+        uniforms.fog = FogUniform::new(100.0, 1000.0, 0.5, FogMode::Axial);
+        let transform = [
+            [0.0, 2.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [10.0, 10.0, 10.0, 1.0],
+        ];
+        uniforms.apply_model_transform(transform);
+        assert_eq!(uniforms.camera_position, [2.0, 1.0, 5.0, 0.0]);
+        assert_eq!(uniforms.light, [1.0, 0.0, 0.0, 0.35]);
+        assert_eq!(
+            uniforms.fog,
+            FogUniform::new(100.0, 1000.0, 0.5, FogMode::Axial)
+        );
+        let local_point = [2.0, 1.0, 5.0, 1.0];
+        let world_point = [8.0, 14.0, 20.0, 1.0];
+        let project = |matrix: [[f32; 4]; 4], point: [f32; 4]| -> [f32; 4] {
+            std::array::from_fn(|row| {
+                matrix
+                    .iter()
+                    .zip(point)
+                    .map(|(col, value)| col[row] * value)
+                    .sum()
+            })
+        };
+        for (local_clip, world_clip) in project(uniforms.view_proj, local_point)
+            .into_iter()
+            .zip(project(original_projection, world_point))
+        {
+            assert!((local_clip - world_clip).abs() < 0.0001);
+        }
+    }
 
     #[test]
     fn map_shading_mode_is_shared_by_main_and_sky_views() {

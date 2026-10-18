@@ -621,7 +621,7 @@ impl Schedule {
             {
                 ordered.push(remaining.next().unwrap());
             }
-            ordered.extend_from_slice(&self.operations[group.operations]);
+            super::append_group(&mut ordered, &self.operations, &group);
         }
         ordered.extend(remaining);
         ordered

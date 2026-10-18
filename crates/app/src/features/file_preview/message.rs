@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use iced::widget::pane_grid;
 
-use super::state::{FlyPose, MovementMode, OrbitPose};
+use super::state::{FlyPose, MovementMode, OrbitPose, StageTransform};
 use crate::generation::Generation;
 use crate::media::preview_model::{
     DoorAudioEvent, PreviewData, PreviewLoadError, PreviewLoadStage, PreviewRequest,
@@ -13,6 +13,49 @@ use gmpublished_domain::particles::ControlPointIndex;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     OpenRequested(PreviewRequest),
+    WorkspaceOpenRequested(PreviewRequest),
+    WorkspaceLoadCancelled,
+    WorkspaceStageRequested {
+        model: Box<PreviewRequest>,
+        map: Box<PreviewRequest>,
+    },
+    StageLoaded(
+        Generation,
+        Box<
+            Result<
+                (
+                    PreviewData,
+                    std::sync::Arc<crate::media::preview_model::ModelPreview>,
+                ),
+                PreviewLoadError,
+            >,
+        >,
+    ),
+    StageTransformChanged(StageTransform),
+    StagePlacementRestored {
+        position: [f32; 3],
+        angles: [f32; 3],
+    },
+    StageCameraChanged {
+        pose: FlyPose,
+        mode: MovementMode,
+        transform: StageTransform,
+        door_audio_events: Vec<DoorAudioEvent>,
+    },
+    StageMoveStarted,
+    StageMoveFinished,
+    StagePositionEdited {
+        axis: usize,
+        value: String,
+    },
+    StageRotationEdited {
+        axis: usize,
+        value: String,
+    },
+    StageResetRequested,
+    StageDropRequested,
+    StageUndoRequested,
+    StagePlaceAheadRequested,
     LoadStageChanged(Generation, PreviewLoadStage),
     Loaded(Generation, Box<Result<PreviewData, PreviewLoadError>>),
     AnimationTick(Instant),
@@ -22,6 +65,14 @@ pub enum Message {
     AudioPlaybackPaused(Generation),
     AudioPlaybackEnded(Generation),
     AudioPositionUpdated(Generation, f32),
+    ModelSequenceSelected(usize),
+    ModelPlaybackToggled,
+    ModelAnimationSeeked(f32),
+    ModelPoseParameterChanged {
+        parameter: usize,
+        value: f32,
+    },
+    LodSelected(usize),
     SkinSelected(usize),
     BodygroupChoiceSelected {
         group: usize,
@@ -50,6 +101,7 @@ pub enum Message {
     MovementModeSelected(MovementMode),
     DoorAudioEvents(Vec<DoorAudioEvent>),
     OrbitPoseChanged(OrbitPose),
+    ModelCameraResetRequested,
     ParticleSystemSelected(usize),
     ParticlePlayToggled,
     ParticleRestartRequested,

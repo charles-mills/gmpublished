@@ -12,6 +12,11 @@ pub enum Effect {
         epoch: Generation,
     },
     LoadRequested(PreviewRequest),
+    LoadStage {
+        generation: Generation,
+        model: PreviewRequest,
+        map: PreviewRequest,
+    },
     ExtractRequested {
         entry_path: String,
     },

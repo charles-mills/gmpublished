@@ -40,6 +40,7 @@ use doors::{
 };
 use draw_plan::{DrawItem, DrawPlan, DrawPlans, OverlayDrawItem};
 use pipeline::ModelPrimitive;
+pub(super) use pipeline::StagePrimitive;
 use pipeline::Uniforms;
 use texture::TextureUploadLevel;
 
@@ -143,7 +144,7 @@ const DETAIL_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_a
     5 => Float32x3,
 ];
 
-fn mid(min: Vec3, max: Vec3) -> Vec3 {
+pub(super) fn mid(min: Vec3, max: Vec3) -> Vec3 {
     Vec3::new(
         (min[0] + max[0]) * 0.5,
         (min[1] + max[1]) * 0.5,
@@ -203,6 +204,15 @@ pub(super) fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32
         [0.0, f, 0.0, 0.0],
         [0.0, 0.0, near / range, -1.0],
         [0.0, 0.0, (far * near) / range, 0.0],
+    ]
+}
+
+pub(super) const fn identity_matrix() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
     ]
 }
 

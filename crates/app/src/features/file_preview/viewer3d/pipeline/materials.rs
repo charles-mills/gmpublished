@@ -186,11 +186,12 @@ pub(super) struct MaterialBuffers {
     pub model: wgpu::Buffer,
 }
 impl MaterialBuffers {
-    pub fn write(
+    pub fn write_tinted(
         &self,
         queue: &wgpu::Queue,
         slot: &MaterialSlot,
         frames: &super::frame_selection::MaterialFrames,
+        tint: Option<[u8; 3]>,
     ) {
         let prepared = PreparedMaterial::from(&slot.shader);
         let surface = prepared.surface();
@@ -245,6 +246,11 @@ impl MaterialBuffers {
             frames.normal as f32
         };
         normalize_auxiliary_frames(&mut data, surface, frames);
+        if let Some(tint) = tint {
+            let tint = tint.map(|value| f32::from(value) / 255.0);
+            data.modulation[..3].copy_from_slice(&tint);
+            data.model_modulation[..3].copy_from_slice(&tint);
+        }
         queue.write_buffer(&self.material, 0, bytemuck::bytes_of(&material));
         queue.write_buffer(&self.surface, 0, bytemuck::bytes_of(&data));
         queue.write_buffer(

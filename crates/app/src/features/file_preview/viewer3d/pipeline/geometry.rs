@@ -15,6 +15,7 @@ pub struct ViewerScene {
     pub overlays: Vec<ViewerOverlay>,
     geometry_revision: u64,
     pub(super) animation: super::skinning::Frame,
+    model_pose: Option<gmpublished_backend::model_decompile::PreviewPose>,
 }
 
 #[derive(Debug)]
@@ -22,6 +23,17 @@ pub struct ViewerMesh {
     source: Arc<UploadedMesh>,
     deformation: Option<DoorDeformation>,
     pub(super) animation: Option<super::skinning::Mesh>,
+    model_pose: Option<ModelPose>,
+    model_pose_active: bool,
+}
+
+#[derive(Debug)]
+struct ModelPose {
+    buffer: wgpu::Buffer,
+    centroid: Vec3,
+    vertices: Vec<ModelVertex>,
+    tangents: Vec<Vec3>,
+    bitangents: Vec<Vec3>,
 }
 
 #[derive(Debug)]
@@ -87,6 +99,9 @@ impl ViewerMesh {
     }
 
     pub fn vertices(&self) -> &wgpu::Buffer {
+        if let Some(pose) = self.model_pose.as_ref().filter(|_| self.model_pose_active) {
+            return &pose.buffer;
+        }
         if let Some(animation) = &self.animation {
             return &animation.buffer;
         }
@@ -97,6 +112,9 @@ impl ViewerMesh {
     }
 
     pub fn centroid(&self) -> Vec3 {
+        if let Some(pose) = self.model_pose.as_ref().filter(|_| self.model_pose_active) {
+            return pose.centroid;
+        }
         if let Some(animation) = &self.animation {
             return animation.centroid;
         }
@@ -135,8 +153,17 @@ impl ViewerScene {
         assert_eq!(self.assets.source.key(), assets.source.key());
         assert_eq!(self.meshes.len(), assets.meshes.len());
         assert_eq!(self.overlays.len(), assets.overlays.len());
+        let mut model_geometry_changed = false;
         for (mesh, source) in self.meshes.iter_mut().zip(&assets.meshes) {
+            if !Arc::ptr_eq(&mesh.source, source) {
+                mesh.model_pose = None;
+                mesh.model_pose_active = false;
+                model_geometry_changed = true;
+            }
             mesh.source = Arc::clone(source);
+        }
+        if model_geometry_changed {
+            self.model_pose = None;
         }
         for (overlay, source) in self.overlays.iter_mut().zip(&assets.overlays) {
             overlay.source = Arc::clone(source);
@@ -274,6 +301,8 @@ impl ViewerScene {
                     source: Arc::clone(source),
                     deformation,
                     animation: None,
+                    model_pose: None,
+                    model_pose_active: false,
                 }
             })
             .collect();
@@ -305,7 +334,73 @@ impl ViewerScene {
             meshes,
             overlays,
             geometry_revision: 0,
+            model_pose: None,
         }
+    }
+
+    pub(super) fn update_model_pose(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model: &crate::media::preview_model::ModelPreview,
+        pose: Option<&gmpublished_backend::model_decompile::PreviewPose>,
+    ) {
+        if self.model_pose.as_ref() == pose {
+            return;
+        }
+        let Some(geometry) = model.evaluated_geometry(pose) else {
+            return;
+        };
+        for mesh in &mut self.meshes {
+            let Some(animated) = geometry.vertices.as_ref() else {
+                mesh.model_pose_active = false;
+                continue;
+            };
+            let Some(original) = model.scene.meshes.get(mesh.scene_mesh_index) else {
+                continue;
+            };
+            let Some(animated) = animated
+                .get(mesh.scene_mesh_index)
+                .filter(|vertices| vertices.len() == original.vertices.len())
+            else {
+                continue;
+            };
+            let pose = mesh.model_pose.get_or_insert_with(|| ModelPose {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("file_preview.model_pose.vertices"),
+                    size: std::mem::size_of_val(original.vertices.as_slice()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                centroid: Vec3::ZERO,
+                vertices: original.vertices.clone(),
+                tangents: Vec::new(),
+                bitangents: Vec::new(),
+            });
+            for ((vertex, animated), original) in pose
+                .vertices
+                .iter_mut()
+                .zip(animated)
+                .zip(&original.vertices)
+            {
+                vertex.position = Vec3::from(animated.position);
+                vertex.normal = Vec3::from(animated.normal);
+                // Degenerate UVs must fall back to the authored tangent, rather
+                // than the result of a previously evaluated animation frame.
+                vertex.tangent_s = original.tangent_s;
+            }
+            update_model_tangents(
+                &mut pose.vertices,
+                &original.indices,
+                &mut pose.tangents,
+                &mut pose.bitangents,
+            );
+            pose.centroid = mesh_centroid(&pose.vertices);
+            queue.write_buffer(&pose.buffer, 0, bytemuck::cast_slice(&pose.vertices));
+            mesh.model_pose_active = true;
+        }
+        self.model_pose = pose.cloned();
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
     }
 
     pub(super) fn update_animations(
@@ -418,9 +513,105 @@ impl ViewerScene {
     }
 }
 
+fn update_model_tangents(
+    vertices: &mut [ModelVertex],
+    indices: &[u32],
+    tangents: &mut Vec<Vec3>,
+    bitangents: &mut Vec<Vec3>,
+) {
+    tangents.resize(vertices.len(), Vec3::ZERO);
+    tangents.fill(Vec3::ZERO);
+    bitangents.resize(vertices.len(), Vec3::ZERO);
+    bitangents.fill(Vec3::ZERO);
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
+        let (Some(first), Some(second), Some(third)) =
+            (vertices.get(a), vertices.get(b), vertices.get(c))
+        else {
+            continue;
+        };
+        let edge1 = second.position - first.position;
+        let edge2 = third.position - first.position;
+        let uv1 = [second.uv[0] - first.uv[0], second.uv[1] - first.uv[1]];
+        let uv2 = [third.uv[0] - first.uv[0], third.uv[1] - first.uv[1]];
+        let determinant = uv1[0] * uv2[1] - uv1[1] * uv2[0];
+        if !determinant.is_finite() || determinant.abs() < f32::EPSILON {
+            continue;
+        }
+        let tangent = (edge1 * uv2[1] - edge2 * uv1[1]) / determinant;
+        let bitangent = (edge2 * uv1[0] - edge1 * uv2[0]) / determinant;
+        for index in [a, b, c] {
+            tangents[index] += tangent;
+            bitangents[index] += bitangent;
+        }
+    }
+    for ((vertex, tangent), bitangent) in vertices
+        .iter_mut()
+        .zip(tangents.iter().copied())
+        .zip(bitangents.iter().copied())
+    {
+        let normal = vertex.normal.normalize().unwrap_or(super::SOURCE_UP);
+        let tangent = tangent - normal * tangent.dot(normal);
+        let tangent = tangent
+            .normalize()
+            .or_else(|| (vertex.tangent_s - normal * vertex.tangent_s.dot(normal)).normalize())
+            .unwrap_or_else(|| {
+                let axis = if normal[2].abs() < 0.9 {
+                    super::SOURCE_UP
+                } else {
+                    Vec3::new(1.0, 0.0, 0.0)
+                };
+                axis.cross(normal).normalize_or_zero()
+            });
+        let sign = if normal.cross(tangent).dot(bitangent) < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        vertex.tangent_s = tangent;
+        vertex.tangent_t = normal.cross(tangent) * sign;
+        vertex.tangent_sign = sign;
+    }
+}
+
 pub(super) fn initial_pose(door: &super::DoorInstance) -> DoorRenderPose {
     DoorRenderPose {
         progress: door.initial_progress.clamp(0.0, 1.0),
         swing: initial_door_swing(door.motion),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn posed_tangents_follow_deformed_uv_axes_and_mirrored_handedness() {
+        let vertex = |position, uv| ModelVertex {
+            position,
+            normal: Vec3::new(1.0, 0.0, 0.0),
+            uv,
+            tangent_s: Vec3::new(1.0, 0.0, 0.0),
+            tangent_t: Vec3::new(0.0, 1.0, 0.0),
+            tangent_sign: 1.0,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        for sign in [1.0, -1.0] {
+            let mut vertices = [
+                vertex(Vec3::ZERO, [0.0, 0.0]),
+                vertex(Vec3::new(0.0, 1.0, 0.0), [1.0, 0.0]),
+                vertex(Vec3::new(0.0, 0.0, 1.0), [0.0, sign]),
+            ];
+            update_model_tangents(&mut vertices, &[0, 1, 2], &mut Vec::new(), &mut Vec::new());
+            for vertex in vertices {
+                assert_eq!(vertex.tangent_s, Vec3::new(0.0, 1.0, 0.0));
+                assert_eq!(vertex.tangent_t, Vec3::new(0.0, 0.0, sign));
+                assert_eq!(vertex.tangent_sign, sign);
+            }
+        }
     }
 }

@@ -7,7 +7,7 @@ use std::{
 };
 
 use iced::futures::channel::mpsc as iced_mpsc;
-use iced::widget::{Space, column, container, mouse_area, row, sensor, stack, text};
+use iced::widget::{Space, column, container, mouse_area, responsive, row, sensor, stack, text};
 use iced::{
     Element, Event, Length, Padding, Point, Size, Subscription, Task, Theme, event, keyboard,
     mouse, stream, system, theme::Mode, window,
@@ -31,8 +31,8 @@ use crate::bridge::{
 };
 use crate::features::{
     context_menu, description_editor, destination_select, downloader, file_preview,
-    installed_addons, modal_stack, my_workshop, prepare_publish, prerequisites, preview_gma,
-    search, settings, shell, size_analyzer, steam_session, tasks_overlay,
+    installed_addons, modal_stack, model_manager, my_workshop, prepare_publish, prerequisites,
+    preview_gma, search, settings, shell, size_analyzer, steam_session, tasks_overlay,
 };
 use crate::format::DownloadCountFormatter;
 use crate::i18n::I18n;
@@ -51,6 +51,8 @@ mod display;
 mod drag;
 
 mod hidden_addons;
+mod model_stage;
+mod model_workspace;
 mod routes;
 pub mod runners;
 mod side_effects_addons;
@@ -58,6 +60,7 @@ mod side_effects_audio;
 mod side_effects_description_editor;
 mod side_effects_downloader;
 mod side_effects_file_preview;
+mod side_effects_model_manager;
 mod side_effects_prerequisites;
 mod side_effects_preview_gma;
 mod side_effects_publish;
@@ -181,9 +184,12 @@ pub struct FeatureStates {
     installed_addons: installed_addons::State,
     downloader: downloader::State,
     size_analyzer: size_analyzer::State,
+    model_manager: model_manager::State,
     search: search::State,
     destination_select: destination_select::State,
     file_preview: file_preview::State,
+    model_preview: file_preview::State,
+    model_preview_loading: Option<side_effects_file_preview::ModelPreviewLoad>,
     prepare_publish: prepare_publish::State,
     preview_gma: preview_gma::State,
     settings: settings::State,
@@ -519,9 +525,11 @@ pub enum RootMessage {
     InstalledAddons(installed_addons::Message),
     Downloader(downloader::Message),
     SizeAnalyzer(size_analyzer::Message),
+    ModelManager(model_manager::Message),
     Search(search::Message),
     DestinationSelect(destination_select::Message),
     FilePreview(file_preview::Message),
+    ModelPreview(file_preview::Message),
     PreparePublish(prepare_publish::Message),
     PreviewGma(preview_gma::Message),
     DescriptionEditor(description_editor::Message),
@@ -819,11 +827,13 @@ impl App {
             RootMessage::InstalledAddons(message) => self.apply_installed_addons_message(message),
             RootMessage::Downloader(message) => self.apply_downloader_message(message, update),
             RootMessage::SizeAnalyzer(message) => self.apply_size_analyzer_message(message),
+            RootMessage::ModelManager(message) => self.apply_model_manager_message(message),
             RootMessage::Search(message) => self.apply_search_message(message, update),
             RootMessage::DestinationSelect(message) => {
                 self.apply_destination_select_message(message)
             }
             RootMessage::FilePreview(message) => self.apply_file_preview_message(message),
+            RootMessage::ModelPreview(message) => self.apply_model_preview_message(message),
             RootMessage::PreparePublish(message) => {
                 self.prepare_publish_message_task(message, update)
             }
@@ -1583,7 +1593,10 @@ impl App {
             from, to,
             "shell::Effect::Navigated is emitted only when the route changes"
         );
-        self.route_transitioned_task(from, to)
+        Task::batch([
+            self.release_preview_mouse_capture_task(),
+            self.route_transitioned_task(from, to),
+        ])
     }
 
     pub(crate) fn view(&self) -> Element<'_, RootMessage> {
@@ -1591,25 +1604,36 @@ impl App {
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
             .with_cpu_executor(self.environment.ctx.cpu_executor());
         let now = Instant::now();
+        let modeller = self.state.features.shell.route() == shell::Route::Models;
         let route_body: Element<'_, RootMessage> = container(crate::widgets::settle::settle(
             self.active_route_view(),
             self.state.features.shell.route() as u64,
             &tokens,
         ))
-        .padding(tokens.spacing.pad)
+        .padding(if modeller {
+            Padding {
+                top: tokens.dims.sidebar_float_margin,
+                right: tokens.dims.sidebar_float_margin,
+                bottom: tokens.dims.sidebar_float_margin,
+                left: 0.0,
+            }
+        } else {
+            Padding::new(tokens.spacing.pad)
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| theme::styles::surface(&tokens))
         .into();
-        let body: Element<'_, RootMessage> = if self.state.chrome_strategy.mac_native_inset() {
-            column![content_drag_strip(&tokens), route_body]
-                .spacing(0.0)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        } else {
-            route_body
-        };
+        let body: Element<'_, RootMessage> =
+            if self.state.chrome_strategy.mac_native_inset() && !modeller {
+                column![content_drag_strip(&tokens), route_body]
+                    .spacing(0.0)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                route_body
+            };
 
         let content_area = row![
             shell::sidebar(
@@ -1784,15 +1808,15 @@ impl App {
         }
 
         // Capture shortcuts before a focused text input can consume them.
-        let shortcuts = if self.state.features.file_preview.mouse_captured() {
-            Some(map_mouse_capture_shortcut as _)
-        } else if self.global_shortcuts_enabled() {
-            Some(map_global_shortcut as _)
-        } else if self.settings_shortcut_should_close() {
-            Some(map_settings_toggle_shortcut as _)
-        } else {
-            None
-        };
+        let shortcuts = self.mouse_capture_shortcut_mapper().or_else(|| {
+            if self.global_shortcuts_enabled() {
+                Some(map_global_shortcut as _)
+            } else if self.settings_shortcut_should_close() {
+                Some(map_settings_toggle_shortcut as _)
+            } else {
+                None
+            }
+        });
         shortcut_capture(layers, shortcuts).into()
     }
 
@@ -1841,6 +1865,36 @@ impl App {
                 installed_addons::view(&self.state.features.installed_addons, ctx)
                     .map(RootMessage::InstalledAddons)
             }
+            (shell::Route::Models, None) => responsive(move |size| {
+                let (right, bottom) = model_manager::pane_reservation(
+                    &self.state.features.model_manager,
+                    ctx,
+                    size.width,
+                    size.height,
+                );
+                crate::widgets::rounded::rounded(
+                    stack![
+                        file_preview::workspace(
+                            &self.state.features.model_preview,
+                            ctx,
+                            right,
+                            bottom
+                        )
+                        .map(RootMessage::ModelPreview),
+                        model_manager::workspace_view(
+                            &self.state.features.model_manager,
+                            &self.state.features.model_preview,
+                            ctx,
+                        )
+                        .map(RootMessage::ModelManager),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                    ctx.tokens.radii.lg,
+                    ctx.tokens.colors.bg.into(),
+                )
+            })
+            .into(),
             (shell::Route::SizeAnalyzer, None) => {
                 size_analyzer::view(&self.state.features.size_analyzer, ctx)
                     .map(RootMessage::SizeAnalyzer)
@@ -1969,8 +2023,26 @@ impl App {
         self.apply_search_message(search::Message::DismissRequested, self.update_context)
     }
 
+    fn preview_mouse_captured(&self) -> bool {
+        self.state.features.file_preview.mouse_captured()
+            || self.state.features.model_preview.mouse_captured()
+    }
+
+    fn mouse_capture_shortcut_mapper(
+        &self,
+    ) -> Option<fn(&keyboard::Key, keyboard::Modifiers) -> Option<RootMessage>> {
+        if self.state.features.file_preview.mouse_captured() {
+            Some(map_mouse_capture_shortcut)
+        } else if self.state.features.model_preview.mouse_captured() {
+            Some(map_model_mouse_capture_shortcut)
+        } else {
+            None
+        }
+    }
+
     fn global_shortcuts_enabled(&self) -> bool {
-        self.state.features.modal_stack.active().is_none()
+        !self.preview_mouse_captured()
+            && self.state.features.modal_stack.active().is_none()
             && !self.state.features.modal_stack.overlay_active()
             && !self.state.features.context_menu.visible()
     }
@@ -2042,6 +2114,12 @@ impl App {
             file_preview::subscription(&self.state.features.file_preview)
                 .map(RootMessage::FilePreview),
         );
+        if self.state.features.shell.route() == shell::Route::Models {
+            streams.push(
+                file_preview::subscription(&self.state.features.model_preview)
+                    .map(RootMessage::ModelPreview),
+            );
+        }
         streams.push(search::subscription(&self.state.features.search).map(RootMessage::Search));
         streams
             .push(settings::subscription(&self.state.features.settings).map(RootMessage::Settings));
@@ -2051,9 +2129,7 @@ impl App {
         );
         // The context menu owns Escape while visible. Global shortcuts are
         // handled by `shortcut_capture` before the widget tree sees them.
-        if !self.state.features.context_menu.visible()
-            && !self.state.features.file_preview.mouse_captured()
-        {
+        if !self.state.features.context_menu.visible() && !self.preview_mouse_captured() {
             streams.push(
                 modal_stack::subscription(&self.state.features.modal_stack)
                     .map(RootMessage::ModalStack),
@@ -2129,6 +2205,14 @@ fn map_mouse_capture_shortcut(
     )
 }
 
+fn map_model_mouse_capture_shortcut(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> Option<RootMessage> {
+    map_mouse_capture_shortcut(key, modifiers)
+        .map(|_| RootMessage::ModelPreview(file_preview::Message::MouseCaptureRequested(false)))
+}
+
 fn map_settings_toggle_shortcut(
     key: &keyboard::Key,
     modifiers: keyboard::Modifiers,
@@ -2167,6 +2251,9 @@ fn map_global_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
         )),
         keyboard::Key::Character("4") => Some(RootMessage::GlobalShortcut(
             GlobalShortcut::NavigateRoute(shell::Route::SizeAnalyzer),
+        )),
+        keyboard::Key::Character("5") => Some(RootMessage::GlobalShortcut(
+            GlobalShortcut::NavigateRoute(shell::Route::Models),
         )),
         _ => None,
     }

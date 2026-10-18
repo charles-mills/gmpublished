@@ -17,8 +17,84 @@ pub fn update(state: &mut State, message: Message) -> Vec<Effect> {
 
 fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
     match message {
+        Message::WorkspaceLoadCancelled => {
+            state.cancel_workspace_load();
+            vec![]
+        }
+        Message::WorkspaceStageRequested { model, map } => {
+            let (model, map) = state.begin_workspace_stage(*model, *map);
+            vec![
+                Effect::AudioStopRequested,
+                Effect::LoadStage {
+                    generation: map.request_id,
+                    model,
+                    map,
+                },
+            ]
+        }
+        Message::StageLoaded(generation, result) => {
+            state.apply_stage_loaded(generation, *result);
+            Vec::new()
+        }
+        Message::StagePlacementRestored { position, angles } => {
+            state.restore_stage_placement(position, angles);
+            Vec::new()
+        }
+        Message::StageTransformChanged(transform) => {
+            state.set_stage_transform(transform);
+            Vec::new()
+        }
+        Message::StageCameraChanged {
+            pose,
+            mode,
+            transform,
+            door_audio_events,
+        } => {
+            state.set_fly_camera(pose, mode);
+            state.set_stage_transform(transform);
+            door_audio_events
+                .into_iter()
+                .map(Effect::DoorAudioEvent)
+                .collect()
+        }
+        Message::StageMoveStarted => {
+            state.stage_move_started();
+            Vec::new()
+        }
+        Message::StageMoveFinished => {
+            state.stage_move_finished();
+            Vec::new()
+        }
+        Message::StagePositionEdited { axis, value } => {
+            state.edit_stage_field(false, axis, value);
+            Vec::new()
+        }
+        Message::StageRotationEdited { axis, value } => {
+            state.edit_stage_field(true, axis, value);
+            Vec::new()
+        }
+        Message::StageDropRequested => {
+            state.drop_stage();
+            Vec::new()
+        }
+        Message::StageResetRequested => {
+            state.reset_stage();
+            Vec::new()
+        }
+        Message::StageUndoRequested => {
+            state.undo_stage();
+            Vec::new()
+        }
+        Message::StagePlaceAheadRequested => {
+            state.place_stage_ahead();
+            Vec::new()
+        }
         Message::OpenRequested(request) => {
             let request = state.begin_open(request);
+            vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
+        }
+        Message::WorkspaceOpenRequested(request) => {
+            let request = state.begin_workspace_open(request);
             vec![Effect::AudioStopRequested, Effect::LoadRequested(request)]
         }
         Message::LoadStageChanged(request_id, stage) => {
@@ -78,6 +154,26 @@ fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::AudioPositionUpdated(request_id, position_secs) => {
             state.update_audio_position(request_id, position_secs);
+            Vec::new()
+        }
+        Message::ModelSequenceSelected(sequence) => {
+            state.select_model_sequence(sequence);
+            Vec::new()
+        }
+        Message::ModelPlaybackToggled => {
+            state.toggle_model_playback();
+            Vec::new()
+        }
+        Message::ModelAnimationSeeked(cycle) => {
+            state.seek_model_animation(cycle);
+            Vec::new()
+        }
+        Message::ModelPoseParameterChanged { parameter, value } => {
+            state.set_model_pose_parameter(parameter, value);
+            Vec::new()
+        }
+        Message::LodSelected(lod) => {
+            state.select_lod(lod);
             Vec::new()
         }
         Message::SkinSelected(skin) => {
@@ -146,6 +242,10 @@ fn update_content(state: &mut State, message: Message) -> Vec<Effect> {
         }
         Message::OrbitPoseChanged(pose) => {
             state.set_orbit_pose(pose);
+            Vec::new()
+        }
+        Message::ModelCameraResetRequested => {
+            state.reset_model_camera();
             Vec::new()
         }
         Message::ParticleSystemSelected(index) => {

@@ -1067,11 +1067,12 @@ mod tests {
             let stats = uploader.lock().unwrap().stats();
             let retirement = *retirement.receiver.borrow();
             assert_eq!(retirement.failure, None);
+            // The live uploader retains staging buffers for reuse; final-close
+            // cleanup is separate from retiring its sampled images.
             if stats.sampled_image_bytes == 0
                 && stats.sampled_image_allocations == 0
                 && stats.owned_image_allocations == 0
                 && stats.owned_image_texel_bytes == 0
-                && stats.staging_bytes == 0
                 && retirement.pending == 0
             {
                 return;

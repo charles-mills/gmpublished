@@ -14,6 +14,7 @@ use super::{
     WATER_SHADER_SOURCE, WorldVisibilityPlan, half_extent, initial_door_swing, look_at, mat_mul,
     mid, perspective, shader, skybox_eye, transform_door_vertices, wgpu,
 };
+use gmpublished_backend::model_decompile::PreviewPose;
 use gmpublished_domain::math::Vec3;
 
 mod admission;
@@ -59,9 +60,12 @@ pub(super) mod sampling;
 mod screen_refraction;
 mod skinning;
 mod sky;
+mod studio_grid;
 mod sun;
 mod surface;
 mod surface_pipelines;
+pub(super) use studio_grid::StudioGrid;
+mod staging;
 mod targets;
 mod texture_barriers;
 pub(super) mod texture_upload;
@@ -129,11 +133,29 @@ impl PreviewScene {
 }
 
 #[derive(Debug)]
+pub(in super::super) struct StagePrimitive {
+    pub local_bounds: Option<crate::media::preview_model::ModelBounds>,
+    pub model: Arc<ModelPreview>,
+    pub animation_pose: Option<PreviewPose>,
+    pub content_id: u64,
+    pub transform: super::super::state::StageTransform,
+    pub live_transform: [[f32; 4]; 4],
+    pub material_tints: Vec<(usize, [u8; 3])>,
+    pub skin_remap: Vec<u16>,
+    pub bodygroup_choices: Vec<usize>,
+    pub phy_debug_visible: bool,
+}
+
+#[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "three independent render toggles plus the camera's water state"
 )]
 pub struct ModelPrimitive {
+    pub(super) stage: Option<StagePrimitive>,
+    pub(super) studio_grid: Option<StudioGrid>,
+    pub(super) animation_pose: Option<PreviewPose>,
+    pub(super) material_tints: Vec<(usize, [u8; 3])>,
     pub(super) cpu_executor: Option<gmpublished_backend::CpuExecutor>,
     pub(super) render_feedback: Option<Arc<super::feedback::RenderFeedback>>,
     pub(super) model_lighting_time: f64,
@@ -160,6 +182,11 @@ pub struct ModelPrimitive {
 
 #[derive(Debug)]
 pub struct PreparedFrame {
+    stage_view_id: ViewId,
+    stage_frame: Option<usize>,
+    staged_optics: Vec<staging::OpticalViews>,
+    staged_intersection: Option<SceneView>,
+    pub studio_grid: Option<studio_grid::StudioGridResources>,
     view_id: ViewId,
     scene_key: SceneKey,
     scene: ViewerScene,
@@ -297,6 +324,11 @@ impl shader::Primitive for ModelPrimitive {
             );
             let marks = marks::Frame::new(device, queue, &scene);
             pipeline.frames.push(PreparedFrame {
+                stage_view_id: ViewId::default(),
+                stage_frame: None,
+                staged_optics: Vec::new(),
+                staged_intersection: None,
+                studio_grid: None,
                 view_id: self.view_id,
                 scene_key,
                 scene,
@@ -336,6 +368,8 @@ impl shader::Primitive for ModelPrimitive {
                 lightmaps::Snapshot::empty(Arc::clone(&pipeline.resources.default_lightmap)),
             );
             frame.planar_views.clear();
+            frame.staged_optics.clear();
+            frame.staged_intersection = None;
             frame.water_intersection = None;
             frame.screen_overlay = None;
             frame.lighting = lighting::Frame::new(device, map);
@@ -388,6 +422,19 @@ impl shader::Primitive for ModelPrimitive {
                 .scene
                 .assets
                 .ensure_phy_debug_meshes(device, queue, scene);
+        }
+        if let Some(grid) = &self.studio_grid {
+            let resources = frame.studio_grid.get_or_insert_with(|| {
+                studio_grid::StudioGridResources::new(device, pipeline.resources.target_format)
+            });
+            queue.write_buffer(&resources.uniform_buffer, 0, bytemuck::bytes_of(grid));
+        } else {
+            frame.studio_grid = None;
+        }
+        if let PreviewScene::Model(model) = &self.preview {
+            frame
+                .scene
+                .update_model_pose(device, queue, model, self.animation_pose.as_ref());
         }
         frame.scene.update_doors(device, queue, &self.door_poses);
         frame.marks.update(queue, &frame.scene, &self.door_poses);
@@ -616,10 +663,12 @@ impl shader::Primitive for ModelPrimitive {
             ];
         }
 
-        main_uniforms = main_uniforms.with_clip_camera(self.view_camera);
+        if self.view_camera.is_some() || main_uniforms.clip_plane != self.uniforms.clip_plane {
+            main_uniforms = main_uniforms.with_clip_camera(self.view_camera);
+        }
         frame.main.world.write(queue, &main_uniforms);
         let upload = &frame.scene;
-        for surface in &frame.planar_views {
+        for surface in &mut frame.planar_views {
             let mut uniforms = main_uniforms;
             uniforms.water_depth_params[2] = f32::from(surface.reflection.is_some());
             uniforms.water_depth_params[3] = f32::from(surface.refraction.is_some());
@@ -642,15 +691,17 @@ impl shader::Primitive for ModelPrimitive {
         let mut animation_demand_cache = std::mem::take(&mut frame.animation_demand_cache);
         let animated_instances = animation_demand_cache.collect(frame);
         frame.animation_demand_cache = animation_demand_cache;
-        if let Err(error) = animated_instances.and_then(|animated_instances| {
-            frame.scene.update_animations(
-                device,
-                queue,
-                &pipeline.resources,
-                &animated_instances,
-                self.animation_clock.time_seconds,
-            )
-        }) {
+        if self.animation_pose.is_none()
+            && let Err(error) = animated_instances.and_then(|animated_instances| {
+                frame.scene.update_animations(
+                    device,
+                    queue,
+                    &pipeline.resources,
+                    &animated_instances,
+                    self.animation_clock.time_seconds,
+                )
+            })
+        {
             frame.readiness = Readiness::Rejected;
             frame.binding_request = None;
             frame.lightmap_request = None;
@@ -770,6 +821,35 @@ impl shader::Primitive for ModelPrimitive {
                 }
             }
         }
+        let stage_view_id = frame.stage_view_id;
+        frame.stage_frame = None;
+        if let Some(stage) = &self.stage {
+            let transform = mat_mul(stage.transform.matrix(), stage.live_transform);
+            let mut uniforms = pipeline.frames[slot].main.world.value;
+            uniforms.apply_model_transform(transform);
+            let primitive = self.stage_primitive(stage, stage_view_id, &uniforms);
+            primitive.prepare(pipeline, device, queue, bounds, viewport);
+            let stage_slot = primitive.prepared_frame.load(Ordering::Relaxed);
+            pipeline.frames[slot].stage_frame = Some(stage_slot);
+            if stage_slot < pipeline.frames.len() && stage_slot != slot {
+                let (source, staged) = if slot < stage_slot {
+                    let (before, after) = pipeline.frames.split_at_mut(stage_slot);
+                    (&before[slot], &mut after[0])
+                } else {
+                    let (before, after) = pipeline.frames.split_at_mut(slot);
+                    (&after[0], &mut before[stage_slot])
+                };
+                staging::prepare_optics(
+                    source,
+                    staged,
+                    transform,
+                    &primitive,
+                    device,
+                    queue,
+                    &pipeline.resources,
+                );
+            }
+        }
     }
     fn render(
         &self,
@@ -809,12 +889,18 @@ impl shader::Primitive for ModelPrimitive {
             return;
         }
         frame.scene.encode_animations(&pipeline.resources, encoder);
-        let upload = &frame.scene;
+        let stage = frame
+            .stage_frame
+            .and_then(|index| pipeline.frames.get(index))
+            .filter(|stage| stage.live && stage.readiness.can_render());
+        if let Some(stage) = stage {
+            stage.scene.encode_animations(&pipeline.resources, encoder);
+        }
         let composition = passes::render_frame(
             self,
             frame,
+            stage,
             &pipeline.resources,
-            upload,
             encoder,
             target,
             clip_bounds,
@@ -1343,3 +1429,6 @@ mod frame_identity_tests {
         assert_eq!(frames[second].sun_visibility, 0.0);
     }
 }
+
+#[cfg(test)]
+mod modeller_tests;

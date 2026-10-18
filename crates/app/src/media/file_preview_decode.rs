@@ -5,14 +5,14 @@ use std::{
     sync::Arc,
 };
 
-use crate::media::preview_model::{MeshData, ModelData};
+use crate::media::preview_model::{MeshData, ModelData, ModelVertex};
 use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, FontSystem, Metrics, PlatformFallback, Shaping,
     SwashCache, fontdb,
 };
 #[cfg(test)]
 use gmpublished_domain::scene::map::MapVisibilityBucket;
-use gmpublished_domain::scene::map::{MapDetailSprite, MapOverlay};
+use gmpublished_domain::scene::map::{ConvexHull, MapDetailSprite, MapOverlay};
 use iced::widget::image as iced_image;
 use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
@@ -21,8 +21,8 @@ use crate::bridge::materials::{
     MaterialResolution, MaterialResolver, RenderMode, ResolvedMaterialTextures,
 };
 use crate::media::preview_model::{
-    DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot, ModelPreview, ModelStats,
-    OverlayPrimitive, PHY_DEBUG_MATERIAL_NAME, ParticleMaterialSlot, ParticlePreview,
+    COLLISION_PIECE_MATERIAL_NAME, DetailSprite, InfoReason, MAX_PREVIEW_LINES, MaterialSlot,
+    ModelPreview, ModelStats, OverlayPrimitive, ParticleMaterialSlot, ParticlePreview,
     ParticleSystemInfo, PreviewContent, PreviewData, PreviewLoadError, PreviewLoadStage,
     PreviewRequest, RenderScene, Skybox, SkyboxFace, normalize_particle_material,
 };
@@ -38,6 +38,7 @@ pub use texture_preparation::{MapTextureResidency, TextureResourcePolicy};
 
 #[cfg(test)]
 use crate::media::preview_model::{CodeLine, RelatedPreviewKind, RelatedPreviewTarget};
+use map_preview::map_preview_data;
 #[cfg(test)]
 use map_preview::{
     LegacyPropLightingFallback, LoadedPropModel, LoadedPropPhysics, MaterialTable,
@@ -48,7 +49,6 @@ use map_preview::{
     normalize_map_uv, transform_prop_normal, transform_prop_position,
     unresolved_material_names_for_debug,
 };
-use map_preview::{PhyDebugMeshBuilder, map_preview_data, parse_phy_bytes};
 #[cfg(test)]
 use materials::{
     resolve_map_material_slots_parallel, resolve_map_material_slots_serial, resolve_skybox,
@@ -595,16 +595,64 @@ fn model_preview_data(
         return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     };
 
-    request.cancellation.check()?;
-    let Some(model) = load_model_catching_panic(
-        &format!("model {}", request.entry_path),
-        mdl_bytes,
-        &vvd_bytes,
-        &vtx_bytes,
-    ) else {
+    let lod_preview = match std::panic::catch_unwind(|| {
+        gmpublished_backend::model_decompile::load_model_lod_preview(
+            mdl_bytes, &vvd_bytes, &vtx_bytes,
+        )
+    }) {
+        Ok(Ok(model)) => model,
+        result => {
+            log::debug!(
+                "model LOD preview {} failed: {result:?}",
+                request.entry_path
+            );
+            return Ok(info_preview_data(request, InfoReason::DecodeFailed));
+        }
+    };
+    let root_lod = lod_preview.root_lod;
+    let models: Vec<ModelData> = lod_preview
+        .levels
+        .into_iter()
+        .map(ModelData::from)
+        .collect();
+    let Some(model) = models.first() else {
         return Ok(info_preview_data(request, InfoReason::DecodeFailed));
     };
-
+    let skin_tables = model.skin_tables.clone();
+    let bodygroups = model.bodygroups.clone();
+    let skeletal = model.bone_count > 0
+        && model.sequence_count > 0
+        && mdl_bytes
+            .get(152..156)
+            .and_then(|flags| <[u8; 4]>::try_from(flags).ok())
+            .is_some_and(|flags| u32::from_le_bytes(flags) & vformats::mdl::FLAG_STATIC_PROP == 0);
+    let animation = skeletal.then(|| {
+        let ani = request.archive.entry_bytes(&format!("{stem}.ani")).ok();
+        gmpublished_backend::model_decompile::load_animation_preview(
+            mdl_bytes,
+            &vvd_bytes,
+            &vtx_bytes,
+            ani.as_deref(),
+        )
+        .and_then(|animation| {
+            if models.iter().enumerate().all(|(index, model)| {
+                animation
+                    .mesh_vertex_counts_lod(root_lod + index)
+                    .eq(model.meshes.iter().map(|mesh| mesh.vertices.len()))
+            }) {
+                Ok(Arc::new(animation))
+            } else {
+                Err(
+                    gmpublished_backend::model_decompile::DecompileError::InvalidModel(
+                        "Animation bindings do not match preview geometry".into(),
+                    ),
+                )
+            }
+        })
+        .map_err(|error| error.to_string())
+    });
+    let (model_animations, model_animation_issues) =
+        crate::media::preview_model::model_preview_animations(model, &request.entry_path);
     let resolver = TexturePreparationResources::for_archive_cancellable(
         request.archive.clone(),
         gmod_dir,
@@ -612,11 +660,40 @@ fn model_preview_data(
         request.cancellation.clone(),
     )?
     .resolver;
+    let (physics_hulls, collision) =
+        model_physics(mdl_bytes, stem, &resolver, model.material_names.len())?;
+    let lods: Vec<_> = models
+        .into_iter()
+        .map(|model| model_lod_scene(model, &collision, &resolver))
+        .collect::<Result<_, _>>()?;
+    Ok(PreviewData::from_request(
+        request,
+        PreviewContent::Model(std::sync::Arc::new(ModelPreview {
+            physics_hulls,
+            model_animations,
+            model_animation_issues,
+            pose_cache: Default::default(),
+            animation,
+            scene: Arc::clone(&lods[0]),
+            root_lod,
+            selected_lod: root_lod,
+            lods,
+            skin_tables,
+            bodygroups,
+        })),
+    ))
+}
+
+fn model_lod_scene(
+    model: ModelData,
+    collision: &[MeshData],
+    resolver: &MaterialResolver,
+) -> Result<Arc<RenderScene>, crate::preparation::Cancelled> {
     let mut materials = model
         .material_names
         .iter()
         .map(|name| {
-            request.cancellation.check()?;
+            resolver.check_cancelled()?;
             let resolved = resolver.resolve_primary(&model.material_dirs, name);
             let texture = resolved
                 .material()
@@ -649,13 +726,12 @@ fn model_preview_data(
             .count(),
     )
     .unwrap_or(u32::MAX);
-    let phy_debug_meshes = model_phy_debug_mesh(stem, &resolver, materials.len());
-    if phy_debug_meshes.is_some() {
+    if !collision.is_empty() {
         materials.push(MaterialSlot {
             resolution: Default::default(),
             canonical_name: None,
             shader: Default::default(),
-            name: PHY_DEBUG_MATERIAL_NAME.to_owned(),
+            name: COLLISION_PIECE_MATERIAL_NAME.to_owned(),
             texture: None,
             texture2: None,
             render_mode: RenderMode::Translucent,
@@ -663,36 +739,24 @@ fn model_preview_data(
         });
     }
 
-    request.cancellation.check()?;
-    let (model_animations, model_animation_issues) =
-        crate::media::preview_model::model_preview_animations(&model, &request.entry_path);
     let (bounds_min, bounds_max) = crate::media::preview_model::animation_local_bounds(&model)
         .unwrap_or((model.bounds_min, model.bounds_max));
-    Ok(PreviewData::from_request(
-        request,
-        PreviewContent::Model(std::sync::Arc::new(ModelPreview {
-            model_animations,
-            model_animation_issues,
-            scene: std::sync::Arc::new(RenderScene {
-                stats: ModelStats {
-                    bone_count: model.bone_count,
-                    sequence_count: model.sequence_count,
-                    vertex_count: model.vertex_count,
-                    triangle_count: model.triangle_count,
-                    mesh_count: u32::try_from(model.meshes.len()).unwrap_or(u32::MAX),
-                    material_count: u32::try_from(model.material_names.len()).unwrap_or(u32::MAX),
-                    resolved_material_count,
-                },
-                meshes: model.meshes,
-                materials,
-                phy_debug_meshes: phy_debug_meshes.into_iter().collect(),
-                bounds_min,
-                bounds_max,
-            }),
-            skin_tables: model.skin_tables,
-            bodygroups: model.bodygroups,
-        })),
-    ))
+    Ok(Arc::new(RenderScene {
+        stats: ModelStats {
+            bone_count: model.bone_count,
+            sequence_count: model.sequence_count,
+            vertex_count: model.vertex_count,
+            triangle_count: model.triangle_count,
+            mesh_count: u32::try_from(model.meshes.len()).unwrap_or(u32::MAX),
+            material_count: u32::try_from(model.material_names.len()).unwrap_or(u32::MAX),
+            resolved_material_count,
+        },
+        meshes: model.meshes,
+        materials,
+        phy_debug_meshes: collision.to_vec(),
+        bounds_min,
+        bounds_max,
+    }))
 }
 
 fn load_model_companions(
@@ -716,43 +780,120 @@ fn load_model_companions(
     Some((vvd_bytes, vtx_bytes))
 }
 
-fn model_phy_debug_mesh(
+fn model_physics(
+    mdl_bytes: &[u8],
     stem: &str,
     resolver: &MaterialResolver,
     material_index: usize,
-) -> Option<MeshData> {
+) -> Result<(Arc<[ConvexHull]>, Vec<MeshData>), crate::preparation::Cancelled> {
+    resolver.check_cancelled()?;
     let phy_path = format!("{stem}.phy");
-    let bytes = resolver.entry_bytes(&phy_path)?;
-    let physics = parse_phy_bytes(&bytes, &format!("model preview physics {phy_path}")).ok()?;
-    let mut builder = PhyDebugMeshBuilder::default();
-    builder.push_loaded_phy(&physics, |position| position);
-    if builder.truncated {
-        log::debug!(
-            "model preview .phy debug mesh truncated at {PHY_DEBUG_TRIANGLE_CAP} triangles"
-        );
+    let Some(bytes) = resolver.entry_bytes(&phy_path) else {
+        return Ok((Arc::default(), Vec::new()));
+    };
+    let pieces =
+        match gmpublished_backend::model_decompile::load_collision_meshes(mdl_bytes, &bytes) {
+            Ok(pieces) => pieces,
+            Err(error) => {
+                log::debug!("model preview physics {phy_path} failed: {error}");
+                return Ok((Arc::default(), Vec::new()));
+            }
+        };
+    resolver.check_cancelled()?;
+    let debug_meshes = model_phy_debug_meshes(&pieces, material_index);
+    let mut hulls = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        resolver.check_cancelled()?;
+        hulls.push(ConvexHull {
+            vertices: piece.vertices.into_iter().map(Vec3::from).collect(),
+            triangles: piece
+                .indices
+                .chunks_exact(3)
+                .map(|triangle| {
+                    [
+                        triangle[0] as usize,
+                        triangle[1] as usize,
+                        triangle[2] as usize,
+                    ]
+                })
+                .collect(),
+        });
     }
-    builder.finish(material_index)
+    Ok((hulls.into(), debug_meshes))
+}
+
+fn model_phy_debug_meshes(
+    pieces: &[gmpublished_backend::model_decompile::CollisionMesh],
+    material_index: usize,
+) -> Vec<MeshData> {
+    let palette = [
+        Vec3::new(0.48, 0.15, 0.10),
+        Vec3::new(0.12, 0.43, 0.24),
+        Vec3::new(0.12, 0.28, 0.49),
+        Vec3::new(0.45, 0.36, 0.08),
+        Vec3::new(0.32, 0.16, 0.46),
+        Vec3::new(0.05, 0.40, 0.43),
+    ];
+    let mut meshes = Vec::new();
+    let mut triangle_count = 0usize;
+    for (piece, mesh) in pieces.iter().enumerate() {
+        let mut vertices = Vec::new();
+        for triangle in mesh.indices.chunks_exact(3) {
+            if triangle_count >= PHY_DEBUG_TRIANGLE_CAP {
+                break;
+            }
+            let points = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                let [x, y, z] = mesh.vertices[index as usize];
+                Vec3::new(x, y, z)
+            });
+            let normal = (points[1] - points[0])
+                .cross(points[2] - points[0])
+                .normalize_or_zero();
+            if normal.length_squared() <= f32::EPSILON {
+                continue;
+            }
+            vertices.extend(points.map(|position| ModelVertex {
+                position,
+                normal,
+                uv: [0.0; 2],
+                lightmap_uv: [0.0; 2],
+                color: palette[piece % palette.len()],
+                blend_alpha: 0.0,
+                opacity: 1.0,
+                illumination: Vec3::splat(1.0),
+                lighting_mode: crate::media::preview_model::vertex_lighting::MODEL_DRAW
+                    | crate::media::preview_model::vertex_lighting::PREVIEW,
+                lightmap_bump_step: 0.0,
+                lightmap_page: 0,
+                tangent_s: Vec3::new(1.0, 0.0, 0.0),
+                tangent_t: Vec3::new(0.0, 1.0, 0.0),
+                tangent_sign: 1.0,
+                lighting_context: 0,
+                surface_mark: 0,
+            }));
+            triangle_count += 1;
+        }
+        if !vertices.is_empty() {
+            meshes.push(MeshData {
+                geometry: crate::media::preview_model::MeshGeometry::Model,
+                indices: (0..vertices.len() as u32).collect(),
+                vertices,
+                material_index,
+                bodygroup: 0,
+                bodygroup_choice: 0,
+            });
+        }
+        if triangle_count >= PHY_DEBUG_TRIANGLE_CAP {
+            break;
+        }
+    }
+    meshes
 }
 
 const SOURCE_MODEL_ASSEMBLY: vformats::mdl::ModelAssemblyOptions =
     vformats::mdl::ModelAssemblyOptions {
         vertex_compression: vformats::mdl::VertexCompression::SourceUbyte4,
     };
-
-fn load_model_catching_panic(
-    context: &str,
-    mdl_bytes: &[u8],
-    vvd_bytes: &[u8],
-    vtx_bytes: &[u8],
-) -> Option<ModelData> {
-    load_model_catching_panic_with_options(
-        context,
-        mdl_bytes,
-        vvd_bytes,
-        vtx_bytes,
-        SOURCE_MODEL_ASSEMBLY,
-    )
-}
 
 fn load_model_catching_panic_with_options(
     context: &str,

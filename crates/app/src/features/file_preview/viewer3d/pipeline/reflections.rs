@@ -134,6 +134,7 @@ impl Plane {
 
 #[derive(Debug)]
 pub struct ViewUniforms {
+    pub(super) value: Uniforms,
     pub buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
 }
@@ -151,14 +152,20 @@ impl ViewUniforms {
             lighting,
             surface_marks,
         );
-        Self { buffer, bind_group }
+        Self {
+            value: <Uniforms as bytemuck::Zeroable>::zeroed(),
+            buffer,
+            bind_group,
+        }
     }
-    pub fn write(&self, queue: &wgpu::Queue, uniforms: &Uniforms) {
+    pub fn write(&mut self, queue: &wgpu::Queue, uniforms: &Uniforms) {
+        self.value = *uniforms;
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(uniforms));
     }
 }
 #[derive(Debug)]
 pub struct SceneView {
+    pub(super) entities: super::view_preparation::Entities,
     pub world_groups: super::transparency::WorldDrawGroups,
     pub sun: super::sun::gpu::Frame,
     pub world: ViewUniforms,
@@ -185,6 +192,7 @@ impl SceneView {
         surface_marks: &wgpu::Buffer,
     ) -> Self {
         Self {
+            entities: super::view_preparation::Entities::All,
             world_groups: super::transparency::WorldDrawGroups::ALL,
             sun: super::sun::gpu::Frame::default(),
             world: ViewUniforms::new(device, resources, lighting, surface_marks),

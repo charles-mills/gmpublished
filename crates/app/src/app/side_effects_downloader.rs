@@ -21,7 +21,18 @@ impl App {
         )
     }
 
-    pub(super) fn handle_file_drop(&self, path: PathBuf) -> Task<RootMessage> {
+    pub(super) fn handle_file_drop(&mut self, path: PathBuf) -> Task<RootMessage> {
+        if self.state.features.modal_stack.active().is_none()
+            && self.state.features.shell.route() == crate::features::shell::Route::Models
+            && crate::features::model_manager::SourceKind::of(&path).is_some()
+        {
+            if self.state.features.model_manager.busy() {
+                return Task::none();
+            }
+            return self.apply_model_manager_message(
+                crate::features::model_manager::Message::SourceDropped(path),
+            );
+        }
         let prepare_publish_accepts = self.state.features.modal_stack.active()
             == Some(modal_stack::ActiveModal::PreparePublish)
             && self.state.features.prepare_publish.open();

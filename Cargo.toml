@@ -6,6 +6,7 @@ members = [
 ]
 exclude = [
     "crates/vendor/iced_wgpu",
+    "crates/vendor/mdlc",
     "crates/vendor/iced_core",
     "crates/vendor/iced_runtime",
     "crates/vendor/iced_winit",

@@ -19,16 +19,19 @@ test-support = []
 [dependencies]
 vformats.workspace = true
 arc-swap.workspace = true
+base64 = "0.13"
 crc32fast.workspace = true
 dirs.workspace = true
 dunce = "1.0.5"
-image = { workspace = true, features = ["gif"] }
+image = { workspace = true, features = ["gif", "tga", "bmp"] }
+mdlc = { path = "../vendor/mdlc" }
 log.workspace = true
 lzma-rust2.workspace = true
 nucleo-matcher.workspace = true
 opener.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
+same-file = "1"
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["std"] }
 steamlocate.workspace = true
@@ -38,6 +41,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 trash.workspace = true
 ureq.workspace = true
+ufbx = "0.11"
 walkdir.workspace = true
 
 [dev-dependencies]

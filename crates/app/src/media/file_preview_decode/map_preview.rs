@@ -50,8 +50,7 @@ mod world_geometry;
 
 use build::{PropBuildPhase, build_props};
 pub(super) use collision::{
-    PhyDebugMeshBuilder, enrich_walk_collision_with_prop_collision,
-    phy_debug_mesh_from_loaded_prop_models,
+    enrich_walk_collision_with_prop_collision, phy_debug_mesh_from_loaded_prop_models,
 };
 use diagnostics::{
     MapPreviewStatuses, MapPreviewTimings, lightmap_status, log_map_preview_summary,
@@ -73,7 +72,7 @@ pub(super) use props::{
     DoorBakeResult, LoadedPhy, LoadedPropModel, LoadedPropPhysics, PropBakeResult,
     PropBakeSkipStats, PropCollisionStats, SelectedPropPlacement,
     bake_static_props_from_loaded_model_cache, load_prop_model, log_prop_door_material_resolution,
-    parse_phy_bytes, refresh_entity_prop_aabb_visibility, transform_prop_position,
+    refresh_entity_prop_aabb_visibility, transform_prop_position,
 };
 #[cfg(test)]
 pub(super) use props::{

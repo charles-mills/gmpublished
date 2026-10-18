@@ -718,6 +718,12 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
         })
         .collect();
     let source = PreviewScene::Model(Arc::new(ModelPreview {
+        physics_hulls: Default::default(),
+        pose_cache: Default::default(),
+        root_lod: 0,
+        selected_lod: 0,
+        lods: Vec::new(),
+        animation: None,
         model_animations: Vec::new(),
         model_animation_issues: Vec::new(),
         skin_tables: Vec::new(),
@@ -745,6 +751,7 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
             frame_seconds: 1.0 / 60.0,
         };
         FrameRequest {
+            material_tints: Vec::new(),
             page_needs: OnceLock::new(),
             source: source.clone(),
             materials: slots

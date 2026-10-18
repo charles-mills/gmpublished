@@ -1,5 +1,8 @@
 use std::{env, error::Error, fmt::Write as _, fs, io, io::Write as _, path::PathBuf};
 
+#[path = "build_support/steam_runtime.rs"]
+mod steam_runtime;
+
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=GMPUBLISHED_STEAM_RUNTIME_DIR");
@@ -133,7 +136,7 @@ fn copy_steam_runtime_for_local_build() -> io::Result<()> {
         return Ok(());
     };
 
-    fs::copy(&runtime_source, target_dir.join(steam_runtime_file_name()))?;
+    steam_runtime::copy_runtime(&runtime_source, &target_dir.join(steam_runtime_file_name()))?;
     Ok(())
 }
 

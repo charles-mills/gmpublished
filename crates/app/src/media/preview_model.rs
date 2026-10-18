@@ -7,6 +7,7 @@ use crate::bridge::archive::{PreviewArchiveSource, PreviewArchiveSourceError};
 use crate::bridge::materials::{RenderMode, ResolvedTexture};
 use crate::bridge::tasks::ScheduleError;
 use crate::generation::Generation;
+pub const COLLISION_PIECE_MATERIAL_NAME: &str = "__gmpublished_collision_piece";
 #[path = "geometry_diagnostics.rs"]
 mod geometry_diagnostics;
 #[path = "model_animation.rs"]
@@ -34,6 +35,8 @@ pub use model_lighting::{
 };
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreviewLoadError {
+    #[error("{0}")]
+    Decode(String),
     #[error(transparent)]
     Cancelled(#[from] crate::preparation::Cancelled),
     #[error(transparent)]
@@ -422,13 +425,63 @@ pub struct RenderScene {
     pub(crate) bounds_max: Vec3,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[path = "preview_model/model_bounds.rs"]
+mod model_bounds;
+pub use model_bounds::{ModelBounds, PoseCache};
+
+#[derive(Clone, Debug)]
 pub struct ModelPreview {
+    /// Complete PHY hulls in model bind space, independent of the debug drawing budget.
+    pub(crate) physics_hulls: Arc<[gmpublished_domain::scene::map::ConvexHull]>,
+    pub(crate) pose_cache: Arc<PoseCache>,
+    pub(crate) root_lod: usize,
+    pub(crate) selected_lod: usize,
+    pub(crate) lods: Vec<Arc<RenderScene>>,
+    pub(crate) animation:
+        Option<Result<Arc<gmpublished_backend::model_decompile::ModelAnimationPreview>, String>>,
     pub(crate) model_animations: Vec<ModelAnimationInstance>,
     pub(crate) model_animation_issues: Vec<ModelAnimationIssue>,
     pub(crate) scene: Arc<RenderScene>,
     pub(crate) skin_tables: Vec<Vec<u16>>,
     pub(crate) bodygroups: Vec<usize>,
+}
+
+impl PartialEq for ModelPreview {
+    fn eq(&self, other: &Self) -> bool {
+        self.root_lod == other.root_lod
+            && (Arc::ptr_eq(&self.physics_hulls, &other.physics_hulls)
+                || self.physics_hulls == other.physics_hulls)
+            && self.selected_lod == other.selected_lod
+            && self.lods == other.lods
+            && self.animation == other.animation
+            && self.model_animations == other.model_animations
+            && self.model_animation_issues == other.model_animation_issues
+            && self.scene == other.scene
+            && self.skin_tables == other.skin_tables
+            && self.bodygroups == other.bodygroups
+    }
+}
+
+impl ModelPreview {
+    pub(crate) fn lod_count(&self) -> usize {
+        self.lods.len().max(1)
+    }
+
+    pub(crate) fn at_lod(self: &Arc<Self>, lod: usize) -> Arc<Self> {
+        let index = lod.saturating_sub(self.root_lod).min(self.lod_count() - 1);
+        if self.selected_lod == self.root_lod + index {
+            return Arc::clone(self);
+        }
+        Arc::new(Self {
+            selected_lod: self.root_lod + index,
+            scene: self
+                .lods
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| Arc::clone(&self.scene)),
+            ..self.as_ref().clone()
+        })
+    }
 }
 
 #[repr(u32)]
