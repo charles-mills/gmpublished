@@ -515,7 +515,6 @@ mod tests {
         let mut map =
             super::super::super::test_support::empty_preview(Vec3::ZERO, Vec3::splat(1.0));
         Arc::make_mut(&mut map.scene).materials.push(MaterialSlot {
-            tint_base: None,
             resolution: MaterialResolutionOutcome::Loaded,
             canonical_name: Some("test/planned".to_owned()),
             name: "test/planned".to_owned(),

@@ -9671,6 +9671,61 @@ Connections:  {
     }
 
     #[test]
+    fn automatic_fbx_transforms_keep_geometry_and_animation_in_the_same_scaled_space() {
+        let directory = tmpdir("automatic-fbx-affine-animation");
+        let source = MIN_FBX
+            .replace(
+                "\"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0",
+                "\"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",1,2,3",
+            )
+            .replace(
+                "\"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",1,1,1",
+                "\"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",2,3,4",
+            )
+            .replace(
+                "\"d|X\", \"Number\", \"\", \"A\",0",
+                "\"d|X\", \"Number\", \"\", \"A\",1",
+            )
+            .replace(
+                "\"d|Z\", \"Number\", \"\", \"A\",0",
+                "\"d|Z\", \"Number\", \"\", \"A\",3",
+            )
+            .replace("600,500, \"d|X\"", "600,500, \"d|Y\"");
+        write(&directory, "source.fbx", &source);
+        let path = directory.join("source.fbx");
+        let opts = crate::fbx::FbxOpts {
+            axis: Some(crate::fbx::ForcedAxis::Auto),
+            scale: 0.5,
+            ..Default::default()
+        };
+        let geometry = crate::fbx::read(&path, "affine geometry", &opts).unwrap();
+        assert_eq!(geometry.smd.frames[0].poses[0].position, [0.5, -1.5, 1.0]);
+        let mut minimum = [f32::INFINITY; 3];
+        let mut maximum = [f32::NEG_INFINITY; 3];
+        for vertex in geometry
+            .smd
+            .triangles
+            .iter()
+            .flat_map(|triangle| &triangle.vertices)
+        {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex.position[axis]);
+                maximum[axis] = maximum[axis].max(vertex.position[axis]);
+            }
+        }
+        assert_eq!(minimum, [-0.5, -3.5, -0.5]);
+        assert_eq!(maximum, [1.5, 0.5, 2.5]);
+        let animation =
+            crate::fbx::read_frames(&path, "affine animation", None, 1.0, &opts).unwrap();
+        assert_eq!(animation.nodes, geometry.smd.nodes);
+        let last = animation.frames.last().unwrap().poses[0].position;
+        for (actual, expected) in last.into_iter().zip([0.5, -1.5, 2.5]) {
+            assert!((actual - expected).abs() < 1e-4, "{last:?}");
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn static_prop_does_not_unbake_a_rotated_fbx_root() {
         let directory = tmpdir("automatic-static-fbx-root");
         let source = MIN_FBX

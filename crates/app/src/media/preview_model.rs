@@ -431,6 +431,8 @@ pub use model_bounds::{ModelBounds, PoseCache};
 
 #[derive(Clone, Debug)]
 pub struct ModelPreview {
+    /// Complete PHY hulls in model bind space, independent of the debug drawing budget.
+    pub(crate) physics_hulls: Arc<[gmpublished_domain::scene::map::ConvexHull]>,
     pub(crate) pose_cache: Arc<PoseCache>,
     pub(crate) root_lod: usize,
     pub(crate) selected_lod: usize,
@@ -447,6 +449,8 @@ pub struct ModelPreview {
 impl PartialEq for ModelPreview {
     fn eq(&self, other: &Self) -> bool {
         self.root_lod == other.root_lod
+            && (Arc::ptr_eq(&self.physics_hulls, &other.physics_hulls)
+                || self.physics_hulls == other.physics_hulls)
             && self.selected_lod == other.selected_lod
             && self.lods == other.lods
             && self.animation == other.animation
@@ -836,7 +840,6 @@ pub struct MaterialSlot {
     pub(crate) shader: crate::bridge::materials::MaterialShader,
     pub(crate) name: String,
     pub(crate) texture: Option<Arc<ResolvedTexture>>,
-    pub(crate) tint_base: Option<Arc<ResolvedTexture>>,
     pub(crate) texture2: Option<Arc<ResolvedTexture>>,
     pub(crate) render_mode: RenderMode,
     pub(crate) alpha_policy: crate::bridge::materials::TextureAlphaPolicy,
@@ -1133,7 +1136,6 @@ mod tests {
                 meshes: vec![mesh(0), mesh(1)],
                 materials: vec![
                     MaterialSlot {
-                        tint_base: None,
                         resolution: Default::default(),
                         canonical_name: None,
                         shader: Default::default(),
@@ -1144,7 +1146,6 @@ mod tests {
                         alpha_policy: RenderMode::Opaque.texture_alpha_policy(),
                     },
                     MaterialSlot {
-                        tint_base: None,
                         resolution: Default::default(),
                         canonical_name: None,
                         shader: Default::default(),

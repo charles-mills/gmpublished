@@ -25,6 +25,7 @@ pub fn load_model_lod_preview(
     let limits = vformats::Limits::default();
     let mut model =
         vformats::mdl::parse_mdl(&header, &limits).map_err(|error| invalid(error.to_string()))?;
+    super::normalize_material_names(&mut model);
     let vertices =
         vformats::mdl::parse_vvd(raw_vvd, &limits).map_err(|error| invalid(error.to_string()))?;
     let mut topology =

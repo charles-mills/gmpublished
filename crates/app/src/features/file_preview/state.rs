@@ -502,6 +502,14 @@ impl State {
         Some(request)
     }
 
+    pub(crate) fn requested_map_texture_quality(
+        &self,
+    ) -> Option<crate::media::preview_model::MapTextureQuality> {
+        self.request
+            .as_ref()
+            .map(|request| request.map_texture_quality)
+    }
+
     pub(crate) fn reload_map_texture_quality(&mut self, reduced: bool) -> Option<PreviewRequest> {
         use crate::media::preview_model::MapTextureQuality;
         if !matches!(self.current()?.content, PreviewContent::Map { .. }) {
@@ -525,6 +533,17 @@ impl State {
         if let ContentUiState::Map(map) = &mut self.content_ui {
             map.render_feedback = Default::default();
         }
+        // Keep the last good scene and staged model available while only its map textures reload.
+        // This is not a workspace replacement: apply_loaded must preserve the stage and selection.
+        if self.workspace_retained.is_none()
+            && let LoadState::Ready(data) = std::mem::take(&mut self.load)
+        {
+            self.workspace_retained = Some(WorkspaceRetained {
+                data,
+                request: self.request.take(),
+            });
+        }
+        self.workspace_error = None;
         self.request = Some(request.clone());
         self.load = LoadState::Loading { stage: None };
         self.spinner.stop();

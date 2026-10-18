@@ -496,6 +496,7 @@ workshop-text-invalid = 请检查{ $language }的标题（1–128 个 UTF-8 字�
 workshop-text-save-failed = 无法保存{ $language }。已保存的更改会保留，请重试其余更改。
 
 models = 模型
+models-experimental = 实验性
 models-description = 为 Garry's Mod 编译模型源文件，或从已编译的模型恢复可编辑的源文件。
 models-import = 导入模型...
 models-import-hint = 选择模型文件或将其拖放到此处。

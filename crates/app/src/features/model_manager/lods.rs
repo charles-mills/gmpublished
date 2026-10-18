@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gmpublished_backend::model_compile::{ModelLod, validate_lods};
+use gmpublished_backend::model_compile::{ModelLod, validate_lod_values};
 use iced::widget::{button, column, row, text, text_input};
 use iced::{Element, Length};
 
@@ -14,19 +14,28 @@ pub(super) struct LodEditor {
 }
 
 impl State {
-    pub(super) fn parsed_lods(&self) -> Option<Vec<ModelLod>> {
-        let lods = self
-            .lods
+    fn lod_values(&self) -> impl ExactSizeIterator<Item = (&std::path::Path, Option<f32>)> {
+        self.lods
             .iter()
-            .map(|lod| {
+            .map(|lod| (lod.source.as_path(), lod.threshold.trim().parse().ok()))
+    }
+
+    pub(super) fn lods_valid(&self) -> bool {
+        validate_lod_values(self.lod_values(), !self.bodygroups.is_empty()).is_ok()
+    }
+
+    pub(super) fn parsed_lods(&self) -> Option<Vec<ModelLod>> {
+        if !self.lods_valid() {
+            return None;
+        }
+        self.lod_values()
+            .map(|(source, switch_point)| {
                 Some(ModelLod {
-                    source: lod.source.clone(),
-                    switch_point: lod.threshold.trim().parse().ok()?,
+                    source: source.to_path_buf(),
+                    switch_point: switch_point?,
                 })
             })
-            .collect::<Option<Vec<_>>>()?;
-        validate_lods(&lods, !self.bodygroups.is_empty()).ok()?;
-        Some(lods)
+            .collect()
     }
 }
 
@@ -121,7 +130,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
                 .size(tokens.typography.body_sm)
                 .color(tokens.colors.text_dim),
         );
-    } else if state.parsed_lods().is_none() {
+    } else if !state.lods_valid() {
         content = content.push(
             text(i18n.tr("models-lod-invalid"))
                 .size(tokens.typography.body_sm)

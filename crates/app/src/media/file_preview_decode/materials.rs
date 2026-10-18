@@ -92,7 +92,6 @@ pub(super) fn map_material_resolution_from_results(
         table.push(
             name,
             MaterialSlot {
-                tint_base: None,
                 resolution: resolved.outcome(),
                 canonical_name: resolved.canonical_name().map(str::to_owned),
                 shader: resolved
@@ -411,7 +410,6 @@ pub(super) fn push_map_material_slot(
         }
     });
     table.push_unindexed(MaterialSlot {
-        tint_base: None,
         resolution: resolution.outcome(),
         canonical_name: resolution.canonical_name().map(str::to_owned),
         shader: resolved.map_or_else(Default::default, |material| material.shader.clone()),
@@ -528,7 +526,6 @@ pub(super) fn resolve_sun_materials(
                     table.push(
                         name,
                         MaterialSlot {
-                            tint_base: None,
                             resolution: material.outcome(),
                             canonical_name: material.canonical_name().map(str::to_owned),
                             name: name.clone(),

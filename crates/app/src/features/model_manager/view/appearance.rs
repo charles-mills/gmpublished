@@ -78,6 +78,7 @@ fn skins_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                     text_input(&i18n.tr("models-skin-name"), &skin.name)
                         .on_input_maybe((!busy).then_some(Message::SkinNameChanged))
                         .padding(tokens.spacing.pad_control)
+                        .size(tokens.typography.body)
                         .style(move |_, status| theme::styles::input(&tokens, status)),
                 )
                 .push(text(i18n.tr("models-skin-slot")).size(tokens.typography.body_sm))
@@ -97,6 +98,7 @@ fn skins_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                                 .then_some(Message::ApplyMaterialTint),
                         )
                         .padding(tokens.spacing.pad_control)
+                        .size(tokens.typography.body)
                         .style(move |_, status| theme::styles::input(&tokens, status)),
                 )
                 .push(text(i18n.tr("models-skin-material")).size(tokens.typography.body_sm))
@@ -108,6 +110,7 @@ fn skins_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
                         )
                         .on_input_maybe((!busy).then_some(Message::ReplacementMaterialChanged))
                         .padding(tokens.spacing.pad_control)
+                        .size(tokens.typography.body)
                         .style(move |_, status| theme::styles::input(&tokens, status)),
                         button(text(i18n.tr("models-apply")))
                             .on_press_maybe(

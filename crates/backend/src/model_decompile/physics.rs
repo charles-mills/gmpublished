@@ -400,7 +400,7 @@ pub(super) fn write_physics(
             let angle = piece as f32 * std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
             let normal = [radius * angle.cos(), radius * angle.sin(), height];
             for triangle in &ledge.triangles {
-                writeln!(geometry, "{material}").unwrap();
+                writeln!(geometry, "{}", super::quoted(material)?).unwrap();
                 for vertex in triangle {
                     let raw = *ledge.ivp_vertices.get(*vertex).ok_or_else(|| {
                         invalid("A collision triangle references an absent vertex")

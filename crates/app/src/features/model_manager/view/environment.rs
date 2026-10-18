@@ -39,7 +39,7 @@ pub(super) fn stage_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, 
             .style(move |_, status| theme::styles::button(&tokens, status)),
         button(text(i18n.tr("models-stage")))
             .on_press_maybe(
-                (!busy && state.selected_map.is_some() && state.preview_request().is_some())
+                (!busy && state.selected_map.is_some() && state.can_preview())
                     .then_some(Message::StageRequested)
             )
             .width(Length::Fill)

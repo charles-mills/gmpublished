@@ -1842,7 +1842,6 @@ pub(in super::super) fn prop_material_index(
     context.table.push(
         &key,
         MaterialSlot {
-            tint_base: None,
             resolution: resolved.outcome(),
             canonical_name: resolved.canonical_name().map(str::to_owned),
             shader: resolved
@@ -2433,7 +2432,6 @@ mod compiled_bake_tests {
         let original = table.push(
             "fixture",
             MaterialSlot {
-                tint_base: None,
                 resolution: Default::default(),
                 canonical_name: None,
                 shader: Default::default(),
@@ -2466,7 +2464,6 @@ mod compiled_bake_tests {
         let hidden = table.push(
             "hidden",
             MaterialSlot {
-                tint_base: None,
                 resolution: Default::default(),
                 canonical_name: None,
                 name: "hidden".into(),
@@ -2497,7 +2494,6 @@ mod compiled_bake_tests {
         let original = table.push(
             "scalar_alpha",
             MaterialSlot {
-                tint_base: None,
                 resolution: Default::default(),
                 canonical_name: None,
                 shader: MaterialShader::Surface(Arc::new(SurfaceMaterial {

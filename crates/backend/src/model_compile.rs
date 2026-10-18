@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -22,7 +23,7 @@ pub use collision::{CollisionDetail, CollisionPhysics, ModelCollision, collision
 #[path = "model_compile/lods.rs"]
 mod lods;
 mod surfaces;
-pub use lods::{ModelLod, validate_lods};
+pub use lods::{ModelLod, validate_lod_values, validate_lods};
 pub use mdlc::fbx::SourcePart;
 pub use mdlc::model::SurfacePhysics;
 pub use surfaces::load_surface_properties;
@@ -178,23 +179,31 @@ pub fn compile_model_with_cancel(
     request: &ModelCompileRequest,
     cancel: &AtomicBool,
 ) -> Result<ModelCompileOutput, ModelCompileError> {
+    compile_model_with_material_sources(request, cancel).map(|(output, _)| output)
+}
+
+/// Retain the material inputs consumed by compilation for the subsequent QC publication checks.
+pub(crate) fn compile_model_with_material_sources(
+    request: &ModelCompileRequest,
+    cancel: &AtomicBool,
+) -> Result<(ModelCompileOutput, BTreeSet<PathBuf>), ModelCompileError> {
     let (result, warnings) = mdlc::diag::capture_warnings(|| {
         mdlc::fbx::with_scene_cache(|| compile_model_inner(request, cancel))
     });
-    result.map(|mut output| {
+    result.map(|(mut output, source_paths)| {
         for warning in warnings {
             if !output.warnings.contains(&warning) {
                 output.warnings.push(warning);
             }
         }
-        output
+        (output, source_paths)
     })
 }
 
 fn compile_model_inner(
     request: &ModelCompileRequest,
     cancel: &AtomicBool,
-) -> Result<ModelCompileOutput, ModelCompileError> {
+) -> Result<(ModelCompileOutput, BTreeSet<PathBuf>), ModelCompileError> {
     crate::util::main_thread_forbidden!();
     check_cancel(cancel)?;
     let source = fs::canonicalize(&request.source).map_err(|source| ModelCompileError::Io {
@@ -276,11 +285,8 @@ fn compile_model_inner(
                 }
             }
         }
-        let imported_materials = materials
-            .iter()
-            .filter(|name| !variants.iter().any(|variant| variant.name == **name))
-            .cloned()
-            .collect::<Vec<_>>();
+        let imported_materials =
+            model_materials::source_material_names(&output.compiled.desc, &variants);
         let mut prepared = model_materials::prepare_materials_for_sources(
             &imported_materials,
             &material_directories,
@@ -341,11 +347,13 @@ fn compile_model_inner(
         staged.push((path, ModelOutputKind::Ani));
     }
     let mut warnings = Vec::new();
+    let mut source_paths = BTreeSet::new();
     if let Some(prepared) = prepared {
         for asset in &prepared.assets {
             validate_relative_path(&asset.relative_path)?;
         }
         prepared.write_to(&files_root)?;
+        source_paths = prepared.source_paths;
         for asset in prepared.assets {
             let kind = if asset
                 .relative_path
@@ -400,17 +408,20 @@ fn compile_model_inner(
         request.overwrite,
         cancel,
     )?;
-    Ok(ModelCompileOutput {
-        model_name: desc.model.name,
-        checksum: output.checksum,
-        files,
-        materials,
-        material_directories,
-        warnings,
-        bones: output.compiled.desc.bones.len(),
-        vertices: output.compiled.total_vertices(),
-        triangles: output.compiled.total_triangles(),
-    })
+    Ok((
+        ModelCompileOutput {
+            model_name: desc.model.name,
+            checksum: output.checksum,
+            files,
+            materials,
+            material_directories,
+            warnings,
+            bones: output.compiled.desc.bones.len(),
+            vertices: output.compiled.total_vertices(),
+            triangles: output.compiled.total_triangles(),
+        },
+        source_paths,
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -433,13 +444,54 @@ pub struct AnimationSettings {
     pub events: Vec<AnimationEvent>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct AnimationEventView<'a> {
+    pub frame: Option<u32>,
+    pub event: &'a str,
+    pub options: &'a str,
+}
+
+pub struct AnimationSettingsView<'a, Events> {
+    pub source: Option<&'a str>,
+    pub included: bool,
+    pub name: &'a str,
+    pub fps: Option<f32>,
+    pub frame_count: usize,
+    pub activity: Option<&'a str>,
+    pub activity_weight: Option<i32>,
+    pub events: Events,
+}
+
 pub fn validate_animation_settings(
     settings: &[AnimationSettings],
 ) -> Result<(), ModelCompileError> {
-    if settings.is_empty() {
+    validate_animation_settings_view(settings.iter().map(|setting| AnimationSettingsView {
+        source: setting.source.as_deref(),
+        included: setting.included,
+        name: &setting.name,
+        fps: Some(setting.fps),
+        frame_count: setting.frame_count,
+        activity: setting.activity.as_deref(),
+        activity_weight: Some(setting.activity_weight),
+        events: setting.events.iter().map(|event| AnimationEventView {
+            frame: Some(event.frame),
+            event: &event.event,
+            options: &event.options,
+        }),
+    }))
+}
+
+/// Validate borrowed settings, including partially parsed editor values, without cloning assets.
+pub fn validate_animation_settings_view<'a, Events>(
+    settings: impl ExactSizeIterator<Item = AnimationSettingsView<'a, Events>> + Clone,
+) -> Result<(), ModelCompileError>
+where
+    Events: ExactSizeIterator<Item = AnimationEventView<'a>>,
+{
+    if settings.len() == 0 {
         return Ok(());
     }
-    if !settings.iter().any(|setting| setting.included) {
+    if !settings.clone().any(|setting| setting.included) {
         return Err(ModelCompileError::InvalidOption(
             "include at least one animation".into(),
         ));
@@ -447,7 +499,7 @@ pub fn validate_animation_settings(
     let mut names = std::collections::HashSet::new();
     let mut sources = std::collections::HashSet::new();
     for setting in settings {
-        if !sources.insert(&setting.source) {
+        if !sources.insert(setting.source) {
             return Err(ModelCompileError::InvalidOption(
                 "duplicate animation source".into(),
             ));
@@ -465,7 +517,7 @@ pub fn validate_animation_settings(
         {
             return Err(ModelCompileError::InvalidOption("animation names must be unique and use 1–63 ASCII letters, numbers, underscores, hyphens or dots".into()));
         }
-        if let Some(activity) = &setting.activity {
+        if let Some(activity) = setting.activity {
             if !activity.starts_with("ACT_")
                 || activity.len() <= 4
                 || activity.len() > 63
@@ -477,9 +529,14 @@ pub fn validate_animation_settings(
                     "activities must use an ACT_ identifier of at most 63 ASCII characters".into(),
                 ));
             }
-        } else if setting.activity_weight != 0 {
+        } else if setting.activity_weight != Some(0) {
             return Err(ModelCompileError::InvalidOption(
                 "an activity weight requires an activity".into(),
+            ));
+        }
+        if setting.activity_weight.is_none() {
+            return Err(ModelCompileError::InvalidOption(
+                "activity weights must be integers".into(),
             ));
         }
         if setting.events.len() > 1024 {
@@ -487,7 +544,7 @@ pub fn validate_animation_settings(
                 "an animation supports at most 1024 events".into(),
             ));
         }
-        for event in &setting.events {
+        for event in setting.events {
             let numeric = event.event.bytes().all(|byte| byte.is_ascii_digit());
             let valid_name = !event.event.is_empty()
                 && event.event.len() <= 63
@@ -511,15 +568,19 @@ pub fn validate_animation_settings(
             {
                 return Err(ModelCompileError::InvalidOption("event options must fit 63 UTF-8 bytes, contain no quotes or line breaks, and cannot begin with a closing brace".into()));
             }
-            if event.frame > i32::MAX as u32
-                || (setting.frame_count > 0 && event.frame as usize >= setting.frame_count)
-            {
+            if event.frame.is_none_or(|frame| {
+                frame > i32::MAX as u32
+                    || (setting.frame_count > 0 && frame as usize >= setting.frame_count)
+            }) {
                 return Err(ModelCompileError::InvalidOption(
                     "event frames must lie within the sampled animation".into(),
                 ));
             }
         }
-        if !setting.fps.is_finite() || setting.fps <= 0.0 || setting.fps > 1000.0 {
+        if setting
+            .fps
+            .is_none_or(|fps| !fps.is_finite() || fps <= 0.0 || fps > 1000.0)
+        {
             return Err(ModelCompileError::InvalidOption(
                 "animation FPS must be greater than zero and at most 1000".into(),
             ));
@@ -709,7 +770,11 @@ fn inspect_source_inner(
         }
         let model = vformats::mdl::parse_mdl(&bytes, &vformats::Limits::default())
             .map_err(|error| ModelCompileError::Description(error.to_string()))?;
-        let materials = model.textures.clone();
+        let materials = model
+            .textures
+            .iter()
+            .map(|name| mdlc::mdl_writer::normalize_texture_name(name, &[]))
+            .collect::<Vec<_>>();
         let skins = if model.skin_reference_count == 0 {
             vec![materials.clone()]
         } else {

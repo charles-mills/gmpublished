@@ -8,7 +8,7 @@ use super::{Effect, Message, SourceKind, State};
 
 pub(super) fn schedule(state: &mut State) -> Vec<Effect> {
     state.preview_pending = true;
-    let ready = (state.inspection.is_some() && state.preview_request().is_some())
+    let ready = (state.inspection.is_some() && state.can_preview())
         || (state.is_qc() && state.qc_editor_ready() && !state.qc_editor.validated);
     if state.route_active && ready {
         state.preview_due = None;
@@ -20,11 +20,7 @@ pub(super) fn schedule(state: &mut State) -> Vec<Effect> {
 }
 
 pub(super) fn resume(state: &mut State) -> Vec<Effect> {
-    if state.install_pending
-        && !state.busy()
-        && !state.preview_busy()
-        && state.preview_request().is_some()
-    {
+    if state.install_pending && !state.busy() && !state.preview_busy() {
         return install_in_game(state);
     }
     if !state.preview_pending
@@ -189,6 +185,16 @@ pub(super) fn update(state: &mut State, message: &Message) -> Option<Vec<Effect>
                 Err(error) => update(state, &Message::PreviewFailed(error.clone())),
             }
         }
+        Message::PreviewLoadCancelled(generation) if matches_job(state, *generation) => {
+            state
+                .preview_job
+                .as_ref()
+                .unwrap()
+                .cancel
+                .store(true, Ordering::Release);
+            state.preview_dirty = true;
+            Some(finish_stale(state))
+        }
         Message::PreviewPresented if state.preview_busy() => {
             if !state.preview_accepts_presentation() {
                 return Some(finish_stale(state));
@@ -224,6 +230,18 @@ pub(super) fn update(state: &mut State, message: &Message) -> Option<Vec<Effect>
 }
 
 pub(super) fn install_in_game(state: &mut State) -> Vec<Effect> {
+    if state.busy() {
+        state.install_pending = true;
+        return vec![];
+    }
+    if !state.can_preview() {
+        state.install_pending = false;
+        state.install_error = Some(
+            "Installation stopped because the model settings are invalid. Correct them and choose Install in Game again."
+                .to_owned(),
+        );
+        return vec![];
+    }
     if state.preview_dirty
         || state.preview_export_dirty
         || state.preview.is_none()
@@ -278,7 +296,7 @@ mod tests {
                 warnings: vec![],
                 compiled: true,
             },
-            _directory: directory,
+            _directory: Some(directory),
         }
     }
 

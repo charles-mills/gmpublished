@@ -12,7 +12,7 @@ use cosmic_text::{
 };
 #[cfg(test)]
 use gmpublished_domain::scene::map::MapVisibilityBucket;
-use gmpublished_domain::scene::map::{MapDetailSprite, MapOverlay};
+use gmpublished_domain::scene::map::{ConvexHull, MapDetailSprite, MapOverlay};
 use iced::widget::image as iced_image;
 use image::{Pixel, Rgba, RgbaImage};
 use rodio::Source as _;
@@ -660,7 +660,8 @@ fn model_preview_data(
         request.cancellation.clone(),
     )?
     .resolver;
-    let collision = model_phy_debug_meshes(mdl_bytes, stem, &resolver, model.material_names.len());
+    let (physics_hulls, collision) =
+        model_physics(mdl_bytes, stem, &resolver, model.material_names.len())?;
     let lods: Vec<_> = models
         .into_iter()
         .map(|model| model_lod_scene(model, &collision, &resolver))
@@ -668,6 +669,7 @@ fn model_preview_data(
     Ok(PreviewData::from_request(
         request,
         PreviewContent::Model(std::sync::Arc::new(ModelPreview {
+            physics_hulls,
             model_animations,
             model_animation_issues,
             pose_cache: Default::default(),
@@ -697,7 +699,6 @@ fn model_lod_scene(
                 .material()
                 .and_then(|material| material.texture.as_ref().map(Arc::clone));
             Ok(MaterialSlot {
-                tint_base: None,
                 resolution: resolved.outcome(),
                 canonical_name: resolved.canonical_name().map(str::to_owned),
                 shader: resolved
@@ -727,7 +728,6 @@ fn model_lod_scene(
     .unwrap_or(u32::MAX);
     if !collision.is_empty() {
         materials.push(MaterialSlot {
-            tint_base: None,
             resolution: Default::default(),
             canonical_name: None,
             shader: Default::default(),
@@ -780,24 +780,52 @@ fn load_model_companions(
     Some((vvd_bytes, vtx_bytes))
 }
 
-fn model_phy_debug_meshes(
+fn model_physics(
     mdl_bytes: &[u8],
     stem: &str,
     resolver: &MaterialResolver,
     material_index: usize,
-) -> Vec<MeshData> {
+) -> Result<(Arc<[ConvexHull]>, Vec<MeshData>), crate::preparation::Cancelled> {
+    resolver.check_cancelled()?;
     let phy_path = format!("{stem}.phy");
     let Some(bytes) = resolver.entry_bytes(&phy_path) else {
-        return Vec::new();
+        return Ok((Arc::default(), Vec::new()));
     };
     let pieces =
         match gmpublished_backend::model_decompile::load_collision_meshes(mdl_bytes, &bytes) {
             Ok(pieces) => pieces,
             Err(error) => {
                 log::debug!("model preview physics {phy_path} failed: {error}");
-                return Vec::new();
+                return Ok((Arc::default(), Vec::new()));
             }
         };
+    resolver.check_cancelled()?;
+    let debug_meshes = model_phy_debug_meshes(&pieces, material_index);
+    let mut hulls = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        resolver.check_cancelled()?;
+        hulls.push(ConvexHull {
+            vertices: piece.vertices.into_iter().map(Vec3::from).collect(),
+            triangles: piece
+                .indices
+                .chunks_exact(3)
+                .map(|triangle| {
+                    [
+                        triangle[0] as usize,
+                        triangle[1] as usize,
+                        triangle[2] as usize,
+                    ]
+                })
+                .collect(),
+        });
+    }
+    Ok((hulls.into(), debug_meshes))
+}
+
+fn model_phy_debug_meshes(
+    pieces: &[gmpublished_backend::model_decompile::CollisionMesh],
+    material_index: usize,
+) -> Vec<MeshData> {
     let palette = [
         Vec3::new(0.48, 0.15, 0.10),
         Vec3::new(0.12, 0.43, 0.24),
@@ -808,7 +836,7 @@ fn model_phy_debug_meshes(
     ];
     let mut meshes = Vec::new();
     let mut triangle_count = 0usize;
-    for (piece, mesh) in pieces.into_iter().enumerate() {
+    for (piece, mesh) in pieces.iter().enumerate() {
         let mut vertices = Vec::new();
         for triangle in mesh.indices.chunks_exact(3) {
             if triangle_count >= PHY_DEBUG_TRIANGLE_CAP {

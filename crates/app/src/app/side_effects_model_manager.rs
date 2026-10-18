@@ -1,14 +1,11 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use gmpublished_backend::{model_compile, model_decompile, model_project};
 
+use super::model_stage::prepare_model_preview as prepare_preview;
 use super::{App, RootMessage, Task, file_preview, model_manager};
 use crate::bridge::archive::PreviewArchiveSource;
-use crate::bridge::content_path::normalize_archive_path;
-use crate::generation::Generation;
-use crate::media::preview_model::PreviewRequest;
 
 impl App {
     pub(super) fn apply_model_manager_message(
@@ -437,7 +434,7 @@ impl App {
                 .ctx
                 .run_blocking("model-preview-build", move |services| {
                     let game = services.settings_and_paths_snapshot().1.gmod_dir;
-                    build_preview(generation, request, game.as_deref(), &cancel)
+                    build_preview(request, game.as_deref(), &cancel)
                 })
                 .map(move |result| {
                     RootMessage::ModelManager(Message::PreviewBuilt(
@@ -447,14 +444,28 @@ impl App {
                 }),
             Effect::PrepareStage(generation, result, map) => {
                 let directory = self.state.features.model_manager.preview_directory();
+                let quality = self
+                    .state
+                    .features
+                    .model_preview
+                    .request()
+                    .filter(|request| {
+                        request.archive.entry_disk_path(&request.entry_path) == Some(map.as_path())
+                    })
+                    .and_then(|_| {
+                        self.state
+                            .features
+                            .model_preview
+                            .requested_map_texture_quality()
+                    })
+                    .unwrap_or_default();
                 self.environment
                     .ctx
                     .run_blocking("model-stage-index", move |_| {
                         let _directory = directory;
-                        Ok(Box::new((
-                            prepare_preview(generation, &result)?,
-                            super::model_stage::prepare_map_preview(generation, &map)?,
-                        )))
+                        let mut map = super::model_stage::prepare_map_preview(generation, &map)?;
+                        map.map_texture_quality = quality;
+                        Ok(Box::new((prepare_preview(generation, &result)?, map)))
                     })
                     .map(move |result| {
                         RootMessage::ModelManager(Message::StagePrepared(
@@ -648,27 +659,25 @@ fn compile_request(
 }
 
 fn build_preview(
-    generation: Generation,
     mut request: model_manager::ExportRequest,
     game_directory: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<model_manager::PreviewBuild, String> {
-    let directory = std::sync::Arc::new(tempfile::tempdir().map_err(|error| error.to_string())?);
     if request.kind == model_manager::SourceKind::Compiled {
-        let (_, result) =
-            super::model_stage::prepare_imported_model_preview(generation, &request.source)?;
+        let result = super::model_stage::imported_model_files(&request.source)?;
         return Ok(model_manager::PreviewBuild {
             result,
-            _directory: directory,
+            _directory: None,
         });
     }
+    let directory = std::sync::Arc::new(tempfile::tempdir().map_err(|error| error.to_string())?);
     request.destination = directory.path().to_path_buf();
     request.overwrite = false;
     request.export_materials = true;
     let result = export_model(request, cancel, game_directory)?;
     Ok(model_manager::PreviewBuild {
         result,
-        _directory: directory,
+        _directory: Some(directory),
     })
 }
 
@@ -799,69 +808,10 @@ fn open_in_blender(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn prepare_preview(
-    generation: Generation,
-    result: &model_manager::ExportResult,
-) -> Result<PreviewRequest, String> {
-    let model = result
-        .files
-        .iter()
-        .find(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("mdl"))
-        })
-        .ok_or_else(|| "The export contains no model file".to_owned())?;
-    let entry_path = normalize_archive_path(&relative_path(&result.directory, model)?)
-        .ok_or_else(|| "The exported model has an invalid preview path".to_owned())?;
-    let mut files = Vec::with_capacity(result.files.len());
-    let mut checksum = crc32fast::Hasher::new();
-    let mut buffer = [0_u8; 8192];
-    for path in &result.files {
-        let size = std::fs::metadata(path)
-            .map_err(|error| error.to_string())?
-            .len();
-        let relative = relative_path(&result.directory, path)?;
-        checksum.update(relative.as_bytes());
-        checksum.update(&size.to_le_bytes());
-        let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-        loop {
-            let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
-            if count == 0 {
-                break;
-            }
-            checksum.update(&buffer[..count]);
-        }
-        files.push((relative, size, path.clone()));
-    }
-    let size_bytes = std::fs::metadata(model)
-        .map_err(|error| error.to_string())?
-        .len();
-    Ok(PreviewRequest {
-        cancellation: Default::default(),
-        map_texture_quality: Default::default(),
-        request_id: generation,
-        archive: PreviewArchiveSource::from_folder(files),
-        entry_path,
-        display_name: model
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-        size_bytes,
-        crc32: checksum.finalize(),
-        bypass_size_limits: false,
-    })
-}
-
-fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
-    path.strip_prefix(root)
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::Generation;
 
     #[test]
     fn blender_filenames_are_arguments_and_never_executable_python() {

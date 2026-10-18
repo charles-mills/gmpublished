@@ -496,6 +496,7 @@ workshop-text-invalid = { $language } 제목(UTF-8 1~128바이트)과 설명 길
 workshop-text-save-failed = { $language } 저장에 실패했습니다. 저장된 변경 사항은 유지됩니다. 나머지를 다시 시도하세요.
 
 models = 모델
+models-experimental = 실험적 기능
 models-description = Garry's Mod용 모델 소스를 컴파일하거나 컴파일된 모델에서 편집 가능한 소스를 복원합니다.
 models-import = 모델 가져오기...
 models-import-hint = 모델 파일을 선택하거나 여기에 놓으세요.

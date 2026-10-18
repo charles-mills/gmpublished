@@ -337,8 +337,9 @@ pub fn load_animation_preview(
         .ok_or_else(|| invalid("Truncated MDL header"))?
         .fill(0);
     let limits = vformats::Limits::default();
-    let model = vformats::mdl::parse_mdl(&geometry_header, &limits)
+    let mut model = vformats::mdl::parse_mdl(&geometry_header, &limits)
         .map_err(|error| invalid(error.to_string()))?;
+    super::super::normalize_material_names(&mut model);
     let raw_vvd = vvd;
     let raw_vtx = vtx;
     let vvd = vformats::mdl::parse_vvd(vvd, &limits).map_err(|error| invalid(error.to_string()))?;

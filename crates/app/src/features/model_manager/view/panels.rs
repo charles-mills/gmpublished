@@ -53,16 +53,11 @@ pub(super) fn model_panel<'a>(
     let i18n = ctx.i18n;
     let busy = state.busy();
     let mesh = state.kind() == Some(SourceKind::Mesh);
-    let mut body = column![].spacing(tokens.spacing.gap_lg);
+    let mut body = column![].spacing(tokens.spacing.gap);
     if preview.is_some_and(|preview| preview.stage_model().is_some()) {
         body = body.push(
             button(text(i18n.tr("models-preview")))
-                .on_press_maybe(
-                    state
-                        .preview_request()
-                        .is_some()
-                        .then_some(Message::PreviewRequested),
-                )
+                .on_press_maybe(state.can_preview().then_some(Message::PreviewRequested))
                 .padding(tokens.spacing.pad_control)
                 .style(move |_, status| theme::styles::button(&tokens, status)),
         );
@@ -74,6 +69,7 @@ pub(super) fn model_panel<'a>(
                 text_input(&i18n.tr("models-name-placeholder"), &state.model_name)
                     .on_input_maybe((!busy).then_some(Message::ModelNameChanged))
                     .padding(tokens.spacing.pad_control)
+                    .size(tokens.typography.body)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap_sm),
@@ -93,6 +89,7 @@ pub(super) fn model_panel<'a>(
                 text_input("1", &state.scale)
                     .on_input_maybe((!busy).then_some(Message::ScaleChanged))
                     .padding(tokens.spacing.pad_control)
+                    .size(tokens.typography.body)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap_sm),
@@ -109,14 +106,20 @@ pub(super) fn model_panel<'a>(
                 checkbox(state.automatic_axes)
                     .label(i18n.tr("models-automatic-axes"))
                     .on_toggle_maybe((!busy).then_some(Message::AutomaticAxesChanged))
+                    .text_size(tokens.typography.body_sm)
+                    .size(tokens.icon_size(16.0))
+                    .spacing(tokens.spacing.gap_sm)
                     .style(move |_, status| theme::styles::checkbox(&tokens, status)),
             );
         }
     }
     if let Some(preview) = preview {
-        body = body
-            .push(file_preview::workspace_animation_controls(preview, ctx).map(Message::Viewer));
-        body = body.push(file_preview::workspace_stage_controls(preview, ctx).map(Message::Viewer));
+        if let Some(controls) = file_preview::workspace_animation_controls(preview, ctx) {
+            body = body.push(controls.map(Message::Viewer));
+        }
+        if let Some(controls) = file_preview::workspace_stage_controls(preview, ctx) {
+            body = body.push(controls.map(Message::Viewer));
+        }
     }
     body = body.push(
         button(
@@ -171,6 +174,7 @@ pub(super) fn model_panel<'a>(
                                     move |value| Message::OrientationChanged(axis, value)
                                 ))
                                 .padding(tokens.spacing.pad_control)
+                                .size(tokens.typography.body)
                                 .style(move |_, status| theme::styles::input(&tokens, status)),
                         ]
                         .spacing(tokens.spacing.gap_xs)
@@ -294,6 +298,7 @@ pub(super) fn physics_panel<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'
                 text_input("default", &state.surface_property)
                     .on_input_maybe((!state.busy()).then_some(Message::SurfacePropertyChanged))
                     .padding(tokens.spacing.pad_control)
+                    .size(tokens.typography.body)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap_sm),
@@ -342,6 +347,7 @@ pub(super) fn export_panel<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a
                 )
                 .on_input_maybe((!busy).then_some(Message::MaterialDirectoryChanged))
                 .padding(tokens.spacing.pad_control)
+                .size(tokens.typography.body)
                 .style(move |_, status| theme::styles::input(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap),
@@ -350,6 +356,9 @@ pub(super) fn export_panel<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a
             checkbox(state.export_materials)
                 .label(i18n.tr("models-export-materials"))
                 .on_toggle_maybe((!busy).then_some(Message::ExportMaterialsChanged))
+                .text_size(tokens.typography.body_sm)
+                .size(tokens.icon_size(16.0))
+                .spacing(tokens.spacing.gap_sm)
                 .style(move |_, status| theme::styles::checkbox(&tokens, status)),
         );
     }
@@ -357,6 +366,9 @@ pub(super) fn export_panel<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a
         checkbox(state.overwrite)
             .label(i18n.tr("models-overwrite"))
             .on_toggle_maybe((!busy).then_some(Message::OverwriteChanged))
+            .text_size(tokens.typography.body_sm)
+            .size(tokens.icon_size(16.0))
+            .spacing(tokens.spacing.gap_sm)
             .style(move |_, status| theme::styles::checkbox(&tokens, status)),
     );
     if !compiled {
@@ -385,10 +397,8 @@ fn install_controls<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messa
             "models-install-game"
         })))
         .on_press_maybe(
-            (!state.busy()
-                && !state.installed_mutation_busy()
-                && state.preview_request().is_some())
-            .then_some(Message::InstallRequested)
+            (!state.busy() && !state.installed_mutation_busy() && state.can_preview())
+                .then_some(Message::InstallRequested)
         )
         .padding(tokens.spacing.pad_control)
         .width(Length::Fill)

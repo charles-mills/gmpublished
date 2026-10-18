@@ -63,26 +63,31 @@ pub fn workspace<'a>(
     let reset =
         button(text(ctx.i18n.tr("file-preview-reset-camera")).size(tokens.typography.body_sm))
             .on_press(Message::ModelCameraResetRequested)
-            .padding(tokens.spacing.pad_control)
+            .padding([tokens.spacing.pad_control_y, tokens.spacing.pad_control_x])
             .style(move |_, status| theme::styles::ghost_button(&tokens, status));
     let mut toolbar = row![reset].align_y(Center).spacing(tokens.spacing.gap_sm);
     if state.phy_debug_control_visible() {
         toolbar = toolbar.push(
-            checkbox(state.phy_debug_enabled())
-                .label(ctx.i18n.tr("file-preview-collision"))
-                .on_toggle(Message::PhyDebugToggled)
-                .text_size(tokens.typography.body_sm)
-                .style(move |_, status| theme::styles::checkbox(&tokens, status)),
+            container(
+                checkbox(state.phy_debug_enabled())
+                    .label(ctx.i18n.tr("file-preview-collision"))
+                    .on_toggle(Message::PhyDebugToggled)
+                    .text_size(tokens.typography.body_sm)
+                    .size(tokens.icon_size(16.0))
+                    .spacing(tokens.spacing.gap_sm)
+                    .style(move |_, status| theme::styles::checkbox(&tokens, status)),
+            )
+            .padding([tokens.spacing.pad_control_y, tokens.spacing.pad_control_x]),
         );
     }
-    let controls = container(toolbar)
+    let controls = container(toolbar.wrap())
         .padding(tokens.spacing.pad_xs)
-        .style(move |_| theme::styles::preview_modal(&tokens));
-    let inset = if reserved_bottom > 0.0 {
-        tokens.spacing.pad_xs
-    } else {
-        tokens.spacing.pad
-    };
+        .style(move |_| {
+            let mut style = theme::styles::preview_modal(&tokens);
+            style.border.radius = tokens.radii.md.into();
+            style
+        });
+    let inset = tokens.spacing.pad_sm;
     let overlay = column![
         Space::new().height(Length::Fill),
         row![controls, Space::new().width(Length::Fill)]
@@ -117,47 +122,49 @@ pub fn workspace_selection_controls<'a>(
 pub fn workspace_animation_controls<'a>(
     state: &'a State,
     ctx: ViewCtx<'a>,
-) -> Element<'a, Message> {
-    state.current_model().map_or_else(
-        || Space::new().into(),
-        |model| {
-            if model.animation.as_ref().is_some_and(|animation| {
-                animation.as_ref().is_ok_and(|animation| {
-                    animation.sequences.len() <= 1
-                        && animation.sequences.iter().all(|sequence| {
-                            sequence.duration <= 0.0
-                                && sequence.parameters.is_empty()
-                                && sequence.unavailable.is_none()
-                        })
+) -> Option<Element<'a, Message>> {
+    state.current_model().and_then(|model| {
+        let animation = model.animation.as_ref()?;
+        if model.scene.stats.sequence_count == 0 || model.scene.stats.bone_count == 0 {
+            return None;
+        }
+        if animation.as_ref().is_ok_and(|animation| {
+            animation.sequences.len() <= 1
+                && animation.sequences.iter().all(|sequence| {
+                    sequence.duration <= 0.0
+                        && sequence.parameters.is_empty()
+                        && sequence.unavailable.is_none()
                 })
-            }) {
-                return Space::new().into();
-            }
-            view::model_animation_controls(state, model, ctx, true)
-        },
-    )
+        }) {
+            return None;
+        }
+        Some(view::model_animation_controls(state, model, ctx, true))
+    })
 }
 
-pub fn workspace_stage_controls<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Message> {
-    if state.stage_model().is_none() {
-        return Space::new().into();
-    }
+pub fn workspace_stage_controls<'a>(
+    state: &'a State,
+    ctx: ViewCtx<'a>,
+) -> Option<Element<'a, Message>> {
+    state.stage_model()?;
     let tokens = *ctx.tokens;
     let mut controls = column![
         view::stage_placement_controls(state, ctx),
         view::map_render_controls(state, ctx)
     ]
     .spacing(tokens.spacing.gap);
-    if state.stage_model().is_some() && state.phy_debug_control_visible() {
+    if state.phy_debug_control_visible() {
         controls = controls.push(
             checkbox(state.phy_debug_enabled())
                 .label(ctx.i18n.tr("file-preview-collision"))
                 .on_toggle(Message::PhyDebugToggled)
                 .text_size(tokens.typography.body_sm)
+                .size(tokens.icon_size(16.0))
+                .spacing(tokens.spacing.gap_sm)
                 .style(move |_, status| theme::styles::checkbox(&tokens, status)),
         );
     }
-    controls.into()
+    Some(controls.into())
 }
 
 fn empty_studio_model() -> std::sync::Arc<crate::media::preview_model::ModelPreview> {
@@ -168,6 +175,7 @@ fn empty_studio_model() -> std::sync::Arc<crate::media::preview_model::ModelPrev
     static MODEL: OnceLock<Arc<ModelPreview>> = OnceLock::new();
     Arc::clone(MODEL.get_or_init(|| {
         Arc::new(ModelPreview {
+            physics_hulls: Default::default(),
             pose_cache: Default::default(),
             root_lod: 0,
             selected_lod: 0,

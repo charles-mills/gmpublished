@@ -189,7 +189,7 @@ pub struct FeatureStates {
     destination_select: destination_select::State,
     file_preview: file_preview::State,
     model_preview: file_preview::State,
-    model_preview_loading: Option<crate::generation::Generation>,
+    model_preview_loading: Option<side_effects_file_preview::ModelPreviewLoad>,
     prepare_publish: prepare_publish::State,
     preview_gma: preview_gma::State,
     settings: settings::State,
@@ -1604,25 +1604,36 @@ impl App {
         let ctx = theme::ViewCtx::new(&self.state.tokens, &self.state.i18n)
             .with_cpu_executor(self.environment.ctx.cpu_executor());
         let now = Instant::now();
+        let modeller = self.state.features.shell.route() == shell::Route::Models;
         let route_body: Element<'_, RootMessage> = container(crate::widgets::settle::settle(
             self.active_route_view(),
             self.state.features.shell.route() as u64,
             &tokens,
         ))
-        .padding(tokens.spacing.pad)
+        .padding(if modeller {
+            Padding {
+                top: tokens.dims.sidebar_float_margin,
+                right: tokens.dims.sidebar_float_margin,
+                bottom: tokens.dims.sidebar_float_margin,
+                left: 0.0,
+            }
+        } else {
+            Padding::new(tokens.spacing.pad)
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| theme::styles::surface(&tokens))
         .into();
-        let body: Element<'_, RootMessage> = if self.state.chrome_strategy.mac_native_inset() {
-            column![content_drag_strip(&tokens), route_body]
-                .spacing(0.0)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        } else {
-            route_body
-        };
+        let body: Element<'_, RootMessage> =
+            if self.state.chrome_strategy.mac_native_inset() && !modeller {
+                column![content_drag_strip(&tokens), route_body]
+                    .spacing(0.0)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                route_body
+            };
 
         let content_area = row![
             shell::sidebar(
@@ -1861,19 +1872,27 @@ impl App {
                     size.width,
                     size.height,
                 );
-                stack![
-                    file_preview::workspace(&self.state.features.model_preview, ctx, right, bottom)
+                crate::widgets::rounded::rounded(
+                    stack![
+                        file_preview::workspace(
+                            &self.state.features.model_preview,
+                            ctx,
+                            right,
+                            bottom
+                        )
                         .map(RootMessage::ModelPreview),
-                    model_manager::workspace_view(
-                        &self.state.features.model_manager,
-                        &self.state.features.model_preview,
-                        ctx,
-                    )
-                    .map(RootMessage::ModelManager),
-                ]
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+                        model_manager::workspace_view(
+                            &self.state.features.model_manager,
+                            &self.state.features.model_preview,
+                            ctx,
+                        )
+                        .map(RootMessage::ModelManager),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                    ctx.tokens.radii.lg,
+                    ctx.tokens.colors.bg.into(),
+                )
             })
             .into(),
             (shell::Route::SizeAnalyzer, None) => {

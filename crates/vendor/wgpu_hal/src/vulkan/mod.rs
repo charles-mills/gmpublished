@@ -161,7 +161,7 @@ pub struct InstanceShared {
     memory_budget_thresholds: wgt::MemoryBudgetThresholds,
     debug_utils: Option<DebugUtils>,
     get_physical_device_properties: Option<khr::get_physical_device_properties2::Instance>,
-    entry: ash::Entry,
+    entry: instance::LoaderEntry,
     has_nv_optimus: bool,
     android_sdk_version: u32,
     /// The instance API version.

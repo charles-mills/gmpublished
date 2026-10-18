@@ -11,6 +11,7 @@ pub enum Message {
     AdvancedToggled,
     Viewer(crate::features::file_preview::Message),
     PreviewPresented,
+    PreviewLoadCancelled(Generation),
     PreviewUpdateDue(Generation),
     PreviewFailed(String),
     RouteEntered,

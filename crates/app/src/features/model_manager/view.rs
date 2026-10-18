@@ -44,22 +44,25 @@ pub fn pane_reservation(state: &State, ctx: ViewCtx<'_>, width: f32, height: f32
     if width / ctx.tokens.text_scale() < 700.0 {
         (
             0.0,
-            pane_height(height, inset, ctx.tokens.text_size(260.0)) + inset * 2.0,
+            pane_height(height, inset, ctx.tokens.text_size(300.0)) + inset * 2.0,
         )
     } else {
-        (
-            pane_width(ctx).min((width - inset * 2.0).max(0.0)) + inset * 2.0,
-            0.0,
-        )
+        (pane_width(ctx, width) + inset * 2.0, 0.0)
     }
 }
 
-fn pane_width(ctx: ViewCtx<'_>) -> f32 {
-    ctx.tokens.text_size(420.0)
+fn pane_width(ctx: ViewCtx<'_>, available: f32) -> f32 {
+    let tokens = ctx.tokens;
+    (available * 0.26)
+        .clamp(
+            tokens.text_size(tokens.space(420.0)),
+            tokens.text_size(tokens.space(500.0)),
+        )
+        .min((available - tokens.spacing.pad_sm * 2.0).max(0.0))
 }
 
 fn pane_height(height: f32, inset: f32, minimum: f32) -> f32 {
-    (height * 0.48)
+    (height * 0.52)
         .max(minimum)
         .min((height - inset * 2.0).max(0.0))
 }
@@ -91,14 +94,22 @@ fn overlay<'a>(
             .width(if compact {
                 Length::Fill
             } else {
-                Length::Fixed(pane_width(ctx))
+                Length::Fixed(pane_width(ctx, size.width))
             })
             .height(if compact {
-                Length::Fixed(pane_height(size.height, inset, tokens.text_size(260.0)))
+                Length::Fixed(pane_height(size.height, inset, tokens.text_size(300.0)))
             } else {
                 Length::Fill
             })
-            .style(move |_| theme::styles::modal(&tokens));
+            .style(move |_| {
+                let mut style = theme::styles::modal(&tokens);
+                style.border = iced::Border {
+                    color: tokens.colors.border_subtle.into(),
+                    width: 1.0,
+                    radius: tokens.radii.md.into(),
+                };
+                style
+            });
         container(opaque(panel))
             .padding(inset)
             .width(Length::Fill)
@@ -144,6 +155,19 @@ fn pane<'a>(
     ]
     .spacing(tokens.spacing.gap_xs)
     .align_y(iced::Center);
+    let experimental = row![
+        svg_icon(
+            assets::icons::flask(),
+            tokens.colors.text_dim.into(),
+            tokens.icon_size(12.0)
+        ),
+        text(i18n.tr("models-experimental"))
+            .size(tokens.typography.caption)
+            .color(tokens.colors.text_dim),
+    ]
+    .spacing(tokens.spacing.gap_xs)
+    .align_y(iced::Center);
+    let header = column![header, experimental].spacing(tokens.spacing.gap_sm);
     let mut tabs = row![].spacing(tokens.spacing.gap_xs);
     for (tab, key) in [
         (WorkspaceTab::Model, "models-tab-model"),
@@ -197,6 +221,17 @@ fn pane<'a>(
             .spacing(tokens.spacing.gap),
         );
     }
+    if let Some(error) = preview
+        .and_then(file_preview::State::error)
+        .map(ToString::to_string)
+        && state.error.as_deref() != Some(error.as_str())
+    {
+        content = content.push(
+            text(error)
+                .size(tokens.typography.body_sm)
+                .color(tokens.colors.error),
+        );
+    }
     content = content.push(body);
     let mut layout = column![
         header,
@@ -212,7 +247,7 @@ fn pane<'a>(
     .spacing(if compact {
         tokens.spacing.gap_sm
     } else {
-        tokens.spacing.gap_lg
+        tokens.spacing.gap
     });
     if let Some(footer) = pane_footer(state, ctx) {
         layout = layout.push(footer);
@@ -221,7 +256,7 @@ fn pane<'a>(
         .padding(if compact {
             tokens.spacing.pad_sm
         } else {
-            tokens.spacing.pad
+            tokens.spacing.pad_sm + tokens.spacing.pad_xs
         })
         .width(Length::Fill)
         .height(Length::Fill)

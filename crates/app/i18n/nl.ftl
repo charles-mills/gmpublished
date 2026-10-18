@@ -496,6 +496,7 @@ workshop-text-invalid = Controleer de titel (1–128 UTF-8-bytes) en de beschrij
 workshop-text-save-failed = Opslaan van { $language } is mislukt. Opgeslagen wijzigingen blijven behouden; probeer de overige opnieuw.
 
 models = Modellen
+models-experimental = Experimenteel
 models-description = Compileer modelbronnen voor Garry's Mod of herstel bewerkbare bronnen uit gecompileerde modellen.
 models-import = Model importeren...
 models-import-hint = Kies een modelbestand of sleep het hierheen.

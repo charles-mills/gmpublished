@@ -520,6 +520,7 @@ workshop-text-invalid = Перевірте назву (1–128 байтів UTF-
 workshop-text-save-failed = Не вдалося зберегти { $language }.Успішні зміни збережено; повторіть решту.
 
 models = Моделі
+models-experimental = Експериментально
 models-description = Компілюйте вихідні файли моделей для Garry's Mod або відновлюйте редаговані вихідні файли зі скомпільованих моделей.
 models-import = Імпортувати модель...
 models-import-hint = Виберіть файл моделі або перетягніть його сюди.

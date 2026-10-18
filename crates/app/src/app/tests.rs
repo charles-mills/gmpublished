@@ -2362,6 +2362,7 @@ fn model_workspace_preserves_selection_without_replacing_archive_previews() {
         preview_model::PreviewContent::Model(Arc::new(preview_model::ModelPreview {
             model_animations: Vec::new(),
             model_animation_issues: Vec::new(),
+            physics_hulls: Default::default(),
             pose_cache: Default::default(),
             root_lod: 0,
             selected_lod: 0,
@@ -2564,7 +2565,7 @@ fn importing_a_source_prepares_the_workspace_before_choosing_an_export_folder() 
 }
 
 #[test]
-fn replacing_a_source_during_decode_releases_the_cancelled_preview_job() {
+fn modeller_async_source_switch_retires_cancelled_decode_without_a_callback() {
     use crate::features::model_manager;
     let mut app = App::new_for_test();
     let _task =
@@ -2573,27 +2574,48 @@ fn replacing_a_source_during_decode_releases_the_cancelled_preview_job() {
         &mut app.state.features.model_manager,
         model_manager::Message::PreviewRequested,
     );
-    let _task = app.apply_model_preview_message(file_preview::Message::WorkspaceOpenRequested(
+    let decode = app.apply_model_preview_message(file_preview::Message::WorkspaceOpenRequested(
         file_preview_request(),
     ));
-    let loading = app.state.features.model_preview_loading.unwrap();
+    let request = app.state.features.model_preview.request().unwrap().clone();
     let _task =
         app.apply_model_manager_message(model_manager::Message::SourceDropped("new.smd".into()));
-    assert!(!app.state.features.model_preview.is_open());
-    assert!(app.state.features.model_manager.preview_busy());
-    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
-        loading,
-        Box::new(Err(preview_model::PreviewLoadError::Decode(
-            "old source failed".into(),
-        ))),
-    ));
-    assert!(!app.state.features.model_manager.preview_busy());
-    assert_eq!(
-        app.state.features.model_manager.source_path(),
-        Some(std::path::Path::new("new.smd"))
+    assert!(request.cancellation.is_cancelled());
+    assert!(
+        task_messages(decode).is_empty(),
+        "cancelled worker must stay silent"
+    );
+    assert!(
+        !app.state.features.model_manager.preview_busy(),
+        "source replacement must retire the cancelled decoder's manager job"
     );
     assert_eq!(app.state.features.model_preview_loading, None);
     assert!(!app.state.features.model_preview.is_open());
+
+    let effects = model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewRequested,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, model_manager::Effect::BuildPreview(..))),
+        "replacement source must be able to start its preview"
+    );
+    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+        request.request_id,
+        Box::new(Err(preview_model::PreviewLoadError::Decode(
+            "late old completion".into(),
+        ))),
+    ));
+    assert!(
+        app.state.features.model_manager.preview_busy(),
+        "late old callbacks must not finish the new source's job"
+    );
+    assert_eq!(
+        app.state.features.model_manager.source_path(),
+        Some(Path::new("new.smd"))
+    );
 }
 
 fn installed_preview_target() -> installed_addons::PreviewTarget {
@@ -2998,4 +3020,445 @@ fn leaving_models_or_opening_a_modal_releases_workspace_capture() {
         assert!(!app.preview_mouse_captured());
         assert!(app.state.features.model_preview.is_open());
     }
+}
+
+fn staged_modeller_preview(app: &mut App) {
+    use crate::features::model_manager;
+    use gmpublished_domain::math::Vec3;
+    // Give the manager a displayed compile baseline so live transforms are meaningful.
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::SourceDropped("staged.smd".into()),
+    );
+    let effects = model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewRequested,
+    );
+    let generation = effects
+        .iter()
+        .find_map(|effect| match effect {
+            model_manager::Effect::BuildPreview(generation, ..) => Some(*generation),
+            _ => None,
+        })
+        .unwrap();
+    let directory = Arc::new(tempfile::tempdir().unwrap());
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewBuilt(
+            generation,
+            Ok(model_manager::PreviewBuild {
+                result: model_manager::ExportResult {
+                    directory: directory.path().into(),
+                    files: vec![],
+                    bytes: 0,
+                    warnings: vec![],
+                    compiled: true,
+                },
+                _directory: Some(directory),
+            }),
+        ),
+    );
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewPresented,
+    );
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::ScaleChanged("2".into()),
+    );
+    capture_map_preview(app, true);
+    let state = &mut app.state.features.model_preview;
+    let data = state.current().unwrap().clone();
+    let map = state.request().unwrap().clone();
+    let mut model_request = file_preview_request();
+    model_request.entry_path = "models/staged.mdl".into();
+    let (_, map) = state.begin_workspace_stage(model_request, map);
+    let mut model = crate::model_animation_test_support::animated_model();
+    Arc::make_mut(&mut model).skin_tables = vec![vec![0], vec![0]];
+    Arc::make_mut(&mut model).bodygroups = vec![2];
+    assert!(state.apply_stage_loaded(map.request_id, Ok((data, model))));
+    for message in [
+        file_preview::Message::SkinSelected(1),
+        file_preview::Message::BodygroupChoiceSelected {
+            group: 0,
+            choice: 1,
+        },
+        file_preview::Message::StagePlacementRestored {
+            position: [32.0, 64.0, 128.0],
+            angles: [0.0, 90.0, 0.0],
+        },
+        file_preview::Message::MapFogToggled(false),
+    ] {
+        let _effects = file_preview::update(state, message);
+    }
+    app.sync_model_workspace();
+    assert_eq!(
+        app.state.features.model_preview.workspace_transform()[0][0],
+        2.0
+    );
+    assert_eq!(
+        app.state
+            .features
+            .model_preview
+            .stage_transform()
+            .unwrap()
+            .position,
+        Vec3::new(32.0, 64.0, 128.0)
+    );
+}
+
+#[test]
+fn modeller_async_quality_reload_preserves_staged_model_selection_and_transform() {
+    for success in [false, true] {
+        let mut app = App::new_for_test();
+        staged_modeller_preview(&mut app);
+        let model = Arc::clone(app.state.features.model_preview.stage_model().unwrap());
+        let placement = app.state.features.model_preview.stage_transform();
+        let live = app.state.features.model_preview.workspace_transform();
+        let original = app.state.features.model_preview.current().unwrap().clone();
+        let _task = app.apply_model_preview_message(
+            file_preview::Message::MapReducedTextureDetailToggled(true),
+        );
+        let generation = app.state.features.model_preview_loading.unwrap().request;
+        let result = if success {
+            Ok(original.clone())
+        } else {
+            Err(preview_model::PreviewLoadError::Decode(
+                "reload failed".into(),
+            ))
+        };
+        let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+            generation,
+            Box::new(result),
+        ));
+        assert!(
+            app.state.features.model_preview.current().is_some(),
+            "quality reload must preserve the scene on success and failure"
+        );
+        assert!(Arc::ptr_eq(
+            app.state.features.model_preview.stage_model().unwrap(),
+            &model
+        ));
+        assert_eq!(
+            app.state.features.model_preview.stage_transform(),
+            placement
+        );
+        assert_eq!(app.state.features.model_preview.workspace_transform(), live);
+        assert_eq!(app.state.features.model_preview.selected_skin(), 1);
+        assert_eq!(app.state.features.model_preview.bodygroup_choices(), &[1]);
+        assert!(!app.state.features.model_preview.map_fog_enabled());
+        assert!(!app.state.features.model_manager.preview_busy());
+        if !success {
+            assert!(app.state.features.model_preview.error().is_some());
+            let mut ui = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                Size::new(1000.0, 800.0),
+                crate::features::model_manager::workspace_view(
+                    &app.state.features.model_manager,
+                    &app.state.features.model_preview,
+                    crate::theme::ViewCtx::new(&app.state.tokens, &app.state.i18n),
+                ),
+            );
+            ui.find("reload failed")
+                .expect("retained scene must not hide reload errors");
+            drop(ui);
+            let _retry = app.apply_model_preview_message(
+                file_preview::Message::MapReducedTextureDetailToggled(true),
+            );
+            assert!(app.state.features.model_preview.error().is_none());
+            assert!(app.state.features.model_preview.stage_model().is_some());
+        }
+    }
+}
+
+#[test]
+fn modeller_async_quality_reload_does_not_finish_a_newer_manager_build() {
+    use crate::features::model_manager;
+    let mut app = App::new_for_test();
+    staged_modeller_preview(&mut app);
+    let original = app.state.features.model_preview.current().unwrap().clone();
+    let _task = app
+        .apply_model_preview_message(file_preview::Message::MapReducedTextureDetailToggled(true));
+    let generation = app.state.features.model_preview_loading.unwrap().request;
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::AutomaticAxesChanged(false),
+    );
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::PreviewRequested,
+    );
+    assert!(app.state.features.model_manager.preview_busy());
+    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+        generation,
+        Box::new(Ok(original)),
+    ));
+    assert!(
+        app.state.features.model_manager.preview_busy(),
+        "independent map reload must not complete a model compile"
+    );
+    assert!(app.state.features.model_manager.preview_dirty());
+    assert!(app.state.features.model_preview.stage_model().is_some());
+}
+
+fn modeller_workflow_source(directory: &Path, name: &str) -> PathBuf {
+    let source = directory.join(format!("{name}.smd"));
+    std::fs::write(
+        &source,
+        include_bytes!("../../../vendor/mdlc/tests/fixtures/cube.smd"),
+    )
+    .unwrap();
+    ::image::RgbaImage::from_pixel(2, 2, ::image::Rgba([80, 140, 200, 255]))
+        .save(directory.join("material.png"))
+        .unwrap();
+    source
+}
+
+fn modeller_workflow_drain(app: &mut App, initial: Task<RootMessage>) {
+    let mut pending = vec![initial];
+    let mut steps = 0;
+    while let Some(task) = pending.pop() {
+        for message in task_messages(task) {
+            steps += 1;
+            assert!(steps < 100, "model workflow did not settle");
+            pending.push(app.update(message));
+        }
+    }
+}
+
+fn modeller_workflow_until_decode(app: &mut App, source: PathBuf) -> Task<RootMessage> {
+    use crate::features::model_manager;
+    let mut task = app.apply_model_manager_message(model_manager::Message::SourceDropped(source));
+    for _ in 0..10 {
+        if app.state.features.model_preview_loading.is_some() {
+            return task;
+        }
+        let messages = task_messages(task);
+        assert!(
+            !messages.is_empty(),
+            "preview workflow stopped before decode"
+        );
+        task = Task::batch(messages.into_iter().map(|message| app.update(message)));
+    }
+    panic!("preview workflow did not start its decoder");
+}
+
+#[test]
+fn modeller_async_real_source_switch_finishes_replacement_preview_and_export() {
+    use crate::features::model_manager;
+    let root = tempfile::tempdir().unwrap();
+    let first = modeller_workflow_source(root.path(), "first");
+    let second = modeller_workflow_source(root.path(), "second");
+    let mut app = App::new_for_test();
+    let old_decode = modeller_workflow_until_decode(&mut app, first);
+    let old_request = app.state.features.model_preview.request().unwrap().clone();
+    let replacement =
+        app.apply_model_manager_message(model_manager::Message::SourceDropped(second.clone()));
+    assert!(old_request.cancellation.is_cancelled());
+    assert!(task_messages(old_decode).is_empty());
+    modeller_workflow_drain(&mut app, replacement);
+    assert!(!app.state.features.model_manager.preview_busy());
+    assert_eq!(
+        app.state.features.model_manager.source_path(),
+        Some(second.as_path())
+    );
+    assert!(
+        matches!(&app.state.features.model_preview.current().unwrap().content, preview_model::PreviewContent::Model(model) if model.scene.stats.triangle_count == 12)
+    );
+
+    let effects = model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::DestinationRequested,
+    );
+    let generation = effects
+        .iter()
+        .find_map(|effect| match effect {
+            model_manager::Effect::PickDestination(generation, _) => Some(*generation),
+            _ => None,
+        })
+        .unwrap();
+    let destination = root.path().join("exported");
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::DestinationSelected(generation, Some(destination.clone())),
+    );
+    assert!(app.state.features.model_manager.can_export());
+    let export = app.apply_model_manager_message(model_manager::Message::ExportRequested);
+    modeller_workflow_drain(&mut app, export);
+    assert!(destination.join("models/second.mdl").is_file());
+    assert!(!app.state.features.model_manager.busy());
+    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+        old_request.request_id,
+        Box::new(Err(preview_model::PreviewLoadError::Decode(
+            "late cancelled result".into(),
+        ))),
+    ));
+    assert!(
+        matches!(&app.state.features.model_preview.current().unwrap().content, preview_model::PreviewContent::Model(model) if model.scene.stats.triangle_count == 12)
+    );
+}
+
+#[test]
+fn modeller_async_texture_choice_waits_for_owned_stage_decode() {
+    use crate::features::model_manager;
+    let mut app = App::new_for_test();
+    staged_modeller_preview(&mut app);
+    let data = app.state.features.model_preview.current().unwrap().clone();
+    let model = Arc::clone(app.state.features.model_preview.stage_model().unwrap());
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::MapSelected(model_manager::MapChoice("map.bsp".into())),
+    );
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::StageRequested,
+    );
+    let mut model_request = file_preview_request();
+    model_request.entry_path = "models/staged.mdl".into();
+    let map = app.state.features.model_preview.request().unwrap().clone();
+    let _decode = app.apply_model_preview_message(file_preview::Message::WorkspaceStageRequested {
+        model: Box::new(model_request),
+        map: Box::new(map),
+    });
+    let generation = app.state.features.model_preview_loading.unwrap().request;
+    let manager = app.state.features.model_manager.preview_job_generation();
+    for reduced in [true, false, true] {
+        let _task = app.apply_model_preview_message(
+            file_preview::Message::MapReducedTextureDetailToggled(reduced),
+        );
+        assert_eq!(
+            app.state.features.model_preview_loading.unwrap().request,
+            generation
+        );
+        assert_eq!(
+            app.state.features.model_manager.preview_job_generation(),
+            manager
+        );
+    }
+    let _task = app.apply_model_preview_message(file_preview::Message::StageLoaded(
+        generation,
+        Box::new(Ok((data.clone(), model))),
+    ));
+    let quality_generation = app.state.features.model_preview_loading.unwrap().request;
+    assert_ne!(quality_generation, generation);
+    assert_eq!(
+        app.state
+            .features
+            .model_preview
+            .requested_map_texture_quality(),
+        Some(preview_model::MapTextureQuality::Reduced)
+    );
+    assert!(!app.state.features.model_manager.preview_busy());
+    assert!(app.state.features.model_preview.stage_model().is_some());
+    let _task = app.apply_model_preview_message(file_preview::Message::Loaded(
+        quality_generation,
+        Box::new(Ok(data)),
+    ));
+    assert!(app.state.features.model_preview.current().is_some());
+    assert!(app.state.features.model_preview.stage_model().is_some());
+}
+
+fn modeller_workflow_map(directory: &Path) -> PathBuf {
+    let map = directory.join("environment.bsp");
+    let mut bsp = vec![0_u8; 4 + 4 + 64 * 16 + 4];
+    bsp[..4].copy_from_slice(b"VBSP");
+    bsp[4..8].copy_from_slice(&20_i32.to_le_bytes());
+    let offset = bsp.len();
+    let pak_entry = 8 + 40 * 16;
+    bsp[pak_entry..pak_entry + 4].copy_from_slice(&(offset as i32).to_le_bytes());
+    bsp[pak_entry + 4..pak_entry + 8].copy_from_slice(&22_i32.to_le_bytes());
+    bsp.extend_from_slice(&[
+        0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    std::fs::write(&map, bsp).unwrap();
+    map
+}
+
+#[test]
+fn modeller_async_real_stage_quality_rebuild_and_cache_round_trip() {
+    use crate::features::model_manager;
+    let root = tempfile::tempdir().unwrap();
+    let source = modeller_workflow_source(root.path(), "workflow");
+    let map = modeller_workflow_map(root.path());
+    let mut app = App::new_for_test();
+    let decode = modeller_workflow_until_decode(&mut app, source);
+    modeller_workflow_drain(&mut app, decode);
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::MapSelected(model_manager::MapChoice(map.clone())),
+    );
+    let stage = app.apply_model_manager_message(model_manager::Message::StageRequested);
+    modeller_workflow_drain(&mut app, stage);
+    assert!(app.state.features.model_preview.stage_model().is_some());
+    let _task = app.apply_model_preview_message(file_preview::Message::StagePlacementRestored {
+        position: [32.0, 64.0, 128.0],
+        angles: [0.0, 90.0, 0.0],
+    });
+    let placement = app.state.features.model_preview.stage_transform();
+    let quality = app
+        .apply_model_preview_message(file_preview::Message::MapReducedTextureDetailToggled(true));
+    modeller_workflow_drain(&mut app, quality);
+    let reduced_scene = match &app.state.features.model_preview.current().unwrap().content {
+        preview_model::PreviewContent::Map { scene, .. } => {
+            assert!(scene.texture_preparation.max_dimension.is_some());
+            Arc::clone(scene)
+        }
+        _ => panic!("expected staged map"),
+    };
+    assert_eq!(
+        app.state.features.model_preview.stage_transform(),
+        placement
+    );
+    model_manager::update(
+        &mut app.state.features.model_manager,
+        model_manager::Message::AutomaticAxesChanged(false),
+    );
+    let rebuild = app.apply_model_manager_message(model_manager::Message::StageRequested);
+    modeller_workflow_drain(&mut app, rebuild);
+    assert_eq!(
+        app.state
+            .features
+            .model_preview
+            .requested_map_texture_quality(),
+        Some(preview_model::MapTextureQuality::Reduced)
+    );
+    assert_eq!(
+        app.state.features.model_preview.stage_transform(),
+        placement
+    );
+    assert!(
+        matches!(&app.state.features.model_preview.current().unwrap().content, preview_model::PreviewContent::Map { scene, .. } if Arc::ptr_eq(scene, &reduced_scene))
+    );
+
+    // An explicit Native stage request must not reuse the Reduced cache entry.
+    let lease = app
+        .state
+        .features
+        .model_manager
+        .preview_directory()
+        .unwrap();
+    let (model, _) = super::model_stage::prepare_imported_model_preview(
+        Generation::INITIAL,
+        &lease.path().join("models/workflow.mdl"),
+    )
+    .unwrap();
+    let native = super::model_stage::prepare_map_preview(Generation::INITIAL, &map).unwrap();
+    let restage =
+        app.run_model_manager_effect(model_manager::Effect::OpenStage { model, map: native });
+    modeller_workflow_drain(&mut app, restage);
+    assert!(
+        matches!(&app.state.features.model_preview.current().unwrap().content, preview_model::PreviewContent::Map { scene, .. } if scene.texture_preparation.max_dimension.is_none() && !Arc::ptr_eq(scene, &reduced_scene))
+    );
+    assert_eq!(
+        app.state
+            .features
+            .model_preview
+            .requested_map_texture_quality(),
+        Some(preview_model::MapTextureQuality::Native)
+    );
+    assert_eq!(
+        app.state.features.model_preview.stage_transform(),
+        placement
+    );
+    assert!(app.state.features.model_preview.stage_model().is_some());
 }

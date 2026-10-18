@@ -85,13 +85,45 @@ impl Editor {
     }
 }
 
+enum CollisionSelection<'a> {
+    Automatic(CollisionDetail),
+    Existing,
+    None,
+    Custom {
+        source: &'a std::path::Path,
+        parts: &'a [String],
+        repair: Option<CollisionDetail>,
+    },
+}
+
 impl State {
+    pub(super) fn collision_valid(&self) -> bool {
+        self.collision_selection().is_some()
+    }
+
     pub(super) fn collision_request(&self) -> Option<ModelCollision> {
+        Some(match self.collision_selection()? {
+            CollisionSelection::Automatic(detail) => ModelCollision::Automatic(detail),
+            CollisionSelection::Existing => ModelCollision::Existing,
+            CollisionSelection::None => ModelCollision::None,
+            CollisionSelection::Custom {
+                source,
+                parts,
+                repair,
+            } => ModelCollision::Custom {
+                source: source.to_path_buf(),
+                parts: parts.to_vec(),
+                repair,
+            },
+        })
+    }
+
+    fn collision_selection(&self) -> Option<CollisionSelection<'_>> {
         if self.kind() != Some(SourceKind::Mesh) {
             return Some(if self.collision.mode == CollisionMode::None {
-                ModelCollision::None
+                CollisionSelection::None
             } else {
-                ModelCollision::Existing
+                CollisionSelection::Existing
             });
         }
         if !self.collision.edited
@@ -106,22 +138,22 @@ impl State {
             return None;
         }
         Some(match self.collision.mode {
-            CollisionMode::Automatic => ModelCollision::Automatic(self.collision.detail),
+            CollisionMode::Automatic => CollisionSelection::Automatic(self.collision.detail),
             CollisionMode::Existing => {
                 if let Some(inspection) = &self.inspection
                     && inspection.source_model.is_none()
                     && !inspection.collision_parts.is_empty()
                 {
-                    ModelCollision::Custom {
-                        source: self.source.clone()?,
-                        parts: inspection.collision_parts.clone(),
+                    CollisionSelection::Custom {
+                        source: self.source.as_deref()?,
+                        parts: &inspection.collision_parts,
                         repair: None,
                     }
                 } else {
-                    ModelCollision::Existing
+                    CollisionSelection::Existing
                 }
             }
-            CollisionMode::None => ModelCollision::None,
+            CollisionMode::None => CollisionSelection::None,
             CollisionMode::Custom => {
                 let source = self.collision.source.as_ref()?;
                 if self.collision.inspection_generation.is_some() || self.collision.error.is_some()
@@ -149,9 +181,9 @@ impl State {
                 {
                     return None;
                 }
-                ModelCollision::Custom {
-                    source: source.clone(),
-                    parts: self.collision.parts.clone(),
+                CollisionSelection::Custom {
+                    source: source.as_path(),
+                    parts: &self.collision.parts,
                     repair: self
                         .collision
                         .repair_custom
@@ -481,7 +513,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element<'a, Messag
                         .size(tokens.typography.body_sm)
                         .color(tokens.colors.error),
                 );
-            } else if state.collision_request().is_none() {
+            } else if !state.collision_valid() {
                 content = content.push(
                     text(i18n.tr("models-collision-select-parts"))
                         .size(tokens.typography.body_sm)

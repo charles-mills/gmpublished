@@ -679,7 +679,6 @@ pub(super) fn try_map_preview_data_with_prop_model_loader_and_textures(
     let render_mode_status = render_mode_log_suffix(table.slots());
     if !phy_debug_meshes.is_empty() {
         table.push_unindexed(MaterialSlot {
-            tint_base: None,
             resolution: Default::default(),
             canonical_name: None,
             shader: Default::default(),

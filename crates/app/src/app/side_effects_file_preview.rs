@@ -5,6 +5,13 @@ use crate::generation::Generation;
 use crate::media::file_preview_decode::load_preview;
 use crate::media::preview_model::{PreviewContent, PreviewLoadError, PreviewRequest};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ModelPreviewLoad {
+    pub(super) request: Generation,
+    owner: Option<Generation>,
+    pending_quality: Option<bool>,
+}
+
 impl App {
     pub(super) fn apply_file_preview_message(
         &mut self,
@@ -18,9 +25,23 @@ impl App {
         &mut self,
         message: file_preview::Message,
     ) -> Task<RootMessage> {
+        use crate::features::model_manager;
+
+        // Keep a texture choice from cancelling a decoder that owns a model build.
+        if let file_preview::Message::MapReducedTextureDetailToggled(reduced) = &message
+            && let Some(load) = &mut self.state.features.model_preview_loading
+            && load.owner.is_some()
+        {
+            load.pending_quality = Some(*reduced);
+            return Task::none();
+        }
         let completed = match &message {
             file_preview::Message::Loaded(generation, result)
-                if self.state.features.model_preview_loading == Some(*generation) =>
+                if self
+                    .state
+                    .features
+                    .model_preview_loading
+                    .is_some_and(|load| load.request == *generation) =>
             {
                 Some((
                     false,
@@ -32,7 +53,11 @@ impl App {
                 ))
             }
             file_preview::Message::StageLoaded(generation, result)
-                if self.state.features.model_preview_loading == Some(*generation) =>
+                if self
+                    .state
+                    .features
+                    .model_preview_loading
+                    .is_some_and(|load| load.request == *generation) =>
             {
                 Some((
                     true,
@@ -45,34 +70,63 @@ impl App {
             }
             _ => None,
         };
-        if completed.is_some() {
-            self.state.features.model_preview_loading = None;
-        }
-        if completed.is_some()
-            && !self
-                .state
-                .features
-                .model_manager
-                .preview_accepts_presentation()
+        let finished = completed
+            .as_ref()
+            .and_then(|_| self.state.features.model_preview_loading.take());
+        if let Some(owner) = finished.and_then(|load| load.owner)
+            && (self.state.features.model_manager.preview_job_generation() != Some(owner)
+                || !self
+                    .state
+                    .features
+                    .model_manager
+                    .preview_accepts_presentation())
         {
             file_preview::update(
                 &mut self.state.features.model_preview,
                 file_preview::Message::WorkspaceLoadCancelled,
             );
-            return self.apply_model_manager_message(
-                crate::features::model_manager::Message::PreviewPresented,
-            );
+            let retired = self
+                .apply_model_manager_message(model_manager::Message::PreviewLoadCancelled(owner));
+            let quality =
+                finished
+                    .and_then(|load| load.pending_quality)
+                    .map_or_else(Task::none, |reduced| {
+                        self.apply_model_preview_message(
+                            file_preview::Message::MapReducedTextureDetailToggled(reduced),
+                        )
+                    });
+            return Task::batch([retired, quality]);
         }
         if matches!(message, file_preview::Message::BackRequested) {
             self.capture_model_stage();
         }
+        let closing = matches!(
+            message,
+            file_preview::Message::CloseFinished
+                | file_preview::Message::BackRequested
+                | file_preview::Message::WorkspaceLoadCancelled
+        );
+        let cancelled = closing
+            .then(|| self.state.features.model_preview_loading.take())
+            .flatten();
+        let managed = matches!(
+            message,
+            file_preview::Message::WorkspaceOpenRequested(_)
+                | file_preview::Message::WorkspaceStageRequested { .. }
+        );
         let effects = file_preview::update(&mut self.state.features.model_preview, message);
         if let Some(generation) = effects.iter().find_map(|effect| match effect {
             file_preview::Effect::LoadRequested(request) => Some(request.request_id),
             file_preview::Effect::LoadStage { generation, .. } => Some(*generation),
             _ => None,
         }) {
-            self.state.features.model_preview_loading = Some(generation);
+            self.state.features.model_preview_loading = Some(ModelPreviewLoad {
+                request: generation,
+                owner: managed
+                    .then(|| self.state.features.model_manager.preview_job_generation())
+                    .flatten(),
+                pending_quality: None,
+            });
         }
         let mut tasks = Vec::new();
         for effect in effects {
@@ -92,12 +146,22 @@ impl App {
                 }));
             }
         }
-        if let Some((staged, result)) = completed {
+        if let Some(owner) = cancelled.and_then(|load| load.owner) {
+            tasks.push(
+                self.apply_model_manager_message(model_manager::Message::PreviewLoadCancelled(
+                    owner,
+                )),
+            );
+        }
+        // Viewer reloads have their own lifetime and must not acknowledge a model compile.
+        if finished.is_some_and(|load| load.owner.is_some())
+            && let Some((staged, result)) = completed
+        {
             match result {
                 Ok(()) => {
-                    tasks.push(self.apply_model_manager_message(
-                        crate::features::model_manager::Message::PreviewPresented,
-                    ));
+                    tasks.push(
+                        self.apply_model_manager_message(model_manager::Message::PreviewPresented),
+                    );
                     if staged
                         && let Some((position, angles)) =
                             self.state.features.model_manager.saved_stage_placement()
@@ -116,10 +180,15 @@ impl App {
                         ));
                     }
                 }
-                Err(error) => tasks.push(self.apply_model_manager_message(
-                    crate::features::model_manager::Message::PreviewFailed(error),
-                )),
+                Err(error) => tasks.push(
+                    self.apply_model_manager_message(model_manager::Message::PreviewFailed(error)),
+                ),
             }
+        }
+        if let Some(reduced) = finished.and_then(|load| load.pending_quality) {
+            tasks.push(self.apply_model_preview_message(
+                file_preview::Message::MapReducedTextureDetailToggled(reduced),
+            ));
         }
         self.sync_model_workspace();
         Task::batch(tasks)
@@ -263,6 +332,7 @@ impl App {
                 request.crc32 == map.crc32
                     && request.entry_path == map.entry_path
                     && request.archive == map.archive
+                    && request.map_texture_quality == map.map_texture_quality
             })
             .and_then(|_| self.state.features.model_preview.current())
             .filter(|data| matches!(data.content, PreviewContent::Map { .. }))

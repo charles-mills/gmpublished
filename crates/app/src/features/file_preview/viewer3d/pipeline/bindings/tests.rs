@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 fn material_need_fixture() -> MaterialSlot {
     MaterialSlot {
-        tint_base: None,
         resolution: Default::default(),
         canonical_name: None,
         name: "need-order".into(),
@@ -346,7 +345,6 @@ fn hidden_material_pages_are_not_demanded_even_if_a_texture_descriptor_is_retain
         .into_material()
         .unwrap();
     let mut slot = MaterialSlot {
-        tint_base: None,
         resolution: Default::default(),
         canonical_name: None,
         name: "test/visible".into(),
@@ -708,7 +706,6 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
                 .into_material()
                 .unwrap();
             MaterialSlot {
-                tint_base: None,
                 resolution: Default::default(),
                 canonical_name: None,
                 name: name.into(),
@@ -721,6 +718,7 @@ fn cached_page_needs_remain_local_to_selected_visibility_and_animation_clock() {
         })
         .collect();
     let source = PreviewScene::Model(Arc::new(ModelPreview {
+        physics_hulls: Default::default(),
         pose_cache: Default::default(),
         root_lod: 0,
         selected_lod: 0,

@@ -113,7 +113,6 @@ fn model(blended: bool, lods: bool, offset: f32) -> Arc<ModelPreview> {
                     resolution: crate::bridge::materials::MaterialResolutionOutcome::Loaded,
                     canonical_name: None,
                     shader: Default::default(),
-                    tint_base: None,
                     name: name.clone(),
                     texture: None,
                     texture2: None,
@@ -142,6 +141,7 @@ fn model(blended: bool, lods: bool, offset: f32) -> Arc<ModelPreview> {
     Arc::new(ModelPreview {
         model_animations: Vec::new(),
         model_animation_issues: Vec::new(),
+        physics_hulls: Default::default(),
         pose_cache: Default::default(),
         root_lod,
         selected_lod: root_lod,

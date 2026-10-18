@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use gmpublished_backend::model_compile::{
-    AnimationEvent, AnimationSettings, ModelBodygroup, ModelCollision, ModelInspection,
+    AnimationEvent, AnimationEventView, AnimationSettings, AnimationSettingsView, ModelBodygroup,
+    ModelCollision, ModelInspection,
 };
 use gmpublished_backend::model_project::{ModelSkin, ModelStage};
 
@@ -17,11 +18,21 @@ pub enum SourceKind {
 
 impl SourceKind {
     pub fn of(path: &Path) -> Option<Self> {
-        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-            "qc" | "toml" => Some(Self::Description),
-            "smd" | "dmx" | "fbx" | "gltf" | "glb" => Some(Self::Mesh),
-            "mdl" => Some(Self::Compiled),
-            _ => None,
+        let extension = path.extension()?;
+        if ["qc", "toml"]
+            .iter()
+            .any(|value| extension.eq_ignore_ascii_case(value))
+        {
+            Some(Self::Description)
+        } else if ["smd", "dmx", "fbx", "gltf", "glb"]
+            .iter()
+            .any(|value| extension.eq_ignore_ascii_case(value))
+        {
+            Some(Self::Mesh)
+        } else if extension.eq_ignore_ascii_case("mdl") {
+            Some(Self::Compiled)
+        } else {
+            None
         }
     }
 }
@@ -93,7 +104,7 @@ impl ExportResult {
 #[derive(Clone, Debug)]
 pub struct PreviewBuild {
     pub result: ExportResult,
-    pub _directory: Arc<tempfile::TempDir>,
+    pub _directory: Option<Arc<tempfile::TempDir>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,6 +148,39 @@ pub(super) struct AnimationEditor {
     pub activity_weight: String,
     pub events: Vec<AnimationEventEditor>,
     pub advanced_expanded: bool,
+}
+
+impl AnimationEditor {
+    fn view(
+        &self,
+    ) -> AnimationSettingsView<'_, impl ExactSizeIterator<Item = AnimationEventView<'_>>> {
+        let activity = self
+            .included
+            .then_some(self.activity.trim())
+            .filter(|value| !value.is_empty());
+        AnimationSettingsView {
+            source: self.source.as_deref(),
+            included: self.included,
+            name: &self.name,
+            fps: if self.included {
+                self.fps.trim().parse().ok()
+            } else {
+                Some(30.0)
+            },
+            frame_count: self.frame_count,
+            activity,
+            activity_weight: if activity.is_some() {
+                self.activity_weight.trim().parse().ok()
+            } else {
+                Some(0)
+            },
+            events: self.events.iter().map(|event| AnimationEventView {
+                frame: event.frame.trim().parse().ok(),
+                event: event.event.trim(),
+                options: &event.options,
+            }),
+        }
+    }
 }
 
 impl From<&AnimationSettings> for AnimationEditor {
@@ -349,7 +393,7 @@ impl State {
             && self.preview.is_none()
             && !self.preview_busy()
             && self.inspection.is_some()
-            && self.preview_request().is_some()
+            && self.can_preview()
     }
 
     pub fn preview_dirty(&self) -> bool {
@@ -358,6 +402,10 @@ impl State {
 
     pub fn preview_busy(&self) -> bool {
         self.preview_job.is_some()
+    }
+
+    pub fn preview_job_generation(&self) -> Option<Generation> {
+        self.preview_job.as_ref().map(|job| job.generation)
     }
 
     pub fn preview_accepts_presentation(&self) -> bool {
@@ -370,7 +418,7 @@ impl State {
     pub fn preview_directory(&self) -> Option<Arc<tempfile::TempDir>> {
         self.preview
             .as_ref()
-            .map(|preview| Arc::clone(&preview._directory))
+            .and_then(|preview| preview._directory.as_ref().map(Arc::clone))
     }
 
     pub fn displayed_preview_transform(&self) -> Option<(f32, [f32; 3])> {
@@ -413,15 +461,29 @@ impl State {
     pub fn can_export(&self) -> bool {
         !self.busy()
             && !self.preview_busy()
-            && self.source.is_some()
-            && self.qc_editor_ready()
             && self.destination.is_some()
+            && self.request_options_valid()
+    }
+
+    pub(super) fn can_preview(&self) -> bool {
+        !self.busy() && self.request_options_valid()
+    }
+
+    pub(super) fn can_save_qc(&self) -> bool {
+        !self.busy() && self.kind() != Some(SourceKind::Compiled) && self.request_options_valid()
+    }
+
+    fn request_options_valid(&self) -> bool {
+        self.request_fields_valid() && self.animation_settings_valid() && self.lods_valid()
+    }
+
+    fn request_fields_valid(&self) -> bool {
+        self.kind().is_some()
+            && self.qc_editor_ready()
             && (self.kind() != Some(SourceKind::Mesh) || self.parsed_scale().is_some())
             && self.parsed_orientation().is_some()
             && self.physics_options_valid()
-            && self.parsed_animation_settings().is_some()
             && self.bodygroups_valid()
-            && self.parsed_lods().is_some()
     }
 
     pub(super) fn parsed_scale(&self) -> Option<f32> {
@@ -449,12 +511,12 @@ impl State {
     fn physics_options_valid(&self) -> bool {
         self.kind() != Some(SourceKind::Mesh)
             || (self.surface_property_valid()
-                && self.collision_request().is_some()
+                && self.collision_valid()
                 && (!self.collision_generates_physics() || self.parsed_collision_mass().is_some()))
     }
 
     pub(super) fn request(&self) -> Option<ExportRequest> {
-        if !self.can_export() {
+        if self.busy() || self.preview_busy() {
             return None;
         }
         self.build_request(self.destination.clone()?)
@@ -468,7 +530,7 @@ impl State {
     }
 
     fn build_request(&self, destination: PathBuf) -> Option<ExportRequest> {
-        if !self.physics_options_valid() || !self.bodygroups_valid() || !self.qc_editor_ready() {
+        if !self.request_fields_valid() {
             return None;
         }
         let mesh = self.kind() == Some(SourceKind::Mesh);
@@ -558,6 +620,15 @@ impl State {
             .collect::<Option<Vec<_>>>()?;
         gmpublished_backend::model_compile::validate_animation_settings(&settings).ok()?;
         Some(settings)
+    }
+
+    pub(super) fn animation_settings_valid(&self) -> bool {
+        self.kind() != Some(SourceKind::Mesh)
+            || self.static_prop
+            || gmpublished_backend::model_compile::validate_animation_settings_view(
+                self.animations.iter().map(AnimationEditor::view),
+            )
+            .is_ok()
     }
 
     pub(super) fn parsed_orientation(&self) -> Option<[f32; 3]> {

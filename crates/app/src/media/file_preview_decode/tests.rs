@@ -703,7 +703,6 @@ fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
         [1, 1]
     );
     let material = MaterialSlot {
-        tint_base: None,
         resolution: Default::default(),
         canonical_name: None,
         name: "water".into(),
@@ -740,7 +739,6 @@ fn brush_uvs_use_effective_mapping_dimensions_with_compiled_fallback() {
     for (name, expected) in [("replacement", [4.0, 1.0]), ("invalid", [8.0, 4.0])] {
         let resolved = resolver.resolve_primary(&[], name).into_material().unwrap();
         let material = MaterialSlot {
-            tint_base: None,
             resolution: Default::default(),
             canonical_name: None,
             name: name.into(),
@@ -1404,7 +1402,6 @@ fn door_bake_resolves_skin_remapped_slot_with_model_material_dirs() {
     materials.push(
         "door_skin",
         MaterialSlot {
-            tint_base: None,
             resolution: Default::default(),
             canonical_name: None,
             shader: Default::default(),
@@ -2018,7 +2015,6 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
     let mut materials = (0..25)
         .rev()
         .map(|index| MaterialSlot {
-            tint_base: None,
             resolution: Default::default(),
             canonical_name: None,
             shader: Default::default(),
@@ -2030,7 +2026,6 @@ fn unresolved_material_names_for_debug_are_sorted_deduped_and_capped() {
         })
         .collect::<Vec<_>>();
     materials.push(MaterialSlot {
-        tint_base: None,
         resolution: Default::default(),
         canonical_name: None,
         shader: Default::default(),

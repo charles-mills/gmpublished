@@ -86,7 +86,7 @@ pub struct Uniforms {
     pub fog: FogUniform,
     pub water_time_sky_tint: [f32; 4],
     pub water_depth_params: [f32; 4],
-    /// World-space half-space retained by this view; zero disables clipping.
+    /// Half-space in the submitted geometry coordinates; zero disables clipping.
     pub clip_plane: [f32; 4],
     /// Exact optical plane for height fog; independent of clip bias.
     pub medium_plane: [f32; 4],
@@ -281,6 +281,12 @@ impl MaterialUniform {
 impl Uniforms {
     pub fn apply_model_transform(&mut self, transform: [[f32; 4]; 4]) {
         self.view_proj = mat_mul(self.view_proj, transform);
+        self.raster_clip.view_projection = mat_mul(self.raster_clip.view_projection, transform);
+        let local_plane = |plane: [f32; 4]| {
+            transform.map(|column| column.into_iter().zip(plane).map(|(a, b)| a * b).sum())
+        };
+        self.clip_plane = local_plane(self.clip_plane);
+        self.medium_plane = local_plane(self.medium_plane);
         let scale_squared = (0..3)
             .map(|axis| transform[0][axis].powi(2))
             .sum::<f32>()
@@ -297,9 +303,13 @@ impl Uniforms {
             self.camera_position[axis] - transform[3][axis]
         }));
         self.camera_position[..3].copy_from_slice(&eye);
-        let scale = scale_squared.sqrt();
-        self.fog.start /= scale;
-        self.fog.end /= scale;
+        // Radial fog measures local eye-to-vertex distance. The other modes
+        // consume projected depth, which remains in world units after M is composed.
+        if self.fog.mode == FogMode::Radial as u32 {
+            let scale = scale_squared.sqrt();
+            self.fog.start /= scale;
+            self.fog.end /= scale;
+        }
         let light = Vec3::from(inverse_vector([
             self.light[0],
             self.light[1],
@@ -1146,7 +1156,7 @@ mod tests {
         assert_eq!(uniforms.light, [1.0, 0.0, 0.0, 0.35]);
         assert_eq!(
             uniforms.fog,
-            FogUniform::new(50.0, 500.0, 0.5, FogMode::Axial)
+            FogUniform::new(100.0, 1000.0, 0.5, FogMode::Axial)
         );
         let local_point = [2.0, 1.0, 5.0, 1.0];
         let world_point = [8.0, 14.0, 20.0, 1.0];
@@ -1257,7 +1267,6 @@ mod tests {
                 .unwrap()
                 .materials
                 .push(MaterialSlot {
-                    tint_base: None,
                     resolution: crate::bridge::materials::MaterialResolutionOutcome::Loaded,
                     canonical_name: Some(name.into()),
                     name: name.into(),

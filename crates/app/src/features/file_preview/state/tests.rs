@@ -487,6 +487,7 @@ fn phy_debug_control_is_visible_for_maps_and_models_with_debug_meshes() {
     );
     let scene = Arc::new(empty_map(Arc::clone(&render_scene)));
     let model_scene = Arc::new(ModelPreview {
+        physics_hulls: Default::default(),
         pose_cache: Default::default(),
         root_lod: 0,
         selected_lod: 0,
@@ -547,6 +548,7 @@ fn model_selections_apply_within_bounds_and_reset_on_close() {
     let data = PreviewData::from_request(
         &request,
         PreviewContent::Model(Arc::new(ModelPreview {
+            physics_hulls: Default::default(),
             pose_cache: Default::default(),
             root_lod: 0,
             selected_lod: 0,
@@ -602,6 +604,7 @@ fn loading_ui_uses_the_same_companion_and_audio_rules_as_the_decoder() {
 
 fn staged_state() -> State {
     staged_with_model(Arc::new(ModelPreview {
+        physics_hulls: Default::default(),
         pose_cache: Default::default(),
         root_lod: 0,
         selected_lod: 0,
@@ -1309,6 +1312,7 @@ fn lod_selection_swaps_geometry_clamps_to_root_and_resets_after_reload() {
             State::default()
         };
         let model = Arc::new(ModelPreview {
+            physics_hulls: Default::default(),
             pose_cache: Default::default(),
             root_lod: 1,
             selected_lod: 1,
@@ -1517,6 +1521,7 @@ fn visible_bounds_ignore_other_choices_unused_vertices_and_removed_lod_meshes() 
         Vec3::splat(1_000_000.0),
     );
     let model = Arc::new(ModelPreview {
+        physics_hulls: Default::default(),
         pose_cache: Default::default(),
         root_lod: 0,
         selected_lod: 0,

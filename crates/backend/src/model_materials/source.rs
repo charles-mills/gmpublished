@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde_json::Value;
 
@@ -32,12 +33,13 @@ pub(super) fn read_materials(
     path: &Path,
     material_names: &[String],
     material_directories: &[String],
+    source_paths: &mut BTreeSet<PathBuf>,
 ) -> Result<Vec<SourceMaterial>, MaterialExportError> {
     let extension = path.extension().unwrap_or_default().to_string_lossy();
     if extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb") {
-        read_gltf(path, material_names, material_directories)
+        read_gltf(path, material_names, material_directories, source_paths)
     } else if extension.eq_ignore_ascii_case("fbx") {
-        read_fbx(path, material_names, material_directories)
+        read_fbx(path, material_names, material_directories, source_paths)
     } else {
         Ok(Vec::new())
     }
@@ -47,7 +49,9 @@ fn read_gltf(
     path: &Path,
     material_names: &[String],
     material_directories: &[String],
+    source_paths: &mut BTreeSet<PathBuf>,
 ) -> Result<Vec<SourceMaterial>, MaterialExportError> {
+    source_paths.insert(path.to_owned());
     let bytes = read_source(path)?;
     let mut binary = None;
     let json = if bytes.starts_with(b"glTF") {
@@ -89,7 +93,7 @@ fn read_gltf(
     if let Some(values) = document["buffers"].as_array() {
         for buffer in values {
             buffers.push(if let Some(uri) = buffer["uri"].as_str() {
-                read_uri(path, uri)?
+                read_uri(path, uri, source_paths)?
             } else {
                 binary
                     .ok_or_else(|| {
@@ -133,7 +137,7 @@ fn read_gltf(
             }
         }
         let mut image = if let Some(index) = pbr["baseColorTexture"]["index"].as_u64() {
-            gltf_texture(path, &document, &buffers, index as usize)?
+            gltf_texture(path, &document, &buffers, index as usize, source_paths)?
         } else {
             RgbaImage::from_pixel(1, 1, image::Rgba([255; 4]))
         };
@@ -150,7 +154,7 @@ fn read_gltf(
         }
         let mut normal = material["normalTexture"]["index"]
             .as_u64()
-            .map(|index| gltf_texture(path, &document, &buffers, index as usize))
+            .map(|index| gltf_texture(path, &document, &buffers, index as usize, source_paths))
             .transpose()?;
         let normal_scale = material["normalTexture"]["scale"].as_f64().unwrap_or(1.0) as f32;
         if let Some(normal) = normal.as_mut()
@@ -335,6 +339,7 @@ fn gltf_texture(
     document: &Value,
     buffers: &[Vec<u8>],
     index: usize,
+    source_paths: &mut BTreeSet<PathBuf>,
 ) -> Result<RgbaImage, MaterialExportError> {
     let source = document["textures"][index]["source"]
         .as_u64()
@@ -342,7 +347,7 @@ fn gltf_texture(
         as usize;
     let image = &document["images"][source];
     let bytes = if let Some(uri) = image["uri"].as_str() {
-        read_uri(path, uri)?
+        read_uri(path, uri, source_paths)?
     } else {
         let index = image["bufferView"]
             .as_u64()
@@ -369,7 +374,11 @@ fn gltf_texture(
     decode_image(path, &bytes)
 }
 
-fn read_uri(path: &Path, uri: &str) -> Result<Vec<u8>, MaterialExportError> {
+fn read_uri(
+    path: &Path,
+    uri: &str,
+    source_paths: &mut BTreeSet<PathBuf>,
+) -> Result<Vec<u8>, MaterialExportError> {
     if let Some(data) = uri.strip_prefix("data:") {
         let (metadata, value) = data
             .split_once(',')
@@ -399,6 +408,7 @@ fn read_uri(path: &Path, uri: &str) -> Result<Vec<u8>, MaterialExportError> {
         if !found.starts_with(root) {
             return Err(MaterialExportError::UnsafePath(uri.into()));
         }
+        source_paths.insert(found.clone());
         read_source(&found)
     }
 }
@@ -425,7 +435,9 @@ fn read_fbx(
     path: &Path,
     material_names: &[String],
     material_directories: &[String],
+    source_paths: &mut BTreeSet<PathBuf>,
 ) -> Result<Vec<SourceMaterial>, MaterialExportError> {
+    source_paths.insert(path.to_owned());
     let length = fs::metadata(path)
         .map_err(|error| io_error(path, error))?
         .len();
@@ -452,7 +464,7 @@ fn read_fbx(
             };
         let mut warnings = Vec::new();
         let mut image = if let Some(texture) = color.texture.as_ref() {
-            fbx_texture(path, texture)?.unwrap_or_else(|| {
+            fbx_texture(path, texture, source_paths)?.unwrap_or_else(|| {
                     warnings.push(format!("Material '{name}': FBX color texture '{}' was not found. The FBX diffuse color was exported instead; add the texture beside the model, in its textures folder, or in its .fbm folder to restore it.", texture.filename.as_ref()));
                     RgbaImage::from_pixel(1, 1, image::Rgba([255; 4]))
             })
@@ -489,7 +501,7 @@ fn read_fbx(
             .texture
             .as_ref())
         {
-            let normal = fbx_texture(path, texture)?;
+            let normal = fbx_texture(path, texture, source_paths)?;
             if normal.is_none() {
                 warnings.push(format!("Material '{name}': FBX normal texture '{}' was not found. Its normal map was omitted.", texture.filename.as_ref()));
             }
@@ -531,6 +543,7 @@ fn fbx_texture_flags(texture: &ufbx::Texture) -> u32 {
 fn fbx_texture(
     path: &Path,
     texture: &ufbx::Texture,
+    source_paths: &mut BTreeSet<PathBuf>,
 ) -> Result<Option<RgbaImage>, MaterialExportError> {
     if !texture.content.is_empty() {
         return decode_image(Path::new(texture.filename.as_ref()), &texture.content).map(Some);
@@ -540,37 +553,9 @@ fn fbx_texture(
     {
         return decode_image(Path::new(video.filename.as_ref()), &video.content).map(Some);
     }
-    let root = path.parent().expect("model has parent");
-    let embedded_directory = format!(
-        "{}.fbm",
-        path.file_stem().unwrap_or_default().to_string_lossy()
-    );
-    for name in [
-        texture.relative_filename.as_ref(),
-        texture.filename.as_ref(),
-    ] {
-        let normalized = name.replace('\\', "/");
-        if normalized.split('/').any(|component| component == "..") {
-            return Err(MaterialExportError::UnsafePath(name.into()));
-        }
-        let basename = normalized.rsplit('/').next().unwrap_or(&normalized);
-        for name in [
-            normalized.clone(),
-            basename.into(),
-            format!("textures/{basename}"),
-            format!("{embedded_directory}/{basename}"),
-            format!("{embedded_directory}/{normalized}"),
-        ] {
-            if let Ok(relative) = safe_relative_path(&name)
-                && let Some(found) = case_insensitive_file(root, Path::new(&relative))?
-            {
-                let found = fs::canonicalize(&found).map_err(|source| io_error(&found, source))?;
-                if !found.starts_with(root) {
-                    return Err(MaterialExportError::UnsafePath(name));
-                }
-                return decode_image(&found, &read_source(&found)?).map(Some);
-            }
-        }
+    if let Some((_, found)) = super::resolve_fbx_texture_file(path, texture)? {
+        source_paths.insert(found.clone());
+        return decode_image(&found, &read_source(&found)?).map(Some);
     }
     Ok(None)
 }

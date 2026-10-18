@@ -327,7 +327,6 @@ mod tests {
         let resolution = resolved.outcome();
         let material = resolved.into_material().unwrap();
         MaterialSlot {
-            tint_base: None,
             resolution,
             canonical_name: Some("control".into()),
             shader: material.shader,

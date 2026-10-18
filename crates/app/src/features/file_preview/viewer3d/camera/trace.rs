@@ -24,12 +24,22 @@ impl FlyCamera {
         start_eye: Vec3,
         end_eye: Vec3,
     ) -> MapTrace {
-        let trace = self.trace_aabb(
+        let mut trace = self.trace_aabb(
             collision,
             start_eye + hull.eye_to_hull_center(),
             end_eye + hull.eye_to_hull_center(),
             hull.half_extents(),
         );
+        if let Some(collision) = self.stage_walk_collision() {
+            let staged = collision.trace_aabb(
+                start_eye + hull.eye_to_hull_center(),
+                end_eye + hull.eye_to_hull_center(),
+                hull.half_extents(),
+            );
+            if staged.start_solid && !trace.start_solid || staged.fraction < trace.fraction {
+                trace = staged;
+            }
+        }
         MapTrace {
             end_position: (trace.end_position + hull.hull_center_to_eye()),
             ..trace
@@ -72,6 +82,9 @@ impl FlyCamera {
         half_extents: Vec3,
     ) -> bool {
         collision.aabb_trace_solid(center, half_extents)
+            || self
+                .stage_walk_collision()
+                .is_some_and(|collision| collision.aabb_trace_solid(center, half_extents))
             || self.doors.iter().any(|door| {
                 door.brush_collision.as_ref().map_or_else(
                     || {

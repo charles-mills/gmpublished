@@ -19,6 +19,9 @@ pub(super) fn animations_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element
                     .on_toggle_maybe(
                         (!busy).then_some(move |value| Message::AnimationIncluded(index, value))
                     )
+                    .text_size(tokens.typography.body_sm)
+                    .size(tokens.icon_size(16.0))
+                    .spacing(tokens.spacing.gap_sm)
                     .style(move |_, status| theme::styles::checkbox(&tokens, status)),
                 text(animation.source.as_deref().unwrap_or("idle"))
                     .width(Length::Fill)
@@ -33,6 +36,7 @@ pub(super) fn animations_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element
                         .then_some(move |value| Message::AnimationNameChanged(index, value))
                 )
                 .padding(tokens.spacing.pad_control)
+                .size(tokens.typography.body)
                 .style(move |_, status| theme::styles::input(&tokens, status)),
             row![
                 column![
@@ -43,7 +47,8 @@ pub(super) fn animations_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element
                                 .then_some(move |value| Message::AnimationFpsChanged(index, value))
                         )
                         .padding(tokens.spacing.pad_control)
-                        .width(Length::Fixed(120.0))
+                        .width(Length::Fixed(tokens.text_size(120.0)))
+                        .size(tokens.typography.body)
                         .style(move |_, status| theme::styles::input(&tokens, status)),
                 ]
                 .spacing(tokens.spacing.gap_xs),
@@ -53,6 +58,9 @@ pub(super) fn animations_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element
                         (!busy && animation.included)
                             .then_some(move |value| Message::AnimationLoopChanged(index, value))
                     )
+                    .text_size(tokens.typography.body_sm)
+                    .size(tokens.icon_size(16.0))
+                    .spacing(tokens.spacing.gap_sm)
                     .style(move |_, status| theme::styles::checkbox(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap_lg)
@@ -82,14 +90,15 @@ pub(super) fn animations_card<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element
         }
         content = content.push(controls);
     }
-    if state.parsed_animation_settings().is_none() {
+    let invalid = !state.animation_settings_valid();
+    if invalid {
         content = content.push(
             text(i18n.tr("models-animation-invalid"))
                 .size(tokens.typography.body_sm)
                 .color(tokens.colors.error),
         );
     }
-    if state.parsed_animation_settings().is_none()
+    if invalid
         && state
             .animations
             .iter()
@@ -128,6 +137,7 @@ fn animation_advanced<'a>(
                         ))
                     )
                     .padding(tokens.spacing.pad_control)
+                    .size(tokens.typography.body)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap_xs)
@@ -141,10 +151,11 @@ fn animation_advanced<'a>(
                         )
                     )
                     .padding(tokens.spacing.pad_control)
+                    .size(tokens.typography.body)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
             ]
             .spacing(tokens.spacing.gap_xs)
-            .width(Length::Fixed(120.0)),
+            .width(Length::Fixed(tokens.text_size(120.0))),
         ]
         .spacing(tokens.spacing.gap),
         text(i18n.tr("models-animation-events")).size(tokens.typography.body),
@@ -168,6 +179,7 @@ fn animation_advanced<'a>(
                                 Message::AnimationEventFrameChanged(index, event_index, value)
                             }))
                             .padding(tokens.spacing.pad_control)
+                            .size(tokens.typography.body)
                             .style(move |_, status| theme::styles::input(&tokens, status)),
                     ]
                     .spacing(tokens.spacing.gap_xs)
@@ -180,6 +192,7 @@ fn animation_advanced<'a>(
                                 Message::AnimationEventCodeChanged(index, event_index, value)
                             }))
                             .padding(tokens.spacing.pad_control)
+                            .size(tokens.typography.body)
                             .style(move |_, status| theme::styles::input(&tokens, status)),
                     ]
                     .spacing(tokens.spacing.gap_xs)
@@ -193,6 +206,7 @@ fn animation_advanced<'a>(
                         Message::AnimationEventOptionsChanged(index, event_index, value)
                     }))
                     .padding(tokens.spacing.pad_control)
+                    .size(tokens.typography.body)
                     .style(move |_, status| theme::styles::input(&tokens, status)),
                 button(text(i18n.tr("models-animation-event-remove")))
                     .on_press_maybe(

@@ -184,6 +184,8 @@ pub struct ModelPrimitive {
 pub struct PreparedFrame {
     stage_view_id: ViewId,
     stage_frame: Option<usize>,
+    staged_optics: Vec<staging::OpticalViews>,
+    staged_intersection: Option<SceneView>,
     pub studio_grid: Option<studio_grid::StudioGridResources>,
     view_id: ViewId,
     scene_key: SceneKey,
@@ -324,6 +326,8 @@ impl shader::Primitive for ModelPrimitive {
             pipeline.frames.push(PreparedFrame {
                 stage_view_id: ViewId::default(),
                 stage_frame: None,
+                staged_optics: Vec::new(),
+                staged_intersection: None,
                 studio_grid: None,
                 view_id: self.view_id,
                 scene_key,
@@ -364,6 +368,8 @@ impl shader::Primitive for ModelPrimitive {
                 lightmaps::Snapshot::empty(Arc::clone(&pipeline.resources.default_lightmap)),
             );
             frame.planar_views.clear();
+            frame.staged_optics.clear();
+            frame.staged_intersection = None;
             frame.water_intersection = None;
             frame.screen_overlay = None;
             frame.lighting = lighting::Frame::new(device, map);
@@ -657,10 +663,12 @@ impl shader::Primitive for ModelPrimitive {
             ];
         }
 
-        main_uniforms = main_uniforms.with_clip_camera(self.view_camera);
+        if self.view_camera.is_some() || main_uniforms.clip_plane != self.uniforms.clip_plane {
+            main_uniforms = main_uniforms.with_clip_camera(self.view_camera);
+        }
         frame.main.world.write(queue, &main_uniforms);
         let upload = &frame.scene;
-        for surface in &frame.planar_views {
+        for surface in &mut frame.planar_views {
             let mut uniforms = main_uniforms;
             uniforms.water_depth_params[2] = f32::from(surface.reflection.is_some());
             uniforms.water_depth_params[3] = f32::from(surface.refraction.is_some());
@@ -816,13 +824,31 @@ impl shader::Primitive for ModelPrimitive {
         let stage_view_id = frame.stage_view_id;
         frame.stage_frame = None;
         if let Some(stage) = &self.stage {
-            let mut primitive = self.stage_primitive(stage, stage_view_id);
-            primitive.uniforms = primitive
-                .uniforms
-                .with_raster_offset(size, self.raster_offset());
+            let transform = mat_mul(stage.transform.matrix(), stage.live_transform);
+            let mut uniforms = pipeline.frames[slot].main.world.value;
+            uniforms.apply_model_transform(transform);
+            let primitive = self.stage_primitive(stage, stage_view_id, &uniforms);
             primitive.prepare(pipeline, device, queue, bounds, viewport);
-            pipeline.frames[slot].stage_frame =
-                Some(primitive.prepared_frame.load(Ordering::Relaxed));
+            let stage_slot = primitive.prepared_frame.load(Ordering::Relaxed);
+            pipeline.frames[slot].stage_frame = Some(stage_slot);
+            if stage_slot < pipeline.frames.len() && stage_slot != slot {
+                let (source, staged) = if slot < stage_slot {
+                    let (before, after) = pipeline.frames.split_at_mut(stage_slot);
+                    (&before[slot], &mut after[0])
+                } else {
+                    let (before, after) = pipeline.frames.split_at_mut(slot);
+                    (&after[0], &mut before[stage_slot])
+                };
+                staging::prepare_optics(
+                    source,
+                    staged,
+                    transform,
+                    &primitive,
+                    device,
+                    queue,
+                    &pipeline.resources,
+                );
+            }
         }
     }
     fn render(

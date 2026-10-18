@@ -102,6 +102,10 @@ impl FlyViewer {
                     offset: stage.transform.position - (eye + direction * distance),
                     direction,
                 });
+                if camera.mode == super::super::MovementMode::Walk {
+                    camera.grounded = false;
+                    camera.last_frame = None;
+                }
                 Some(Action::publish(Message::StageMoveStarted).and_capture())
             }
             Event::Mouse(mouse::Event::CursorMoved { .. })

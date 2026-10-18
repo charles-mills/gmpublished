@@ -100,7 +100,7 @@ pub(super) fn project_actions<'a>(state: &'a State, ctx: ViewCtx<'a>) -> Element
         .on_press_maybe(if compiled {
             state.can_export().then_some(Message::ExportRequested)
         } else {
-            (!state.busy() && state.qc_request().is_some()).then_some(Message::SaveQcRequested)
+            state.can_save_qc().then_some(Message::SaveQcRequested)
         })
         .padding(tokens.spacing.pad_control)
         .style(move |_, status| theme::styles::button(&tokens, status))

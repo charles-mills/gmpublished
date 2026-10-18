@@ -1451,7 +1451,7 @@ fn write_material_replacements(
                         "Invalid LOD replacement material name".into(),
                     ));
                 }
-                let target = target.replace('\\', "/");
+                let target = crate::mdl_writer::material_lookup_name(&target.replace('\\', "/"));
                 if let Some(previous) = replacements.insert(slot, target.clone())
                     && previous != target
                 {
@@ -2850,6 +2850,20 @@ switch_point = 30.0
             let o = mr + n * MATERIAL_REPLACEMENT_LIST_SIZE;
             assert_eq!(g(o), 0, "第 {n} 个表的 numReplacements");
         }
+    }
+
+    #[test]
+    fn dotted_lod_material_replacements_have_explicit_vmt_lookup_extensions() {
+        let mut model = multi_lod();
+        let source = model.desc.materials.textures[0].name.clone();
+        model.desc.bodyparts[0].models[0].lods[0]
+            .material_replacements
+            .push([source, "paint.001".into()]);
+        let output = write_material_replacements(&model, 2).unwrap();
+        let records = i32::from_le_bytes(output[12..16].try_into().unwrap()) as usize + 8;
+        let offset =
+            i32::from_le_bytes(output[records + 2..records + 6].try_into().unwrap()) as usize;
+        assert_eq!(&output[records + offset..], b"paint.001.vmt\0");
     }
 
     /// 单 LOD 路径必须**一行未变**：加多 LOD 支持后产物逐字节不变。

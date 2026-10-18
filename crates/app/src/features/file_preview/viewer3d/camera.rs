@@ -308,6 +308,7 @@ pub struct FlyCamera {
     pub(super) content_id: Option<u64>,
     pub(super) position: Option<Vec3>,
     pub(super) stage_grab: Option<StageGrab>,
+    pub(super) stage_collision: Option<stage_collision::StageCollision>,
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     pub(super) speed: f32,
@@ -439,6 +440,7 @@ impl HeldKeys {
     }
 }
 
+mod stage_collision;
 mod staging;
 use staging::StageGrab;
 
@@ -475,6 +477,7 @@ impl FlyCamera {
         }
         self.content_id = Some(content_id);
         self.stage_grab = None;
+        self.stage_collision = None;
         self.input_captured = false;
         self.held = HeldKeys::default();
         self.last_frame = None;
@@ -757,6 +760,10 @@ impl shader::Program<Message> for FlyViewer {
             self.pose,
             self.movement_mode,
         );
+        if camera.sync_stage_collision(self.stage.as_ref()) && camera.mode == MovementMode::Walk {
+            camera.grounded = false;
+            camera.last_frame = None;
+        }
         if camera.input_captured && !self.mouse_captured {
             camera.release_input();
         }
@@ -1305,7 +1312,6 @@ mod tests {
             .unwrap()
             .materials
             .push(super::super::MaterialSlot {
-                tint_base: None,
                 resolution: crate::bridge::materials::MaterialResolutionOutcome::Loaded,
                 canonical_name: Some("water".into()),
                 name: "water".into(),
@@ -1655,6 +1661,7 @@ mod tests {
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
                 pose_cache: Default::default(),
+                physics_hulls: Default::default(),
                 root_lod: 0,
                 selected_lod: 0,
                 lods: Vec::new(),
@@ -1748,6 +1755,7 @@ mod tests {
             render_feedback: Default::default(),
             model: Arc::new(ModelPreview {
                 pose_cache: Default::default(),
+                physics_hulls: Default::default(),
                 root_lod: 0,
                 selected_lod: 0,
                 lods: Vec::new(),

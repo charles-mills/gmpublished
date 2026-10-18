@@ -2,6 +2,7 @@ use alloc::{borrow::ToOwned as _, boxed::Box, ffi::CString, string::String, sync
 use core::{
     ffi::{c_void, CStr},
     marker::PhantomData,
+    ops::Deref,
     slice,
     str::FromStr,
 };
@@ -10,6 +11,42 @@ use std::thread;
 use arrayvec::ArrayVec;
 use ash::{ext, khr, vk};
 use parking_lot::RwLock;
+
+// ICD negotiation can initialize driver-global dispatch before publishing all of its
+// function pointers. Keep discovery and teardown from observing that partial state.
+// Reentrancy allows instance-creation and ownership callbacks to use this backend.
+// Device creation, command submission, and rendering do not acquire this gate.
+fn loader_lifecycle() -> parking_lot::ReentrantMutexGuard<'static, ()> {
+    static LIFECYCLE: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
+    LIFECYCLE.lock()
+}
+
+// An Entry owns the dynamically loaded Vulkan library. Its automatic field drop
+// would otherwise unload that library after InstanceShared::drop releases the gate.
+pub(super) struct LoaderEntry(Option<ash::Entry>);
+
+impl LoaderEntry {
+    fn unload(&mut self) {
+        let _lifecycle = loader_lifecycle();
+        drop(self.0.take());
+    }
+}
+
+impl Deref for LoaderEntry {
+    type Target = ash::Entry;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("Vulkan entry is live until teardown")
+    }
+}
+
+impl Drop for LoaderEntry {
+    fn drop(&mut self) {
+        self.unload();
+    }
+}
 
 unsafe extern "system" fn debug_utils_messenger_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -239,6 +276,7 @@ impl super::Instance {
         entry: &ash::Entry,
         layer_name: Option<&CStr>,
     ) -> Result<Vec<vk::ExtensionProperties>, crate::InstanceError> {
+        let _lifecycle = loader_lifecycle();
         let instance_extensions = {
             profiling::scope!("vkEnumerateInstanceExtensionProperties");
             unsafe { entry.enumerate_instance_extension_properties(layer_name) }
@@ -371,6 +409,8 @@ impl super::Instance {
         has_nv_optimus: bool,
         drop_callback: Option<crate::DropCallback>,
     ) -> Result<Self, crate::InstanceError> {
+        let _lifecycle = loader_lifecycle();
+        let entry = LoaderEntry(Some(entry));
         log::debug!("Instance version: 0x{instance_api_version:x}");
 
         let debug_utils = if let Some(debug_utils_create_info) = debug_utils_create_info {
@@ -612,6 +652,9 @@ impl super::Instance {
     ) -> Result<Self, crate::InstanceError> {
         profiling::scope!("Init Vulkan Backend");
 
+        // Declare this before Entry so failed initialization also drops the loader
+        // library while the lifecycle gate is held.
+        let _lifecycle = loader_lifecycle();
         let entry = unsafe {
             profiling::scope!("Load vk library");
             ash::Entry::load()
@@ -619,6 +662,7 @@ impl super::Instance {
         .map_err(|err| {
             crate::InstanceError::with_source(String::from("missing Vulkan entry points"), err)
         })?;
+        let mut entry = LoaderEntry(Some(entry));
         let version = {
             profiling::scope!("vkEnumerateInstanceVersion");
             unsafe { entry.try_enumerate_instance_version() }
@@ -661,14 +705,20 @@ impl super::Instance {
         let mut extensions = Self::desired_extensions(&entry, instance_api_version, desc.flags)?;
         let mut create_info = vk::InstanceCreateInfo::default();
 
-        if let Some(callback) = callback {
+        let _lifecycle = if let Some(callback) = callback {
+            // User code may wait for another thread to create an instance.
+            // Entry keeps the library live and protects unload if it panics.
+            drop(_lifecycle);
             callback(super::CreateInstanceCallbackArgs {
                 extensions: &mut extensions,
                 create_info: &mut create_info,
                 entry: &entry,
                 _phantom: PhantomData,
             });
-        }
+            loader_lifecycle()
+        } else {
+            _lifecycle
+        };
 
         let instance_layers = {
             profiling::scope!("vkEnumerateInstanceLayerProperties");
@@ -877,7 +927,7 @@ impl super::Instance {
 
         unsafe {
             Self::from_raw(
-                entry,
+                entry.0.take().expect("Vulkan entry is live until teardown"),
                 vk_instance,
                 instance_api_version,
                 android_sdk_version,
@@ -894,6 +944,7 @@ impl super::Instance {
 
 impl Drop for super::InstanceShared {
     fn drop(&mut self) {
+        let _lifecycle = loader_lifecycle();
         unsafe {
             // Keep du alive since destroy_instance may also log
             let _du = self.debug_utils.take().inspect(|du| {
@@ -904,6 +955,10 @@ impl Drop for super::InstanceShared {
                 self.raw.destroy_instance(None);
             }
         }
+        // A custom ownership callback must run before its Entry is unloaded,
+        // and both must stay inside the same native-loader lifecycle gate.
+        drop(self.drop_guard.take());
+        self.entry.unload();
     }
 }
 
@@ -970,6 +1025,8 @@ impl crate::Instance for super::Instance {
     ) -> Vec<crate::ExposedAdapter<super::Api>> {
         use crate::auxil::db;
 
+        // Physical-device discovery can release an unused ICD as well as load it.
+        let _lifecycle = loader_lifecycle();
         let raw_devices = match unsafe { self.shared.raw.enumerate_physical_devices() } {
             Ok(devices) => devices,
             Err(err) => {

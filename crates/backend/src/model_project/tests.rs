@@ -1555,3 +1555,213 @@ fn blender_authoring_saved_qc_remains_portable_and_preserves_edited_geometry_and
             .ends_with("materials/models/qc_saved/material.vmt")
     }));
 }
+
+#[test]
+fn saving_a_direct_source_never_replaces_the_imported_mesh_with_baked_output() {
+    let (root, mut request) = fixture();
+    let input = root.path().join("saved_sources");
+    fs::create_dir(&input).unwrap();
+    request.source = input.join("mesh.smd");
+    let original = include_bytes!("../../../vendor/mdlc/tests/fixtures/cube.smd");
+    fs::write(&request.source, original).unwrap();
+    request.static_prop = true;
+    request.scale = 2.0;
+    request.export_materials = false;
+    request.overwrite = true;
+    let error = save_model_qc(&request, &root.path().join("saved.qc")).unwrap_err();
+    assert!(
+        error.to_string().contains("overwrite an imported source"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&request.source).unwrap(), original);
+    assert!(!root.path().join("saved.qc").exists());
+    assert!(!root.path().join(".gmpublished-qc-projects.json").exists());
+
+    let expected = compile_model(&request).unwrap();
+    let saved = root.path().join("safe.qc");
+    save_model_qc(&request, &saved).unwrap();
+    let reopened = ModelCompileRequest::new(saved, root.path().join("reopened"));
+    assert_eq!(
+        vertices(&compile_model(&reopened).unwrap()),
+        vertices(&expected)
+    );
+    assert_eq!(fs::read(&request.source).unwrap(), original);
+}
+
+#[test]
+fn saved_projects_cannot_change_each_others_materials_and_owned_resaves_remain_safe() {
+    let (root, mut first) = fixture();
+    first.material_directory = None;
+    let second_source = root.path().join("blue");
+    fs::create_dir(&second_source).unwrap();
+    fs::copy(&first.source, second_source.join("cube.smd")).unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+        .save(second_source.join("material.png"))
+        .unwrap();
+    let mut second = first.clone();
+    second.source = second_source.join("cube.smd");
+    second.destination = root.path().join("second-output");
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    let first_qc = saved.join("one.qc");
+    save_model_qc(&first, &first_qc).unwrap();
+    let original_qc = fs::read(&first_qc).unwrap();
+    let original_texture = fs::read(saved.join("materials/material.vtf")).unwrap();
+    let registry = fs::read(saved.join(".gmpublished-qc-projects.json")).unwrap();
+    let first_input = fs::read(&first.source).unwrap();
+    let first_image = fs::read(root.path().join("material.png")).unwrap();
+    let second_image = fs::read(second_source.join("material.png")).unwrap();
+
+    second.overwrite = true;
+    assert!(save_model_qc(&second, &saved.join("two.qc")).is_err());
+    assert_eq!(fs::read(&first_qc).unwrap(), original_qc);
+    assert_eq!(
+        fs::read(saved.join("materials/material.vtf")).unwrap(),
+        original_texture
+    );
+    assert_eq!(
+        fs::read(saved.join(".gmpublished-qc-projects.json")).unwrap(),
+        registry
+    );
+    assert!(!saved.join("two.qc").exists());
+
+    // A deliberate update to this project's own unchanged artifacts is allowed.
+    first.scale = 2.0;
+    save_model_qc(&first, &first_qc).unwrap();
+    let expected = compile_model(&first).unwrap();
+    let reopened = ModelCompileRequest::new(first_qc, root.path().join("reopened-one"));
+    let actual = compile_model(&reopened).unwrap();
+    assert_eq!(vertices(&expected), vertices(&actual));
+    assert_eq!(bytes(&actual, ModelOutputKind::Texture), original_texture);
+
+    // A distinct material directory makes the second project independent.
+    second.material_directory = Some("blue".into());
+    save_model_qc(&second, &saved.join("two.qc")).unwrap();
+    let expected = compile_model(&second).unwrap();
+    let reopened = ModelCompileRequest::new(saved.join("two.qc"), root.path().join("reopened-two"));
+    let actual = compile_model(&reopened).unwrap();
+    assert_eq!(vertices(&expected), vertices(&actual));
+    assert_eq!(
+        bytes(&expected, ModelOutputKind::Texture),
+        bytes(&actual, ModelOutputKind::Texture)
+    );
+    assert_eq!(
+        fs::read(saved.join("materials/material.vtf")).unwrap(),
+        original_texture
+    );
+    assert_eq!(fs::read(&first.source).unwrap(), first_input);
+    assert_eq!(
+        fs::read(root.path().join("material.png")).unwrap(),
+        first_image
+    );
+    assert_eq!(
+        fs::read(second_source.join("material.png")).unwrap(),
+        second_image
+    );
+}
+
+#[test]
+fn identical_shared_materials_are_reused_but_their_owner_cannot_change_them() {
+    let (root, mut request) = fixture();
+    request.material_directory = None;
+    let saved = root.path().join("saved");
+    fs::create_dir(&saved).unwrap();
+    save_model_qc(&request, &saved.join("one.qc")).unwrap();
+    save_model_qc(&request, &saved.join("two.qc")).unwrap();
+    let texture = fs::read(saved.join("materials/material.vtf")).unwrap();
+    let qc = fs::read(saved.join("one.qc")).unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
+        .save(root.path().join("material.png"))
+        .unwrap();
+    let error = save_model_qc(&request, &saved.join("one.qc")).unwrap_err();
+    assert!(
+        error.to_string().contains("used by another project"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(saved.join("materials/material.vtf")).unwrap(),
+        texture
+    );
+    assert_eq!(fs::read(saved.join("one.qc")).unwrap(), qc);
+}
+
+#[test]
+fn protection_collects_gltf_buffers_images_and_material_resolver_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let request = animated_gltf_project(root.path());
+    let source = canonical(&request.source).unwrap();
+    let description =
+        model_compile::load_description(&request, &source, source.parent().unwrap()).unwrap();
+    let inputs = portable_qc::input_files(&request, &description, &source).unwrap();
+    for file in [
+        "input/character.gltf",
+        "input/buffers/geometry.bin",
+        "input/Textures/Face Color.PNG",
+    ] {
+        assert!(
+            inputs.contains(&canonical(&root.path().join(file)).unwrap()),
+            "{file}"
+        );
+    }
+
+    let (root, mut request) = fixture();
+    request.material_directory = None;
+    let output = compile_model(&request).unwrap();
+    // Treat an exported VMT/VTF pair as material inputs to another direct mesh.
+    let files = model_materials::prepare_materials(&["material".into()], &[], &request.destination)
+        .unwrap()
+        .source_paths;
+    for file in output.files.iter().filter(|file| {
+        matches!(
+            file.kind,
+            ModelOutputKind::Material | ModelOutputKind::Texture
+        )
+    }) {
+        assert!(
+            files.contains(&canonical(&file.path).unwrap()),
+            "{}",
+            file.path.display()
+        );
+    }
+    let originals: BTreeMap<_, _> = files
+        .iter()
+        .map(|file| (file.clone(), fs::read(file).unwrap()))
+        .collect();
+    let source = root.path().join("original/cube.smd");
+    fs::copy(&request.source, &source).unwrap();
+    request.source = source;
+    save_model_qc(&request, &root.path().join("original/safe.qc")).unwrap();
+    for (path, bytes) in originals {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn relative_skin_texture_inputs_use_the_model_directory_and_survive_saving() {
+    let (root, mut request) = fixture();
+    request.skins.push(ModelSkin {
+        name: "replacement".into(),
+        replacements: BTreeMap::from([(
+            "material".into(),
+            SkinMaterial::Texture {
+                path: "material.png".into(),
+            },
+        )]),
+    });
+    let source = canonical(&request.source).unwrap();
+    let description =
+        model_compile::load_description(&request, &source, source.parent().unwrap()).unwrap();
+    let inputs = portable_qc::input_files(&request, &description, &source).unwrap();
+    let texture = root.path().join("material.png");
+    assert!(inputs.contains(&canonical(&texture).unwrap()));
+    let original = fs::read(&texture).unwrap();
+    save_model_qc(&request, &root.path().join("relative-skin.qc")).unwrap();
+    let expected = compile_model(&request).unwrap();
+    let reopened = ModelCompileRequest::new(
+        root.path().join("relative-skin.qc"),
+        root.path().join("reopened-skin"),
+    );
+    let actual = compile_model(&reopened).unwrap();
+    assert_eq!(vertices(&expected), vertices(&actual));
+    assert_eq!(fs::read(texture).unwrap(), original);
+}

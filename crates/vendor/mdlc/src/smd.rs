@@ -227,6 +227,7 @@ pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
     // 要 `pending[0..2].clone()`，而 `SmdVertex` 里的 `links` 是 `Vec`，
     // clone 会连带再分配一次。改用数组后是**移动**，零分配、零克隆。
     let mut current_material: Option<String> = None;
+    let mut material_just_seen = false;
     let mut pending: [Option<SmdVertex>; 3] = [None, None, None];
     let mut pending_len = 0usize;
     // 复用的 token 缓冲（见函数文档）。
@@ -307,6 +308,7 @@ pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
                 }
                 section = Section::None;
                 current_material = None;
+                material_just_seen = false;
                 continue;
             }
             _ => {}
@@ -363,8 +365,12 @@ pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
                 });
             }
             Section::Triangles => {
-                // 材质名行：非数字开头。
-                let is_vertex_line = t[0].parse::<f32>().is_ok();
+                // Material lines can contain spaces or start with numbers. Keep
+                // malformed numeric vertex rows distinguishable from those names.
+                let numeric_material = pending_len == 0
+                    && !material_just_seen
+                    && (t.len() < 9 || t.iter().any(|token| token.parse::<f32>().is_err()));
+                let is_vertex_line = t[0].parse::<f32>().is_ok() && !numeric_material;
                 if !is_vertex_line {
                     // 新的材质名 —— 只有在上一个三角形已收满时才合法。
                     if pending_len != 0 {
@@ -376,9 +382,11 @@ pub fn parse_smd(text: &str) -> Result<Smd, SmdError> {
                             ),
                         ));
                     }
-                    current_material = Some(unquote(t[0]));
+                    current_material = Some(unquote(body.trim()));
+                    material_just_seen = true;
                     continue;
                 }
+                material_just_seen = false;
 
                 // 顶点行：**至少 9 个 token**。
                 //

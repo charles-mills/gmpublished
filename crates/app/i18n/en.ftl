@@ -496,6 +496,7 @@ workshop-text-invalid = Check the title (1–128 UTF-8 bytes) and description le
 workshop-text-save-failed = Could not save { $language }. Successful saves are kept; retry the remaining changes.
 
 models = Models
+models-experimental = Experimental
 models-description = Compile model sources for Garry's Mod, or recover editable sources from compiled models.
 models-import = Import model...
 models-import-hint = Choose a model file or drop one here.

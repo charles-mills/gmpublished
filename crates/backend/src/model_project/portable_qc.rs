@@ -107,6 +107,78 @@ pub(super) fn copy(
     ))
 }
 
+/// Resolve inputs independently of whether saving bakes geometry or copies its source.
+pub(super) fn input_files(
+    request: &ModelCompileRequest,
+    desc: &mdlc::model::ModelDesc,
+    source: &Path,
+) -> Result<BTreeSet<PathBuf>, ModelCompileError> {
+    let mut inputs = BTreeSet::from([source.to_owned()]);
+    if source
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("qc"))
+    {
+        let text = request.qc_text.as_deref().map_or_else(
+            || model_compile::read_qc_text(source),
+            |text| Ok(text.to_owned()),
+        )?;
+        inputs.extend(include_files(&text, source)?);
+    }
+    if super::model_compile::authoring::model_settings(source)?.is_none() {
+        inputs.extend(source_files(desc, source.parent().unwrap())?);
+    }
+    for lod in &request.lods {
+        inputs.insert(canonical(&lod.source)?);
+    }
+    if let model_compile::ModelCollision::Custom { source, .. } = &request.collision {
+        inputs.insert(canonical(source)?);
+    }
+    for replacement in request
+        .skins
+        .iter()
+        .flat_map(|skin| skin.replacements.values())
+    {
+        if let super::SkinMaterial::Texture { path } = replacement {
+            inputs.insert(canonical(&source.parent().unwrap().join(path))?);
+        }
+    }
+    let mut pending: Vec<_> = inputs.iter().cloned().collect();
+    while let Some(file) = pending.pop() {
+        for dependency in gltf_dependencies(&file)?
+            .into_iter()
+            .chain(wavefront_dependencies(&file)?)
+            .chain(fbx_dependencies(&file)?)
+        {
+            if inputs.insert(dependency.clone()) {
+                if inputs.len() > 4096 {
+                    return Err(invalid("source dependencies exceed the project size limit"));
+                }
+                pending.push(dependency);
+            }
+        }
+    }
+    Ok(inputs)
+}
+
+fn fbx_dependencies(source: &Path) -> Result<Vec<PathBuf>, ModelCompileError> {
+    if !source
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("fbx"))
+    {
+        return Ok(Vec::new());
+    }
+    let scene = mdlc::fbx::load_scene(source, "QC source dependencies")
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut files = Vec::new();
+    for texture in &scene.textures {
+        if let Some((_, path)) = super::model_materials::resolve_fbx_texture_file(source, texture)?
+        {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
 fn include_files(text: &str, source: &Path) -> Result<BTreeSet<PathBuf>, ModelCompileError> {
     let mut lexer = mdlc::qc::lexer::Lexer::new(source.parent().unwrap().to_path_buf());
     lexer.load_from_memory(text, &source.display().to_string());

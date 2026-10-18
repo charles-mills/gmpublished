@@ -403,8 +403,26 @@ fn render_transparent(
             },
         );
     }
-    let mut start = 0;
-    while start < view.transparency.len() {
+    render_transparent_operations(
+        encoder,
+        targets,
+        resources,
+        upload,
+        view,
+        0..view.transparency.len(),
+    );
+}
+
+fn render_transparent_operations(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    upload: &ViewerScene,
+    view: DrawView<'_>,
+    operations: std::ops::Range<usize>,
+) {
+    let mut start = operations.start;
+    while start < operations.end {
         let glass_material = |draw: &super::transparency::Draw| match &draw.primitive {
             super::transparency::Primitive::Mesh(item, _) => {
                 upload.assets.source.render_scene().materials[item.material_slot]
@@ -417,12 +435,12 @@ fn render_transparent(
         };
         let glass = glass_material(&view.transparency[start]);
         let transfer = SurfaceBlend::from(view.transparency[start].blend).color_transfer();
-        let end = (start + 1..view.transparency.len())
+        let end = (start + 1..operations.end)
             .find(|&index| {
                 SurfaceBlend::from(view.transparency[index].blend).color_transfer() != transfer
                     || glass_material(&view.transparency[index]) != glass
             })
-            .unwrap_or(view.transparency.len());
+            .unwrap_or(operations.end);
         let snapshot = glass.map(|_| {
             let snapshot = targets
                 .glass
@@ -458,32 +476,91 @@ fn render_transparent(
     }
 }
 
+fn scene_draw_view(view: &SceneView) -> DrawView<'_> {
+    DrawView {
+        uniforms: &view.world.bind_group,
+        visibility: &view.visibility,
+        skybox: false,
+        transparency: &view.transparency,
+        indirect: view.transparent_indirect.world.program(),
+    }
+}
+
+fn render_joined_transparency(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: &RenderTargets,
+    resources: &super::resources::ViewPipelines,
+    scene: (&ViewerScene, &SceneView),
+    staged: Option<(&ViewerScene, &SceneView)>,
+    planar: &[super::DrawItem],
+) {
+    let (upload, view) = scene;
+    let world = scene_draw_view(view);
+    let Some((stage_upload, stage_view)) = staged else {
+        render_transparent(encoder, targets, resources, upload, planar, world);
+        return;
+    };
+    let stage = scene_draw_view(stage_view);
+    // Planar fallbacks retain their existing pre-transparency phase.
+    for (upload, planar, view) in [
+        (upload, planar, world),
+        (
+            stage_upload,
+            stage_view.plans.as_ref().unwrap().world.planar.as_slice(),
+            stage,
+        ),
+    ] {
+        render_transparent(
+            encoder,
+            targets,
+            resources,
+            upload,
+            planar,
+            DrawView {
+                transparency: &[],
+                indirect: None,
+                ..view
+            },
+        );
+    }
+    for (is_stage, operations) in
+        super::transparency::scene_spans(world.transparency, stage.transparency)
+    {
+        let (upload, view) = if is_stage {
+            (stage_upload, stage)
+        } else {
+            (upload, world)
+        };
+        // Slice at render time without rebuilding or overwriting either view's
+        // indirect arguments. A split indirect run safely uses direct draws.
+        render_transparent_operations(encoder, targets, resources, upload, view, operations);
+    }
+}
+
 fn render_scene(
-    view: &SceneView,
+    scene: (&ViewerScene, &SceneView),
+    staged: Option<(&ViewerScene, &SceneView)>,
     resources: &RenderResources,
-    upload: &ViewerScene,
     encoder: &mut wgpu::CommandEncoder,
     kind: ViewKind,
     clear: wgpu::Color,
     sky: bool,
 ) {
+    let (upload, view) = scene;
     render_opaque(view, resources, upload, encoder, kind, clear, sky);
     let sun = &resources.reflection_sun;
     let resources = resources.for_view(kind);
     let targets = view.targets.as_ref().expect("prepared optical targets");
-    render_transparent(
+    if let Some((upload, view)) = staged {
+        render_world_opaque(view, resources, upload, encoder, targets);
+    }
+    render_joined_transparency(
         encoder,
         targets,
         resources,
-        upload,
+        scene,
+        staged,
         &view.plans.as_ref().unwrap().world.planar,
-        DrawView {
-            uniforms: &view.world.bind_group,
-            visibility: &view.visibility,
-            skybox: false,
-            transparency: &view.transparency,
-            indirect: view.transparent_indirect.world.program(),
-        },
     );
     if matches!(kind, ViewKind::Reflection) && sky {
         view.sun.query(encoder, sun, false);
@@ -510,10 +587,18 @@ pub fn render_frame<'a>(
     let upload = &frame.scene;
     for surface_view in &frame.planar_views {
         if let Some(view) = surface_view.reflection.as_ref() {
+            let staged = stage.and_then(|frame| {
+                frame
+                    .staged_optics
+                    .iter()
+                    .find(|views| views.surface_index == surface_view.surface_index)
+                    .and_then(|views| views.reflection.as_ref())
+                    .map(|view| (&frame.scene, view))
+            });
             render_scene(
-                view,
+                (upload, view),
+                staged,
                 resources,
-                upload,
                 encoder,
                 ViewKind::Reflection,
                 wgpu::Color::BLACK,
@@ -526,10 +611,18 @@ pub fn render_frame<'a>(
                 .shader
                 .water()
                 .is_none_or(|water| !water.above_water);
+            let staged = stage.and_then(|frame| {
+                frame
+                    .staged_optics
+                    .iter()
+                    .find(|views| views.surface_index == surface_view.surface_index)
+                    .and_then(|views| views.refraction.as_ref())
+                    .map(|view| (&frame.scene, view))
+            });
             render_scene(
-                view,
+                (upload, view),
+                staged,
                 resources,
-                upload,
                 encoder,
                 ViewKind::Refraction,
                 surface_view.refraction_clear,
@@ -679,52 +772,31 @@ pub fn render_frame<'a>(
             }
         }
     }
-    render_transparent(
+    render_joined_transparency(
         encoder,
         targets,
         resources.for_view(ViewKind::Main),
-        upload,
+        (upload, view),
+        stage.map(|frame| (&frame.scene, &frame.main)),
         &[],
-        DrawView {
-            uniforms: &view.world.bind_group,
-            visibility: &view.visibility,
-            skybox: false,
-            transparency: &view.transparency,
-            indirect: view.transparent_indirect.world.program(),
-        },
     );
-    if let Some(stage) = stage {
-        render_transparent(
-            encoder,
-            targets,
-            resources.for_view(ViewKind::Main),
-            &stage.scene,
-            &stage.main.plans.as_ref().unwrap().world.planar,
-            DrawView {
-                uniforms: &stage.main.world.bind_group,
-                visibility: &stage.main.visibility,
-                skybox: false,
-                transparency: &stage.main.transparency,
-                indirect: stage.main.transparent_indirect.world.program(),
-            },
-        );
-        if primitive
+    if let Some(stage) = stage
+        && primitive
             .stage
             .as_ref()
             .is_some_and(|stage| stage.phy_debug_visible)
-        {
-            let mut pass = pass(
-                encoder,
-                targets,
-                "file_preview.stage.physics_debug",
-                wgpu::LoadOp::Load,
-                Some(depth_load()),
-                true,
-            );
-            draw::configure_scene_pass(&mut pass, &local_bounds(targets));
-            pass.set_bind_group(0, &stage.main.world.bind_group, &[]);
-            draw::draw_phy_debug_meshes(&mut pass, resources, &stage.scene);
-        }
+    {
+        let mut pass = pass(
+            encoder,
+            targets,
+            "file_preview.stage.physics_debug",
+            wgpu::LoadOp::Load,
+            Some(depth_load()),
+            true,
+        );
+        draw::configure_scene_pass(&mut pass, &local_bounds(targets));
+        pass.set_bind_group(0, &stage.main.world.bind_group, &[]);
+        draw::draw_phy_debug_meshes(&mut pass, resources, &stage.scene);
     }
     if let Some(intersection) = frame
         .water_intersection
@@ -734,19 +806,22 @@ pub fn render_frame<'a>(
         let intersection = &intersection.view;
         let resources = resources.for_view(ViewKind::Main);
         render_world_opaque(intersection, resources, upload, encoder, targets);
-        render_transparent(
+        let staged = stage.and_then(|frame| {
+            frame
+                .staged_intersection
+                .as_ref()
+                .map(|view| (&frame.scene, view))
+        });
+        if let Some((upload, view)) = staged {
+            render_world_opaque(view, resources, upload, encoder, targets);
+        }
+        render_joined_transparency(
             encoder,
             targets,
             resources,
-            upload,
+            (upload, intersection),
+            staged,
             &intersection.plans.as_ref().unwrap().world.planar,
-            DrawView {
-                uniforms: &intersection.world.bind_group,
-                visibility: &intersection.visibility,
-                skybox: false,
-                transparency: &intersection.transparency,
-                indirect: intersection.transparent_indirect.world.program(),
-            },
         );
     }
     if !primitive.submerged {

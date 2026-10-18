@@ -44,6 +44,8 @@ pub struct MaterialAsset {
 pub struct PreparedMaterials {
     pub assets: Vec<MaterialAsset>,
     pub warnings: Vec<String>,
+    /// Canonical input files consumed while resolving and preparing these assets.
+    pub(crate) source_paths: BTreeSet<PathBuf>,
 }
 
 impl PreparedMaterials {
@@ -133,11 +135,45 @@ impl PreparedMaterials {
         }
         Self {
             assets,
-            warnings: Vec::new(),
+            ..Self::default()
         }
         .write_to(root)?;
         Ok(warnings)
     }
+}
+
+/// Material files used by geometry, authored skins and independent LOD replacements.
+pub(crate) fn source_material_names(
+    desc: &mdlc::model::ModelDesc,
+    variants: &[SkinVariant],
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    desc.materials
+        .textures
+        .iter()
+        .map(|texture| &texture.name)
+        .chain(
+            desc.bodyparts
+                .iter()
+                .flat_map(|body| &body.models)
+                .flat_map(|model| &model.lods)
+                .flat_map(|lod| &lod.material_replacements)
+                .map(|pair| &pair[1]),
+        )
+        .filter(|name| {
+            !variants
+                .iter()
+                .any(|variant| variant.name.eq_ignore_ascii_case(name))
+        })
+        .filter(|name| {
+            seen.insert(
+                mdlc::mdl_writer::normalize_texture_name(name, &desc.materials.search_paths)
+                    .replace('\\', "/")
+                    .to_ascii_lowercase(),
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 pub fn prepare_materials(
@@ -151,17 +187,13 @@ pub fn prepare_materials(
         source_root,
         files: BTreeMap::new(),
         visited_materials: BTreeSet::new(),
+        source_paths: BTreeSet::new(),
         warnings: Vec::new(),
     };
-    let mut directories = Vec::new();
-    for directory in material_directories {
-        let clean = directory.replace('\\', "/");
-        if clean.trim_matches('/').is_empty() {
-            directories.push(String::new());
-        } else {
-            directories.push(safe_relative_path(clean.trim_end_matches('/'))?);
-        }
-    }
+    let mut directories = material_directories
+        .iter()
+        .map(|directory| normalize_material_directory(directory))
+        .collect::<Result<Vec<_>, _>>()?;
     if directories.is_empty() {
         directories.push(String::new());
     }
@@ -201,6 +233,7 @@ pub fn prepare_materials(
             })
             .collect(),
         warnings: builder.warnings,
+        source_paths: builder.source_paths,
     })
 }
 
@@ -222,17 +255,14 @@ fn prepare_materials_for_source_inner(
         fs::canonicalize(source_file).map_err(|error| io_error(source_file, error))?;
     let root = source_file.parent().expect("source file has parent");
     let mut prepared = prepare_materials(material_names, material_directories, root)?;
-    let imported = source::read_materials(&source_file, material_names, material_directories)?;
-    let directory = material_directories
-        .first()
-        .map_or(Ok(String::new()), |directory| {
-            let clean = directory.replace('\\', "/");
-            if clean.trim_matches('/').is_empty() {
-                Ok(String::new())
-            } else {
-                safe_relative_path(clean.trim_end_matches('/'))
-            }
-        })?;
+    let imported = source::read_materials(
+        &source_file,
+        material_names,
+        material_directories,
+        &mut prepared.source_paths,
+    )?;
+    let directory =
+        normalize_material_directory(material_directories.first().map_or("", String::as_str))?;
     let mut imported_names = BTreeSet::new();
     let mut overrides = BTreeSet::new();
     for material in imported {
@@ -362,6 +392,7 @@ fn prepare_materials_for_source_inner(
             source_root: root.to_owned(),
             files: BTreeMap::new(),
             visited_materials: BTreeSet::new(),
+            source_paths: BTreeSet::new(),
             warnings: Vec::new(),
         };
         for (key, texture) in dependencies {
@@ -391,6 +422,7 @@ fn prepare_materials_for_source_inner(
             });
         }
         prepared.warnings.extend(builder.warnings);
+        prepared.source_paths.extend(builder.source_paths);
         prepared.assets.push(MaterialAsset {
             relative_path: path,
             bytes: vmt.into_bytes(),
@@ -517,6 +549,7 @@ pub fn prepare_materials_for_sources(
         }
         let (imported, overrides) =
             prepare_materials_for_source_inner(material_names, material_directories, &path)?;
+        prepared.source_paths.extend(imported.source_paths);
         for asset in imported.assets {
             if overrides.contains(&asset.relative_path) && preferred.remove(&asset.relative_path) {
                 assets.insert(asset.relative_path, asset.bytes);
@@ -559,6 +592,7 @@ struct MaterialBuilder {
     source_root: PathBuf,
     files: BTreeMap<PathBuf, Vec<u8>>,
     visited_materials: BTreeSet<String>,
+    source_paths: BTreeSet<PathBuf>,
     warnings: Vec<String>,
 }
 
@@ -595,6 +629,7 @@ impl MaterialBuilder {
             return Ok(false);
         }
         if let Some(path) = self.find_file(name, &["vmt"])? {
+            self.source_paths.insert(path.clone());
             self.visited_materials.insert(name.to_owned());
             let bytes = read_source(&path)?;
             let text =
@@ -669,6 +704,7 @@ impl MaterialBuilder {
             return Ok(true);
         }
         if let Some(path) = self.find_file(name, &["vtf"])? {
+            self.source_paths.insert(path.clone());
             let bytes = read_source(&path)?;
             let texture =
                 vformats::vtf::parse(&bytes, &vformats::Limits::default()).map_err(|error| {
@@ -693,6 +729,7 @@ impl MaterialBuilder {
         let Some(path) = self.find_file(name, IMAGE_EXTENSIONS)? else {
             return Ok(false);
         };
+        self.source_paths.insert(path.clone());
         if fs::metadata(&path)
             .map_err(|source| io_error(&path, source))?
             .len()
@@ -862,7 +899,24 @@ fn material_name(name: &str) -> Result<String, MaterialExportError> {
 }
 
 fn model_material_name(name: &str, directories: &[String]) -> Result<String, MaterialExportError> {
-    material_name(&mdlc::mdl_writer::normalize_texture_name(name, directories))
+    let directories = directories
+        .iter()
+        .map(|directory| normalize_material_directory(directory))
+        .collect::<Result<Vec<_>, _>>()?;
+    let name = name.replace('\\', "/").to_ascii_lowercase();
+    material_name(&mdlc::mdl_writer::normalize_texture_name(
+        &name,
+        &directories,
+    ))
+}
+
+fn normalize_material_directory(directory: &str) -> Result<String, MaterialExportError> {
+    let clean = directory.replace('\\', "/");
+    if clean.trim_matches('/').is_empty() {
+        Ok(String::new())
+    } else {
+        safe_relative_path(clean.trim_end_matches('/'))
+    }
 }
 
 fn safe_relative_path(name: &str) -> Result<String, MaterialExportError> {
@@ -876,6 +930,68 @@ fn safe_relative_path(name: &str) -> Result<String, MaterialExportError> {
         return Err(MaterialExportError::UnsafePath(name.to_owned()));
     }
     Ok(name.to_ascii_lowercase())
+}
+
+/// Resolve external FBX textures inside the source directory, retaining the selected
+/// relative path for portable copies and the canonical file for input protection.
+pub(crate) fn resolve_fbx_texture_file(
+    source: &Path,
+    texture: &ufbx::Texture,
+) -> Result<Option<(PathBuf, PathBuf)>, MaterialExportError> {
+    if !texture.content.is_empty()
+        || texture
+            .video
+            .as_ref()
+            .is_some_and(|video| !video.content.is_empty())
+    {
+        return Ok(None);
+    }
+    let parent = source.parent().expect("model has parent");
+    let root = fs::canonicalize(parent).map_err(|error| io_error(parent, error))?;
+    let embedded = format!(
+        "{}.fbm",
+        source.file_stem().unwrap_or_default().to_string_lossy()
+    );
+    let mut escaped_reference = None;
+    for name in [
+        texture.relative_filename.as_ref(),
+        texture.filename.as_ref(),
+    ] {
+        if name.is_empty() {
+            continue;
+        }
+        let name = name.replace('\\', "/");
+        if name.split('/').any(|component| component == "..") {
+            escaped_reference.get_or_insert_with(|| name.clone());
+        }
+        let basename = name.rsplit('/').next().unwrap();
+        for candidate in [
+            name.clone(),
+            basename.into(),
+            format!("textures/{basename}"),
+            format!("{embedded}/{basename}"),
+            format!("{embedded}/{name}"),
+        ] {
+            // Exporter machine paths may be stale or escape the model folder.
+            // Ignore those candidates while retaining safe in-folder fallbacks.
+            let Ok(relative) = safe_relative_path(&candidate) else {
+                continue;
+            };
+            let Some(found) = case_insensitive_file(&root, Path::new(&relative))? else {
+                continue;
+            };
+            let canonical = fs::canonicalize(&found).map_err(|error| io_error(&found, error))?;
+            if !canonical.starts_with(&root) {
+                return Err(MaterialExportError::UnsafePath(candidate));
+            }
+            if canonical.is_file() {
+                return Ok(Some((relative.into(), canonical)));
+            }
+        }
+    }
+    escaped_reference.map_or(Ok(None), |reference| {
+        Err(MaterialExportError::UnsafePath(reference))
+    })
 }
 
 fn read_source(path: &Path) -> Result<Vec<u8>, MaterialExportError> {
@@ -1051,10 +1167,7 @@ pub(crate) fn prepare_skin_materials(
     source_root: &Path,
 ) -> Result<(), MaterialExportError> {
     use crate::model_project::SkinMaterial;
-    let directory = directories
-        .first()
-        .map_or("", String::as_str)
-        .trim_matches('/');
+    let directory = normalize_material_directory(directories.first().map_or("", String::as_str))?;
     for variant in variants {
         let clean = model_material_name(&variant.name, directories)?;
         let name = if directory.is_empty() {
@@ -1089,6 +1202,8 @@ pub(crate) fn prepare_skin_materials(
                 } else {
                     source_root.join(path)
                 };
+                let path = fs::canonicalize(&path).map_err(|error| io_error(&path, error))?;
+                prepared.source_paths.insert(path.clone());
                 let bytes = read_source(&path)?;
                 let mut original_vtf = None;
                 let mut image = if bytes.starts_with(b"VTF\0") {
@@ -1205,6 +1320,10 @@ fn prepared_material(
     directories: &[String],
 ) -> Result<String, MaterialExportError> {
     let clean = model_material_name(name, directories)?;
+    let directories = directories
+        .iter()
+        .map(|directory| normalize_material_directory(directory))
+        .collect::<Result<Vec<_>, _>>()?;
     directories
         .iter()
         .map(String::as_str)

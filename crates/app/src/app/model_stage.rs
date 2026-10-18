@@ -12,10 +12,65 @@ use super::model_manager;
 mod installed;
 pub(super) use installed::{install_model, list_models, remove_model};
 
+#[cfg(test)]
 pub(super) fn prepare_imported_model_preview(
     generation: Generation,
     source: &Path,
 ) -> Result<(PreviewRequest, model_manager::ExportResult), String> {
+    let result = imported_model_files(source)?;
+    let request = prepare_model_preview(generation, &result)?;
+    Ok((request, result))
+}
+
+pub(super) fn prepare_model_preview(
+    generation: Generation,
+    result: &model_manager::ExportResult,
+) -> Result<PreviewRequest, String> {
+    let root = &result.directory;
+    let source = result
+        .files
+        .iter()
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mdl"))
+        })
+        .ok_or_else(|| "The export contains no model file".to_owned())?;
+    let mut indexed = Vec::with_capacity(result.files.len());
+    for path in &result.files {
+        let size = std::fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .len();
+        indexed.push((asset_path(root, path)?, size, path.clone()));
+    }
+    let mut content_hash = crc32fast::Hasher::new();
+    for (name, size, path) in &indexed {
+        content_hash.update(&(name.len() as u64).to_le_bytes());
+        content_hash.update(name.as_bytes());
+        content_hash.update(&size.to_le_bytes());
+        content_hash.update(&file_crc32(path)?.to_le_bytes());
+    }
+    let entry_path = asset_path(root, source)?;
+    let size_bytes = std::fs::metadata(source)
+        .map_err(|error| error.to_string())?
+        .len();
+    Ok(PreviewRequest {
+        cancellation: Default::default(),
+        map_texture_quality: Default::default(),
+        request_id: generation,
+        archive: PreviewArchiveSource::from_folder(indexed),
+        entry_path,
+        display_name: source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        size_bytes,
+        crc32: content_hash.finalize(),
+        bypass_size_limits: false,
+    })
+}
+
+pub(super) fn imported_model_files(source: &Path) -> Result<model_manager::ExportResult, String> {
     if !source
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("mdl"))
@@ -55,51 +110,20 @@ pub(super) fn prepare_imported_model_preview(
         collect_material_files(&root.join("materials"), 0, &mut files)?;
     }
     files.sort();
-    let mut indexed = Vec::with_capacity(files.len());
     let mut bytes = 0_u64;
     for path in &files {
         let size = std::fs::metadata(path)
             .map_err(|error| error.to_string())?
             .len();
         bytes = bytes.saturating_add(size);
-        indexed.push((asset_path(&root, path)?, size, path.clone()));
     }
-    let mut content_hash = crc32fast::Hasher::new();
-    for (name, size, path) in &indexed {
-        content_hash.update(&(name.len() as u64).to_le_bytes());
-        content_hash.update(name.as_bytes());
-        content_hash.update(&size.to_le_bytes());
-        content_hash.update(&file_crc32(path)?.to_le_bytes());
-    }
-    let entry_path = asset_path(&root, &source)?;
-    let size_bytes = std::fs::metadata(&source)
-        .map_err(|error| error.to_string())?
-        .len();
-    let request = PreviewRequest {
-        cancellation: Default::default(),
-        map_texture_quality: Default::default(),
-        request_id: generation,
-        archive: PreviewArchiveSource::from_folder(indexed),
-        entry_path,
-        display_name: source
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-        size_bytes,
-        crc32: content_hash.finalize(),
-        bypass_size_limits: false,
-    };
-    Ok((
-        request,
-        model_manager::ExportResult {
-            directory: root,
-            files,
-            bytes,
-            warnings: Vec::new(),
-            compiled: true,
-        },
-    ))
+    Ok(model_manager::ExportResult {
+        directory: root,
+        files,
+        bytes,
+        warnings: Vec::new(),
+        compiled: true,
+    })
 }
 
 fn collect_material_files(

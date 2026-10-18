@@ -1768,15 +1768,24 @@ fn reference_poses(
     kept.iter()
         .enumerate()
         .map(|(i, &id)| {
-            let (pos, rot) = match parent[id] {
-                Some(p) => (
-                    rigid_bone_offset(&pose_world[p], &pose_world[id]),
-                    crate::fbx::local_rotation(&pose_world[p].to_ufbx(), &pose_world[id].to_ufbx()),
-                ),
-                None => (
-                    world_translation(&pose_world[id]),
-                    ufbx::matrix_to_transform(&pose_world[id].to_ufbx()).rotation,
-                ),
+            let (pos, rot) = if opts.axis == Some(ForcedAxis::Auto) {
+                let world = pose_world[id].to_ufbx();
+                let parent = parent[id].map(|parent| pose_world[parent].to_ufbx());
+                crate::fbx::affine_local_pose(&world, parent.as_ref())
+            } else {
+                match parent[id] {
+                    Some(p) => (
+                        rigid_bone_offset(&pose_world[p], &pose_world[id]),
+                        crate::fbx::local_rotation(
+                            &pose_world[p].to_ufbx(),
+                            &pose_world[id].to_ufbx(),
+                        ),
+                    ),
+                    None => (
+                        world_translation(&pose_world[id]),
+                        ufbx::matrix_to_transform(&pose_world[id].to_ufbx()).rotation,
+                    ),
+                }
             };
             let (pos, rot) = opts.local(ufbx::Transform {
                 translation: pos,
@@ -2340,6 +2349,8 @@ pub fn read_frames(
     // 再累乘世界矩阵。没有通道的节点因此天然保持参考姿态 —— 那正是规范
     // 对「某节点没有动画」的要求。
     let base: Vec<LocalTrs> = doc.nodes().map(|n| local_trs(&n)).collect();
+    let base_locals: Vec<World> = doc.nodes().map(|node| local_of(&node)).collect();
+    let animated_nodes: HashSet<_> = channels.iter().filter_map(|channel| channel.node).collect();
     for channel in &channels {
         if channel.property != gltf::animation::Property::Scale {
             continue;
@@ -2371,9 +2382,39 @@ pub fn read_frames(
             )));
         }
     }
+    let mut samples: Vec<_> = (0..n_frames)
+        .map(|frame| (begin + frame as f64 / f64::from(fps), Some(frame)))
+        .collect();
+    if opts.axis == Some(ForcedAxis::Auto) {
+        // Validate source rotation keys between output frames too: inherited
+        // shear must not disappear merely because a low frame rate missed it.
+        for channel in &channels {
+            if channel.property == gltf::animation::Property::Rotation
+                && channel.node.is_some_and(|node| kept.contains(&node))
+            {
+                samples.extend(channel.times.iter().map(|time| (f64::from(*time), None)));
+                samples.extend(
+                    channel
+                        .times
+                        .windows(2)
+                        .map(|times| ((f64::from(times[0]) + f64::from(times[1])) * 0.5, None)),
+                );
+            }
+        }
+        samples.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        samples.dedup_by(|a, b| a.0 == b.0);
+        if samples
+            .len()
+            .checked_mul(kept.len().max(1))
+            .is_none_or(|poses| poses > 2_000_000)
+        {
+            return Err(ferr(
+                "glTF animation exceeds the deformation validation limit",
+            ));
+        }
+    }
     let mut frames: Vec<SmdFrame> = Vec::with_capacity(n_frames);
-    for fi in 0..n_frames {
-        let t = begin + (fi as f64) / f64::from(fps);
+    for (t, output_frame) in samples {
         let mut trs = base.clone();
         for ch in &channels {
             if let Some(node) = ch.node
@@ -2382,24 +2423,52 @@ pub fn read_frames(
                 ch.apply(t, slot)?;
             }
         }
-        let locals: Vec<World> = trs.iter().map(|t| t.to_world()).collect();
+        let locals: Vec<World> = trs
+            .iter()
+            .enumerate()
+            .map(|(id, transform)| {
+                if animated_nodes.contains(&id) {
+                    transform.to_world()
+                } else {
+                    base_locals[id]
+                }
+            })
+            .collect();
         let world = accumulate(&locals, &parent);
 
+        for (i, &id) in kept.iter().enumerate() {
+            let current = world[id].to_ufbx();
+            if opts.axis == Some(ForcedAxis::Auto)
+                && !crate::fbx::affine_motion_supported(&reference_world[id].to_ufbx(), &current)
+            {
+                return Err(ferr(format!(
+                    "glTF animation '{}' changes scale or shear on '{}'; Source models require fixed bone scale. Bake the deformation before exporting",
+                    anim.name().unwrap_or("unnamed"),
+                    nodes[i].name
+                )));
+            }
+        }
+        let Some(fi) = output_frame else { continue };
         let mut poses: Vec<SmdPose> = Vec::with_capacity(kept.len());
         for (i, &id) in kept.iter().enumerate() {
-            let pos = match skeleton_parent[id] {
-                Some(p) => rigid_bone_offset(&world[p], &world[id]),
-                None => world_translation(&world[id]),
-            };
-            let rotation = if skeleton_parent[id] == parent[id] {
-                trs[id].rotation
+            let current = world[id].to_ufbx();
+            let (pos, rotation) = if opts.axis == Some(ForcedAxis::Auto) {
+                let parent = skeleton_parent[id].map(|parent| world[parent].to_ufbx());
+                crate::fbx::affine_local_pose(&current, parent.as_ref())
             } else {
-                match skeleton_parent[id] {
-                    Some(p) => {
-                        crate::fbx::local_rotation(&world[p].to_ufbx(), &world[id].to_ufbx())
+                let pos = match skeleton_parent[id] {
+                    Some(p) => rigid_bone_offset(&world[p], &world[id]),
+                    None => world_translation(&world[id]),
+                };
+                let rotation = if skeleton_parent[id] == parent[id] {
+                    trs[id].rotation
+                } else {
+                    match skeleton_parent[id] {
+                        Some(p) => crate::fbx::local_rotation(&world[p].to_ufbx(), &current),
+                        None => ufbx::matrix_to_transform(&current).rotation,
                     }
-                    None => ufbx::matrix_to_transform(&world[id].to_ufbx()).rotation,
-                }
+                };
+                (pos, rotation)
             };
             let (pos, rot) = opts.local(ufbx::Transform {
                 translation: pos,

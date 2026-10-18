@@ -72,6 +72,7 @@ pub(super) fn prepare_view(
     parallel: bool,
 ) {
     let _ = parallel;
+    view.entities = input.entities;
     let plans = view.plan_cache.prepare(
         upload,
         input.request(&view.visibility, common),

@@ -26,6 +26,7 @@ pub(super) fn empty_model_preview(bounds_min: Vec3, bounds_max: Vec3) -> ModelPr
     ModelPreview {
         model_animations: Vec::new(),
         model_animation_issues: Vec::new(),
+        physics_hulls: Default::default(),
         pose_cache: Default::default(),
         root_lod: 0,
         selected_lod: 0,

@@ -179,7 +179,7 @@ fn apply(command: LogCommand, file: &mut Option<File>, pending: &mut VecDeque<St
             if open_sink(file, pending) {
                 write_log_line(file, &line);
             } else {
-                hold(pending, line);
+                hold(pending, line, &DROPPED_LINES);
             }
             true
         }
@@ -210,10 +210,10 @@ fn open_sink(file: &mut Option<File>, pending: &mut VecDeque<String>) -> bool {
     file.is_some()
 }
 
-fn hold(pending: &mut VecDeque<String>, line: String) {
+fn hold(pending: &mut VecDeque<String>, line: String, dropped_lines: &AtomicU64) {
     if pending.len() >= MAX_PENDING_LINES {
         let _ = pending.pop_front();
-        DROPPED_LINES.fetch_add(1, Ordering::Relaxed);
+        dropped_lines.fetch_add(1, Ordering::Relaxed);
     }
     pending.push_back(line);
 }
@@ -412,19 +412,17 @@ mod tests {
         sink.shutdown();
     }
 
-    /// Check the local delta. A concurrent writer can drain the global
-    /// `DROPPED_LINES` count while this test runs.
     #[test]
     fn holding_past_the_bound_drops_oldest_and_counts_the_loss() {
         let mut pending = VecDeque::new();
-        let before = DROPPED_LINES.load(Ordering::Relaxed);
+        let dropped_lines = AtomicU64::new(0);
 
         for index in 0..MAX_PENDING_LINES + 8 {
-            hold(&mut pending, format!("line-{index}"));
+            hold(&mut pending, format!("line-{index}"), &dropped_lines);
         }
 
         assert_eq!(pending.len(), MAX_PENDING_LINES);
-        assert!(DROPPED_LINES.load(Ordering::Relaxed) >= before + 8);
+        assert_eq!(dropped_lines.load(Ordering::Relaxed), 8);
         assert_eq!(pending.front().map(String::as_str), Some("line-8"));
         assert_eq!(
             pending.back().map(String::as_str),

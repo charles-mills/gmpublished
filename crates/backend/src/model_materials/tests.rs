@@ -536,6 +536,7 @@ fn public_prepared_assets_cannot_write_duplicate_or_absolute_paths() {
                 bytes: Vec::new(),
             }],
             warnings: Vec::new(),
+            source_paths: BTreeSet::new(),
         };
         assert!(matches!(
             prepared.write_to(output.path()),
@@ -551,6 +552,7 @@ fn public_prepared_assets_cannot_write_duplicate_or_absolute_paths() {
             2
         ],
         warnings: Vec::new(),
+        source_paths: BTreeSet::new(),
     };
     assert!(matches!(
         prepared.write_to(output.path()),

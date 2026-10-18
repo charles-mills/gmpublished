@@ -13,22 +13,35 @@ pub struct ModelLod {
 }
 
 pub fn validate_lods(lods: &[ModelLod], bodygroups: bool) -> Result<(), ModelCompileError> {
+    validate_lod_values(
+        lods.iter()
+            .map(|lod| (lod.source.as_path(), Some(lod.switch_point))),
+        bodygroups,
+    )
+}
+
+pub fn validate_lod_values<'a>(
+    lods: impl ExactSizeIterator<Item = (&'a Path, Option<f32>)>,
+    bodygroups: bool,
+) -> Result<(), ModelCompileError> {
     if lods.len() >= mdlc::vvd::MAX_NUM_LODS {
         return Err(invalid("use at most seven additional LOD meshes"));
     }
-    if bodygroups && !lods.is_empty() {
+    if bodygroups && lods.len() != 0 {
         return Err(invalid(
             "external LOD authoring cannot be combined with bodygroups; define per-choice replacements in QC",
         ));
     }
     let mut previous = 0.0;
-    for lod in lods {
-        if !lod.switch_point.is_finite() || lod.switch_point <= previous {
+    for (source, switch_point) in lods {
+        let Some(switch_point) =
+            switch_point.filter(|value| value.is_finite() && *value > previous)
+        else {
             return Err(invalid(
                 "LOD switch thresholds must be positive, finite and strictly increasing",
             ));
-        }
-        if !lod.source.extension().is_some_and(|extension| {
+        };
+        if !source.extension().is_some_and(|extension| {
             ["smd", "dmx", "fbx", "gltf", "glb"]
                 .iter()
                 .any(|allowed| extension.eq_ignore_ascii_case(allowed))
@@ -37,7 +50,7 @@ pub fn validate_lods(lods: &[ModelLod], bodygroups: bool) -> Result<(), ModelCom
                 "LOD meshes must be SMD, DMX, FBX, glTF or GLB files",
             ));
         }
-        previous = lod.switch_point;
+        previous = switch_point;
     }
     Ok(())
 }

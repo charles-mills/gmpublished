@@ -434,9 +434,7 @@ fn update_inner(state: &mut State, message: Message) -> Vec<Effect> {
             state.stage_bodygroups = bodygroups;
         }
         Message::InstallRequested
-            if !state.busy()
-                && !state.installed_mutation_busy()
-                && state.preview_request().is_some() =>
+            if !state.busy() && !state.installed_mutation_busy() && state.can_preview() =>
         {
             state.install_confirmation = true;
             state.install_result = None;
@@ -841,7 +839,7 @@ mod tests {
                 warnings: vec![],
                 compiled: true,
             },
-            _directory: directory,
+            _directory: Some(directory),
         });
         state.preview_dirty = false;
         state.preview_export_dirty = false;
@@ -1001,7 +999,7 @@ mod tests {
         };
         state.preview = Some(super::super::PreviewBuild {
             result: result.clone(),
-            _directory: directory,
+            _directory: Some(directory),
         });
         state.preview_dirty = false;
         update(&mut state, Message::AutomaticAxesChanged(false));
@@ -1021,7 +1019,7 @@ mod tests {
                         directory: replacement_directory.path().to_path_buf(),
                         ..result.clone()
                     },
-                    _directory: replacement_directory,
+                    _directory: Some(replacement_directory),
                 }),
             ),
         );

@@ -346,8 +346,9 @@ fn load_model(mdl_path: &Path, cancelled: &AtomicBool) -> Result<LoadedModel, De
         .get_mut(180..184)
         .ok_or_else(|| invalid("Truncated MDL header"))?
         .fill(0);
-    let model =
+    let mut model =
         mdl::parse_mdl(&geometry_header, &limits).map_err(|error| invalid(error.to_string()))?;
+    normalize_material_names(&mut model);
     let raw_vvd = read_input(&vvd_path)?;
     let raw_vtx = read_input(&vtx_path)?;
     let ani = if u32_at(&raw_mdl, 352).unwrap_or(0) > 1 {
@@ -382,6 +383,12 @@ fn load_model(mdl_path: &Path, cancelled: &AtomicBool) -> Result<LoadedModel, De
         raw_vtx,
         ani,
     })
+}
+
+fn normalize_material_names(model: &mut Mdl) {
+    for name in &mut model.textures {
+        *name = mdlc::mdl_writer::normalize_texture_name(name, &[]);
+    }
 }
 
 struct ExportFiles<'a> {
@@ -469,7 +476,7 @@ fn reference_smd(
                         .ok_or_else(|| invalid("A triangle references an absent vertex"))?;
                     triangle.push(vertex);
                     if triangle.len() == 3 {
-                        writeln!(text, "{material}").unwrap();
+                        writeln!(text, "{}", quoted(material)?).unwrap();
                         for vertex in &triangle {
                             write_vertex(
                                 &mut text,
@@ -762,7 +769,7 @@ fn safe_model_name(name: &str) -> Result<String, DecompileError> {
 
 fn validate_material(name: &str) -> Result<(), DecompileError> {
     quoted(name)?;
-    if name.is_empty() || name.chars().any(char::is_whitespace) {
+    if name.trim().is_empty() || name.contains("//") {
         return Err(invalid(
             "A material name cannot be represented safely in SMD",
         ));

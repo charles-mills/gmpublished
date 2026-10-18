@@ -143,6 +143,8 @@ pub mod icons {
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
     svg_icon!(eye_off, "../ui/icons/eye-off.svg");
     svg_icon!(folder, "../ui/icons/folder.svg");
+    // Lucide Flask Conical (ISC), restroked to 1.5 to match the existing set.
+    svg_icon!(flask, "../ui/icons/flask.svg");
     svg_icon!(play, "../ui/icons/play.svg");
     svg_icon!(folder_add, "../ui/icons/folder-add.svg");
     // Lucide (ISC), restroked to 1.5 to sit with the rest of the set.
@@ -169,6 +171,7 @@ pub mod icons {
         route_installed_addons,
         "../ui/icons/route-installed-addons.svg"
     );
+    // Lucide Pencil Ruler (ISC), restroked to 1.5 to match the existing set.
     svg_icon!(route_models, "../ui/icons/route-models.svg");
     svg_icon!(route_my_workshop, "../ui/icons/route-my-workshop.svg");
     svg_icon!(route_size_analyzer, "../ui/icons/route-size-analyzer.svg");

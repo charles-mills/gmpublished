@@ -38,7 +38,7 @@ pub const DEFAULT_FPS: f32 = 30.0;
 /// `srcaxis` 指定的目标上轴。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForcedAxis {
-    /// Normalize the coordinate system declared by the source format to Z-up.
+    /// Preserve authored object transforms and normalize the declared axes to Z-up.
     Auto,
     /// 文件按 **Y-up** 写（FBX 的常见默认），转换到 Source 的 Z-up。
     Y,
@@ -634,6 +634,155 @@ pub fn read_frames(
         .map(|i| (bake.nodes[i].typed_id, i))
         .collect();
 
+    if opts.axis == Some(ForcedAxis::Auto) {
+        let unsupported = |node: &ufbx::Node| {
+            ferr(format!(
+                "{}: animation {:?}, node {:?} changes scale or shear that Source bones cannot represent. Bake the deformation to supported vertex animation or export a rig with fixed scale and shear.",
+                path.display(),
+                animation.element.name.as_ref(),
+                node.element.name.as_ref(),
+            ))
+        };
+        // Inspect all baked scale keys as well as output frames, so short scale
+        // changes between requested samples cannot silently disappear.
+        for node in &kept {
+            if let Some(baked) = baked_of
+                .get(&node.element.typed_id)
+                .map(|&i| &bake.nodes[i])
+                && let Some(first) = baked.scale_keys.first()
+                && baked.scale_keys.iter().any(|key| {
+                    [first.value.x, first.value.y, first.value.z]
+                        .into_iter()
+                        .zip([key.value.x, key.value.y, key.value.z])
+                        .any(|(a, b)| (a - b).abs() > a.abs().max(b.abs()) * 1e-6)
+                })
+            {
+                return Err(unsupported(node));
+            }
+        }
+        let bind = bind_worlds(&scene);
+        let reference = kept
+            .iter()
+            .map(|node| {
+                bind.get(&node.element.element_id)
+                    .copied()
+                    .unwrap_or(node.node_to_world)
+            })
+            .collect::<Vec<_>>();
+        let mut samples = (0..n_frames)
+            .map(|frame| {
+                (
+                    bake.playback_time_begin + frame as f64 / f64::from(fps),
+                    Some(frame),
+                )
+            })
+            .collect::<Vec<_>>();
+        // A rotation beneath nonuniform scale can introduce shear only between
+        // output frames, even when both endpoint affines are representable.
+        for node in &kept {
+            if let Some(baked) = baked_of
+                .get(&node.element.typed_id)
+                .map(|&i| &bake.nodes[i])
+                && !baked.constant_rotation
+            {
+                samples.extend(baked.rotation_keys.iter().map(|key| (key.time, None)));
+                samples.extend(
+                    baked
+                        .rotation_keys
+                        .windows(2)
+                        .map(|keys| ((keys[0].time + keys[1].time) * 0.5, None)),
+                );
+            }
+        }
+        samples.retain(|(time, output)| {
+            output.is_some()
+                || (time.is_finite()
+                    && *time >= bake.playback_time_begin
+                    && *time <= bake.playback_time_end)
+        });
+        samples.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        samples.dedup_by(|a, b| a.0 == b.0);
+        if samples
+            .len()
+            .checked_mul(kept.len().max(1))
+            .is_none_or(|poses| poses > 2_000_000)
+        {
+            return Err(ferr(
+                "FBX animation exceeds the deformation validation limit",
+            ));
+        }
+        let mut frames = Vec::with_capacity(n_frames);
+        for (time, output_frame) in samples {
+            // Native evaluation retains FBX inheritance, pivots and scale
+            // compensation, which a parent * local reconstruction does not.
+            let evaluated = ufbx::evaluate_scene(
+                &scene,
+                &animation.anim,
+                time,
+                ufbx::EvaluateOpts {
+                    temp_allocator: ufbx::AllocatorOpts {
+                        memory_limit: 512 * 1024 * 1024,
+                        ..Default::default()
+                    },
+                    result_allocator: ufbx::AllocatorOpts {
+                        memory_limit: 512 * 1024 * 1024,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| {
+                ferr(format!(
+                    "{}: animation evaluation failed: {error:?}",
+                    path.display()
+                ))
+            })?;
+            for (index, node) in kept.iter().enumerate() {
+                let world = &evaluated.nodes[node.element.typed_id as usize].node_to_world;
+                if !affine_motion_supported(&reference[index], world) {
+                    return Err(unsupported(node));
+                }
+            }
+            let Some(fi) = output_frame else { continue };
+            let mut poses = Vec::with_capacity(kept.len());
+            for (index, node) in kept.iter().enumerate() {
+                let world = &evaluated.nodes[node.element.typed_id as usize].node_to_world;
+                let parent = (nodes[index].parent >= 0).then(|| {
+                    &evaluated.nodes[kept[nodes[index].parent as usize].element.typed_id as usize]
+                        .node_to_world
+                });
+                let (position, rotation) = affine_local_pose(world, parent);
+                let (position, rotation) = opts.local(ufbx::Transform {
+                    translation: position,
+                    rotation,
+                    scale: ufbx::Vec3 {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 1.0,
+                    },
+                });
+                poses.push(SmdPose {
+                    bone: index as i32,
+                    position: [position.x as f32, position.y as f32, position.z as f32],
+                    rotation: quat_to_source_euler(rotation),
+                });
+            }
+            frames.push(SmdFrame {
+                time: fi as i32,
+                poses,
+            });
+        }
+        return Ok(converted_smd(
+            Smd {
+                version: 1,
+                nodes,
+                frames,
+                triangles: Vec::new(),
+            },
+            axes.as_ref(),
+        ));
+    }
+
     let mut frames: Vec<SmdFrame> = Vec::with_capacity(n_frames);
     // 世界矩阵要按帧重算（父链的缩放/旋转会随动画变化），所以先备好
     // 「每个场景节点在本帧的局部矩阵」的复用缓冲。
@@ -680,20 +829,22 @@ pub fn read_frames(
             let mi = node_ix.get(&n.element.element_id).copied();
             // 位移口径与参考姿态完全一致（见 [`bone_offset`]）：父链的缩放
             // 会随动画变化，所以这里也必须逐帧重算，不能沿用局部平移。
-            let pos = match mi {
-                Some(mi) => match n
-                    .parent
-                    .as_ref()
-                    .and_then(|p| node_ix.get(&p.element.element_id))
-                {
-                    Some(&pi) => bone_offset(&world[pi], &world[mi]),
-                    // 根骨骼没有父链可除，但自己那份累积缩放仍要除掉（见
-                    // [`normalized_translation`]）。
-                    None => normalized_translation(&world[mi]),
-                },
-                None => n.local_transform.translation,
+            let (pos, rot) = {
+                let pos = match mi {
+                    Some(mi) => match n
+                        .parent
+                        .as_ref()
+                        .and_then(|p| node_ix.get(&p.element.element_id))
+                    {
+                        Some(&pi) => bone_offset(&world[pi], &world[mi]),
+                        // 根骨骼没有父链可除，但自己那份累积缩放仍要除掉（见
+                        // [`normalized_translation`]）。
+                        None => normalized_translation(&world[mi]),
+                    },
+                    None => n.local_transform.translation,
+                };
+                (pos, mi.map_or(n.local_transform.rotation, |mi| rots[mi]))
             };
-            let rot = mi.map_or(n.local_transform.rotation, |mi| rots[mi]);
             let (pos, rot) = opts.local(ufbx::Transform {
                 translation: pos,
                 rotation: rot,
@@ -994,6 +1145,80 @@ pub(crate) fn local_rotation(
     ufbx::matrix_to_transform(&rel).rotation
 }
 
+// SMD bones cannot carry scale. Auto import bakes it into vertices, so their
+// rigid bone hierarchy must retain the corresponding full world-space origins.
+pub(crate) fn rigid_world_matrix(matrix: &ufbx::Matrix) -> ufbx::Matrix {
+    let mut transform = ufbx::matrix_to_transform(matrix);
+    transform.translation = translation_of(matrix);
+    // Sheared bases can produce a non-unit quaternion during decomposition.
+    transform.rotation = ufbx::quat_normalize(transform.rotation);
+    transform.scale = ufbx::Vec3 {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+    };
+    ufbx::transform_to_matrix(&transform)
+}
+
+pub(crate) fn affine_local_pose(
+    world: &ufbx::Matrix,
+    parent: Option<&ufbx::Matrix>,
+) -> (ufbx::Vec3, ufbx::Quat) {
+    let world = rigid_world_matrix(world);
+    let local = parent.map_or(world, |parent| {
+        ufbx::matrix_mul(&ufbx::matrix_invert(&rigid_world_matrix(parent)), &world)
+    });
+    let transform = ufbx::matrix_to_transform(&local);
+    (
+        transform.translation,
+        ufbx::quat_normalize(transform.rotation),
+    )
+}
+
+fn linear_columns(matrix: &ufbx::Matrix) -> [[f64; 3]; 3] {
+    [
+        [matrix.m00, matrix.m10, matrix.m20],
+        [matrix.m01, matrix.m11, matrix.m21],
+        [matrix.m02, matrix.m12, matrix.m22],
+    ]
+}
+
+fn valid_affine(matrix: &ufbx::Matrix) -> bool {
+    let determinant = ufbx::matrix_determinant(matrix);
+    determinant.is_finite()
+        && determinant != 0.0
+        && linear_columns(matrix)
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+        && [matrix.m03, matrix.m13, matrix.m23]
+            .iter()
+            .all(|value| value.is_finite())
+}
+
+// Any affine part removed from the bones must stay fixed in their local space:
+// animation can then use rigid poses without changing the baked deformation.
+pub(crate) fn affine_motion_supported(reference: &ufbx::Matrix, sample: &ufbx::Matrix) -> bool {
+    if !valid_affine(reference) || !valid_affine(sample) {
+        return false;
+    }
+    let residual = |world: &ufbx::Matrix| {
+        linear_columns(&ufbx::matrix_mul(
+            &ufbx::matrix_invert(&rigid_world_matrix(world)),
+            world,
+        ))
+    };
+    residual(reference)
+        .into_iter()
+        .zip(residual(sample))
+        .all(|(a, b)| {
+            let magnitude = a.iter().chain(&b).map(|v| v.abs()).fold(0.0, f64::max);
+            a.into_iter()
+                .zip(b)
+                .all(|(a, b)| (a - b).abs() <= magnitude * 1e-5)
+        })
+}
+
 /// 参考姿态（= 源的第 0 帧）：旋转取子相对父的旋转，位移取 [`bone_offset`]。
 ///
 /// 官方 `Build_Reference()`（`studiomdl.cpp:728-762`）用源的第 0 帧；FBX 源的
@@ -1005,7 +1230,11 @@ fn reference_poses(scene: &ufbx::Scene, kept: &[&ufbx::Node], opts: &FbxOpts) ->
     let locals: Vec<ufbx::Matrix> = (0..scene.nodes.len())
         .map(|i| ufbx::transform_to_matrix(&scene.nodes[i].local_transform))
         .collect();
-    let world = accumulate_worlds(scene, &locals);
+    let world = if opts.axis == Some(ForcedAxis::Auto) {
+        scene.nodes.iter().map(|node| node.node_to_world).collect()
+    } else {
+        accumulate_worlds(scene, &locals)
+    };
     // 有绑定姿态就用绑定姿态，没有（静态道具 / 合成根）就退回节点自己的 rest 世界
     // 矩阵 —— 两者混用不会串空间：绑定姿态本身就是世界矩阵，只是被拿来当父链的基。
     let bind = bind_worlds(scene);
@@ -1021,6 +1250,15 @@ fn reference_poses(scene: &ufbx::Scene, kept: &[&ufbx::Node], opts: &FbxOpts) ->
         .map(|(i, n)| {
             let mi = ix.get(&n.element.element_id).copied();
             let (pos, rot) = match mi {
+                Some(mi) if opts.axis == Some(ForcedAxis::Auto) => {
+                    let parent = n
+                        .parent
+                        .as_ref()
+                        .filter(|parent| !parent.is_root)
+                        .and_then(|parent| ix.get(&parent.element.element_id))
+                        .map(|&pi| &pose_world[pi]);
+                    affine_local_pose(&pose_world[mi], parent)
+                }
                 Some(mi) => match n
                     .parent
                     .as_ref()
@@ -1102,8 +1340,14 @@ pub fn load_scene(path: &Path, at: &str) -> Result<Rc<ufbx::SceneRoot>, FbxError
     let bytes = std::fs::read(path)
         .map_err(|err| ferr(format!("{at}：读不到 {}：{err}", path.display())))?;
     let scene = Rc::new(
-        ufbx::load_memory(&bytes, ufbx::LoadOpts::default())
-            .map_err(|err| ferr(format!("{at}：{} 解析失败：{err:?}", path.display())))?,
+        ufbx::load_memory(
+            &bytes,
+            ufbx::LoadOpts {
+                generate_missing_normals: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|err| ferr(format!("{at}：{} 解析失败：{err:?}", path.display())))?,
     );
     SCENE_CACHE.with(|cache| {
         if let Some(cache) = cache.borrow_mut().as_mut() {
@@ -1298,6 +1542,50 @@ fn smd_nodes(scene: &ufbx::Scene, kept: &[&ufbx::Node]) -> Vec<SmdNode> {
         .collect()
 }
 
+// FBX stores a skinned mesh in bind geometry space even when its current
+// node transform differs. Every influencing cluster must agree on that space.
+fn bind_geometry_matrix(node: &ufbx::Node, mesh: &ufbx::Mesh) -> Result<ufbx::Matrix, FbxError> {
+    let mut bind = None;
+    for deformer in &mesh.skin_deformers {
+        for cluster in &deformer.clusters {
+            if cluster.num_weights == 0 || cluster.bone_node.is_none() {
+                continue;
+            }
+            let candidate = ufbx::matrix_mul(&cluster.bind_to_world, &cluster.geometry_to_bone);
+            if let Some(reference) = bind {
+                let a = linear_columns(&reference).into_iter().flatten().chain([
+                    reference.m03,
+                    reference.m13,
+                    reference.m23,
+                ]);
+                let b = linear_columns(&candidate).into_iter().flatten().chain([
+                    candidate.m03,
+                    candidate.m13,
+                    candidate.m23,
+                ]);
+                if a.zip(b)
+                    .any(|(a, b)| (a - b).abs() > a.abs().max(b.abs()).max(1.0) * 1e-5)
+                {
+                    return Err(ferr(format!(
+                        "Mesh {:?} has inconsistent skin bind transforms. Rebind the mesh before exporting to Source.",
+                        node.element.name.as_ref(),
+                    )));
+                }
+            } else {
+                bind = Some(candidate);
+            }
+        }
+    }
+    let matrix = bind.unwrap_or(node.geometry_to_world);
+    if !valid_affine(&matrix) {
+        return Err(ferr(format!(
+            "Mesh {:?} has a singular or invalid bind transform. Remove zero scale before exporting to Source.",
+            node.element.name.as_ref(),
+        )));
+    }
+    Ok(matrix)
+}
+
 fn from_scene(
     scene: &ufbx::Scene,
     opts: &FbxOpts,
@@ -1342,6 +1630,18 @@ fn from_scene(
         let mesh_name = n.element.name.to_string();
         merged_meshes.push(mesh_name.clone());
         let node_ix = idx_of.get(&n.element.element_id).copied();
+        let affine = opts.axis == Some(ForcedAxis::Auto);
+        let geometry_matrix = if affine {
+            bind_geometry_matrix(n, mesh)?
+        } else {
+            n.geometry_to_world
+        };
+        let g = &geometry_matrix;
+        let normal_matrix = affine.then(|| ufbx::matrix_for_normals(g));
+        let reflected = affine
+            && g.m00 * (g.m11 * g.m22 - g.m12 * g.m21) - g.m01 * (g.m10 * g.m22 - g.m12 * g.m20)
+                + g.m02 * (g.m10 * g.m21 - g.m11 * g.m20)
+                < 0.0;
 
         // ⚠️ FBX 的 `offset_vertices` 是**每个 mesh 内**的控制点号，而 mdlc 把
         // 全部节点的三角形拼进**同一个** `Smd` ⟹ 多网格文件（`twomesh.fbx`）
@@ -1349,7 +1649,7 @@ fn from_scene(
         // 号段，`SmdVertex::src_index` 与 shape key 的 `vertex_index` 共用它。
         let cp_off = cp_base;
         cp_base += mesh.num_vertices as u32;
-        shape_keys.extend(shape_keys_of(mesh, &n.geometry_to_world, cp_off, opts));
+        shape_keys.extend(shape_keys_of(mesh, g, cp_off, opts));
 
         for f in 0..mesh.num_faces {
             let face = mesh.faces[f];
@@ -1369,8 +1669,11 @@ fn from_scene(
                     let vi = mesh.vertex_indices[corner] as usize;
                     // 网格自己的 `geometry_to_world`（含那个 m→cm 缩放与节点
                     // 旋转）。顶点口径见 [`geometry_point`] / [`geometry_normal`]。
-                    let g = &n.geometry_to_world;
-                    let p = opts.point(geometry_point(g, mesh.vertex_position[corner]));
+                    let p = opts.point(if affine {
+                        ufbx::transform_position(g, mesh.vertex_position[corner])
+                    } else {
+                        geometry_point(g, mesh.vertex_position[corner])
+                    });
                     let local_nrm = if mesh.vertex_normal.exists {
                         mesh.vertex_normal[corner]
                     } else {
@@ -1380,7 +1683,10 @@ fn from_scene(
                             z: 1.0,
                         }
                     };
-                    let nrm = opts.direction(geometry_normal(g, local_nrm));
+                    let nrm = opts.direction(normal_matrix.as_ref().map_or_else(
+                        || geometry_normal(g, local_nrm),
+                        |matrix| ufbx::vec3_normalize(ufbx::transform_direction(matrix, local_nrm)),
+                    ));
                     let uv = if mesh.vertex_uv.exists {
                         let u = mesh.vertex_uv[corner];
                         // ⚠️ V 轴翻转（SMD 解析器里有这一步，FBX 路径不经过它）。
@@ -1430,6 +1736,9 @@ fn from_scene(
                         // `vertex_index` 用的是同一套号。
                         src_index: cp_off + vi as u32,
                     });
+                }
+                if reflected {
+                    vs.swap(1, 2);
                 }
                 triangles.push(SmdTriangle {
                     material: mat.clone(),
@@ -1577,15 +1886,24 @@ fn shape_keys_of(
                     y: p.y,
                     z: p.z,
                 };
-                let delta = opts.point(geometry_normal(geometry_to_world, raw));
+                let delta = opts.point(if opts.axis == Some(ForcedAxis::Auto) {
+                    ufbx::transform_direction(geometry_to_world, raw)
+                } else {
+                    geometry_normal(geometry_to_world, raw)
+                });
                 let d32 = [delta.x as f32, delta.y as f32, delta.z as f32];
                 if d32[0] * d32[0] + d32[1] * d32[1] + d32[2] * d32[2] <= MIN_DELTA_SQR {
                     continue;
                 }
-                let nn = shape.normal_offsets[k];
+                // FBX shapes may omit normal offsets while retaining position offsets.
+                let nn = shape.normal_offsets.get(k).copied().unwrap_or(ufbx::Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                });
                 let nn = if opts.axis == Some(ForcedAxis::Auto) {
-                    geometry_normal(
-                        geometry_to_world,
+                    ufbx::transform_direction(
+                        &ufbx::matrix_for_normals(geometry_to_world),
                         ufbx::Vec3 {
                             x: nn.x,
                             y: nn.y,

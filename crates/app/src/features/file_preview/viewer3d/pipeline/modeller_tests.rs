@@ -107,7 +107,6 @@ fn render_uniform_quad(staged: bool, animated: bool, lods: bool) {
     let scene = Arc::make_mut(&mut preview.scene);
     scene.meshes = vec![mesh];
     scene.materials = vec![MaterialSlot {
-        tint_base: None,
         name: "test".to_owned(),
         texture: None,
         texture2: None,

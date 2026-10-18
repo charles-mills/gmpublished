@@ -11,6 +11,8 @@ use crate::model_materials;
 
 #[path = "model_project/portable_qc.rs"]
 mod portable_qc;
+#[path = "model_project/publication.rs"]
+mod publication;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelStage {
@@ -83,8 +85,9 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
         ));
     }
     let mut desc = model_compile::load_description(request, &source, base)?;
+    let mut inputs = portable_qc::input_files(request, &desc, &source)?;
     if model_compile::authoring::model_settings(&source)?.is_some() {
-        return save_source_authoring_qc(request, path, &destination);
+        return save_source_authoring_qc(request, path, &destination, &inputs);
     }
     let _authoring_assets = model_compile::authoring::prepare_assets(&mut desc, &source)?;
     desc.model.version = Some(48);
@@ -443,14 +446,7 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
             );
         }
         let directories = &compiled.desc.materials.search_paths;
-        let imported = compiled
-            .desc
-            .materials
-            .textures
-            .iter()
-            .filter(|material| !variants.iter().any(|variant| variant.name == material.name))
-            .map(|material| material.name.clone())
-            .collect::<Vec<_>>();
+        let imported = model_materials::source_material_names(&compiled.desc, &variants);
         let mut prepared =
             model_materials::prepare_materials_for_sources(&imported, directories, base, &sources)?;
         model_materials::prepare_skin_materials(&mut prepared, &variants, directories, base)?;
@@ -464,6 +460,7 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
             }
         }
         prepared.write_to(&files_root)?;
+        inputs.extend(prepared.source_paths);
         for asset in prepared.assets {
             writes.push(asset.relative_path);
         }
@@ -471,13 +468,14 @@ pub fn save_model_qc(request: &ModelCompileRequest, path: &Path) -> Result<(), M
     stage_asset(&files_root, Path::new(filename), qc.as_bytes(), &mut writes)?;
     let candidate = files_root.join(filename);
     validate_saved_qc(&qc, &candidate, (source_extension == "qc").then_some(&desc))?;
-    publish_qc(stage, &files_root, &destination, writes)
+    publish_qc(stage, &files_root, &destination, writes, filename, &inputs)
 }
 
 fn save_source_authoring_qc(
     request: &ModelCompileRequest,
     path: &Path,
     destination: &Path,
+    inputs: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), ModelCompileError> {
     let stage = tempfile::Builder::new()
         .prefix(".gmpublished-qc-")
@@ -485,7 +483,12 @@ fn save_source_authoring_qc(
         .map_err(|error| io_error(path, error))?;
     let mut compile_request = request.clone();
     compile_request.destination = stage.path().join("compiled");
-    let output = model_compile::compile_model(&compile_request)?;
+    let mut inputs = inputs.clone();
+    let (output, source_paths) = model_compile::compile_model_with_material_sources(
+        &compile_request,
+        &AtomicBool::new(false),
+    )?;
+    inputs.extend(source_paths);
     let model = output
         .files
         .iter()
@@ -542,7 +545,7 @@ fn save_source_authoring_qc(
         .ok_or_else(|| invalid("QC filename is required"))?;
     stage_asset(&files_root, Path::new(filename), qc.as_bytes(), &mut writes)?;
     validate_saved_qc(&qc, &files_root.join(filename), Some(&original))?;
-    publish_qc(stage, &files_root, destination, writes)
+    publish_qc(stage, &files_root, destination, writes, filename, &inputs)
 }
 
 fn validate_saved_qc(
@@ -586,25 +589,10 @@ fn publish_qc(
     files_root: &Path,
     destination: &Path,
     writes: Vec<PathBuf>,
+    filename: &std::ffi::OsStr,
+    inputs: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), ModelCompileError> {
-    let files = writes
-        .into_iter()
-        .map(|relative| ModelOutputFile {
-            path: destination.join(&relative),
-            bytes: 0,
-            kind: ModelOutputKind::Material,
-        })
-        .collect::<Vec<_>>();
-    let _export = model_compile::EXPORT_LOCK.lock();
-    model_compile::publish(
-        stage,
-        files_root,
-        destination,
-        &files,
-        &[],
-        true,
-        &AtomicBool::new(false),
-    )
+    publication::publish(stage, files_root, destination, writes, filename, inputs)
 }
 
 fn skin_group(desc: &mdlc::model::ModelDesc) -> Result<String, ModelCompileError> {
@@ -668,7 +656,7 @@ fn mesh_smd<'a>(
         let name = &compiled.desc.materials.textures[mesh.material].name;
         smd_material(name)?;
         for triangle in &mesh.triangles {
-            writeln!(result, "{name}").unwrap();
+            writeln!(result, "{}", quote(name)?).unwrap();
             for index in [triangle[0], triangle[2], triangle[1]] {
                 let vertex = &mesh.vertices[index as usize];
                 let p = inverse_source_rotation(vertex.pos);
@@ -726,7 +714,7 @@ pub(crate) fn source_smd(source: &mdlc::smd::Smd) -> Result<String, ModelCompile
     result.push_str("end\ntriangles\n");
     for triangle in &source.triangles {
         smd_material(&triangle.material)?;
-        writeln!(result, "{}", triangle.material).unwrap();
+        writeln!(result, "{}", quote(&triangle.material)?).unwrap();
         for vertex in &triangle.vertices {
             write!(
                 result,
@@ -803,7 +791,7 @@ fn collision_smd(
         let angle = piece as f32 * std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
         let normal = [radius * angle.cos(), radius * angle.sin(), height];
         for triangle in &hull.faces {
-            writeln!(result, "{}", material.name).unwrap();
+            writeln!(result, "{}", quote(&material.name)?).unwrap();
             for &index in triangle {
                 let p = hull.vertices[index as usize];
                 writeln!(
@@ -926,49 +914,16 @@ impl<'a> SourceCopier<'a> {
                         ))
                     })?;
                 for texture in &scene.textures {
-                    if !texture.content.is_empty()
-                        || texture
-                            .video
-                            .as_ref()
-                            .is_some_and(|video| !video.content.is_empty())
+                    if let Some((relative, path)) =
+                        model_materials::resolve_fbx_texture_file(source, texture)?
                     {
-                        continue;
-                    }
-                    let embedded = format!(
-                        "{}.fbm",
-                        source.file_stem().unwrap_or_default().to_string_lossy()
-                    );
-                    'texture: for name in [
-                        texture.relative_filename.as_ref(),
-                        texture.filename.as_ref(),
-                    ] {
-                        if name.is_empty() {
-                            continue;
-                        }
-                        let name = name.replace('\\', "/");
-                        let basename = name.rsplit('/').next().unwrap();
-                        for candidate in [
-                            name.clone(),
-                            basename.into(),
-                            format!("textures/{basename}"),
-                            format!("{embedded}/{basename}"),
-                            format!("{embedded}/{name}"),
-                        ] {
-                            let candidate_path = Path::new(&candidate);
-                            if candidate_path.is_absolute() || candidate.contains(':') {
-                                continue;
-                            }
-                            let relative = source
-                                .parent()
-                                .unwrap()
-                                .strip_prefix(self.base)
-                                .unwrap()
-                                .join(candidate_path);
-                            if let Some(path) = self.find(&relative)? {
-                                self.copy_file(&relative, &path)?;
-                                break 'texture;
-                            }
-                        }
+                        let relative = source
+                            .parent()
+                            .unwrap()
+                            .strip_prefix(self.base)
+                            .map_err(|_| ModelCompileError::UnsafePath(source.to_owned()))?
+                            .join(relative);
+                        self.copy_file(&relative, &path)?;
                     }
                 }
             }

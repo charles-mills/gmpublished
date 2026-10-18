@@ -79,6 +79,53 @@ pub struct Draw {
     pub blend: RenderMode,
 }
 
+pub(super) fn scene_spans(world: &[Draw], stage: &[Draw]) -> Vec<(bool, Range<usize>)> {
+    if world.is_empty() {
+        return if stage.is_empty() {
+            Vec::new()
+        } else {
+            vec![(true, 0..stage.len())]
+        };
+    }
+    if stage.is_empty() {
+        return vec![(false, 0..world.len())];
+    }
+    fn append(spans: &mut Vec<(bool, Range<usize>)>, staged: bool, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        if let Some((previous_scene, previous)) = spans.last_mut()
+            && *previous_scene == staged
+            && previous.end == range.start
+        {
+            previous.end = range.end;
+        } else {
+            spans.push((staged, range));
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut world_start = 0;
+    let mut stage_start = 0;
+    // BSP traversal and receiver marks already constrain world order. Insert the
+    // staged queue at depth barriers without sorting those world operations.
+    while world_start < world.len() {
+        let depth = world[world_start].depth;
+        let world_end = (world_start + 1..world.len())
+            .find(|&index| world[index].depth.total_cmp(&depth).is_ne())
+            .unwrap_or(world.len());
+        let stage_end = (stage_start..stage.len())
+            .find(|&index| stage[index].depth.total_cmp(&depth).is_le())
+            .unwrap_or(stage.len());
+        append(&mut spans, true, stage_start..stage_end);
+        append(&mut spans, false, world_start..world_end);
+        stage_start = stage_end;
+        world_start = world_end;
+    }
+    append(&mut spans, true, stage_start..stage.len());
+    spans
+}
+
 struct DrawGroup {
     depth: f32,
     operations: Range<usize>,
@@ -436,9 +483,23 @@ fn flatten_groups(draws: &[Draw], groups: &mut [DrawGroup]) -> Vec<Draw> {
     groups.sort_by(|a, b| b.depth.total_cmp(&a.depth));
     let mut ordered = Vec::with_capacity(draws.len());
     for group in groups {
-        ordered.extend_from_slice(&draws[group.operations.clone()]);
+        append_group(&mut ordered, draws, group);
     }
     ordered
+}
+
+fn append_group(ordered: &mut Vec<Draw>, draws: &[Draw], group: &DrawGroup) {
+    // Preserve the owner's sort depth after flattening so other scenes cannot
+    // interleave geometry with its attached receiver marks.
+    ordered.extend(
+        draws[group.operations.clone()]
+            .iter()
+            .cloned()
+            .map(|mut draw| {
+                draw.depth = group.depth;
+                draw
+            }),
+    );
 }
 
 fn sort_draws(draws: &mut [Draw]) {

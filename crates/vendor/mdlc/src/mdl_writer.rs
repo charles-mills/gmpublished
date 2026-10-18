@@ -1076,6 +1076,21 @@ fn strip_vtf_ext(s: &str) -> String {
     s.to_string()
 }
 
+/// Source removes the final extension during material lookup. Retain dotted
+/// logical basenames by providing an explicit VMT extension in serialized names.
+pub fn material_lookup_name(name: &str) -> String {
+    let logical = strip_vtf_ext(name);
+    if logical
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|basename| basename.contains('.'))
+    {
+        format!("{logical}.vmt")
+    } else {
+        name.to_owned()
+    }
+}
+
 /// 生成 `bonetablebyname`：骨骼下标按**骨骼名升序**排列的 `byte[numbones]`。
 ///
 /// # 官方语义
@@ -1656,7 +1671,7 @@ fn build_string_pool(
     let mut tex_name_offsets = Vec::with_capacity(desc.materials.textures.len());
     for t in &desc.materials.textures {
         let n = normalize_texture_name(&t.name, &desc.materials.search_paths);
-        tex_name_offsets.push(reg!(&n));
+        tex_name_offsets.push(reg!(&material_lookup_name(&n)));
     }
     let mut cd_offsets = Vec::with_capacity(desc.materials.search_paths.len());
     for p in &desc.materials.search_paths {
@@ -5215,6 +5230,24 @@ end
         assert_eq!(&b[at..at + end], b"myprop");
         // flags 在 0x04，不在 0x40。
         assert_eq!(tex_off::FLAGS, 0x04);
+    }
+
+    #[test]
+    fn dotted_material_lookup_names_keep_their_suffix_in_source() {
+        for (logical, serialized) in [
+            ("Mat.001", "Mat.001.vmt"),
+            ("Mat", "Mat"),
+            ("directory.with.dot/Mat", "directory.with.dot/Mat"),
+            ("directory/Mat.003", "directory/Mat.003.vmt"),
+        ] {
+            let mut model = minimal();
+            model.desc.materials.textures[0].name = logical.into();
+            let output = write_mdl(&model).unwrap();
+            let parsed =
+                vformats::mdl::parse_mdl(&output.bytes, &vformats::Limits::default()).unwrap();
+            assert_eq!(parsed.textures, [serialized]);
+            assert_eq!(model.desc.materials.textures[0].name, logical);
+        }
     }
 
     #[test]

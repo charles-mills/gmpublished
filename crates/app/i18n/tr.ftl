@@ -496,6 +496,7 @@ workshop-text-invalid = { $language } için başlığı (1–128 UTF-8 baytı) v
 workshop-text-save-failed = { $language } kaydedilemedi. Kaydedilen değişiklikler korundu; kalanları yeniden deneyin.
 
 models = Modeller
+models-experimental = Deneysel
 models-description = Garry's Mod için model kaynaklarını derleyin veya derlenmiş modellerden düzenlenebilir kaynakları kurtarın.
 models-import = Model içe aktar...
 models-import-hint = Bir model dosyası seçin veya buraya bırakın.

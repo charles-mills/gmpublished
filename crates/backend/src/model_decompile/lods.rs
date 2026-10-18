@@ -292,7 +292,10 @@ fn read_material_replacements(
                     "LOD 0 material replacements cannot be represented in QC",
                 ));
             }
-            replacements.push([source.clone(), target.to_owned()]);
+            replacements.push([
+                source.clone(),
+                mdlc::mdl_writer::normalize_texture_name(target, &[]),
+            ]);
         }
     }
     if root_lod > 0
