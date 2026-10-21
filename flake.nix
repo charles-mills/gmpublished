@@ -3,9 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    build-nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay = {
       url = "git+https://github.com/oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs.follows = "build-nixpkgs";
     };
   };
 
@@ -13,6 +14,7 @@
     {
       self,
       nixpkgs,
+      build-nixpkgs,
       rust-overlay,
     }:
     let
@@ -22,17 +24,17 @@
         "aarch64-darwin"
       ];
 
-      eachSystem = nixpkgs.lib.genAttrs systems;
+      eachSystem = build-nixpkgs.lib.genAttrs systems;
 
       pkgsFor =
-        system:
-        import nixpkgs {
+        nixpkgsInput: system:
+        import nixpkgsInput {
           inherit system;
           overlays = [ self.overlays.default ];
         };
     in
     {
-      overlays.default = nixpkgs.lib.composeManyExtensions [
+      overlays.default = build-nixpkgs.lib.composeManyExtensions [
         rust-overlay.overlays.default
         (
           final: _prev:
@@ -52,7 +54,7 @@
       packages = eachSystem (
         system:
         let
-          pkgs = pkgsFor system;
+          pkgs = pkgsFor build-nixpkgs system;
         in
         {
           default = pkgs.gmpublished;
@@ -60,11 +62,10 @@
         }
       );
 
-      # `nix flake check` builds `checks` but only evaluates `packages`.
       checks = eachSystem (
         system:
         let
-          pkgs = pkgsFor system;
+          pkgs = pkgsFor build-nixpkgs system;
         in
         {
           gmpublished = pkgs.gmpublished;
@@ -74,10 +75,9 @@
       devShells = eachSystem (
         system:
         let
-          pkgs = pkgsFor system;
+          pkgs = pkgsFor nixpkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
-          # Must match `runtimeLibs` in packaging/nix/package.nix.
           nativeLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.alsa-lib
             pkgs.dbus
@@ -120,6 +120,6 @@
         };
       });
 
-      formatter = eachSystem (system: (pkgsFor system).nixfmt);
+      formatter = eachSystem (system: (pkgsFor nixpkgs system).nixfmt);
     };
 }
